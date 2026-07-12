@@ -6,6 +6,7 @@ from time import monotonic, sleep
 import numpy as np
 import pytest
 
+import interview_assistant.stt.worker as stt_worker
 from interview_assistant.audio.models import AudioFrame, AudioSource
 from interview_assistant.stt.engine import TranscriptHypothesis, TranscriptionResult
 from interview_assistant.stt.worker import (
@@ -230,6 +231,89 @@ def test_plain_hypothesis_queue_preserves_in_flight_join_accounting() -> None:
     assert not joiner.is_alive()
 
 
+def test_worker_retains_two_source_finals_in_supplied_plain_queue() -> None:
+    output = Queue[TranscriptHypothesis](maxsize=2)
+    published: list[TranscriptHypothesis] = []
+    worker = StreamingSTTWorker(
+        engine=RecordingEngine(),
+        on_hypothesis=published.append,
+        hypothesis_queue=output,
+        partial_interval_seconds=1.0,
+        silence_duration_seconds=0.6,
+    )
+    for frame in (
+        _frame(AudioSource.SYSTEM, 10.0, 0.25, 0.2),
+        _frame(AudioSource.SYSTEM, 10.2, 0.0, 0.6),
+        _frame(AudioSource.MICROPHONE, 20.0, 0.5, 0.2),
+        _frame(AudioSource.MICROPHONE, 20.2, 0.0, 0.6),
+    ):
+        worker.submit(frame)
+
+    worker.start()
+    try:
+        _wait_for(lambda: len(published) == 2)
+    finally:
+        worker.stop()
+
+    assert worker.hypothesis_queue is output
+    assert output.qsize() == 2
+    assert output.unfinished_tasks == 2
+    system_final = output.get_nowait()
+    microphone_final = output.get_nowait()
+    assert [system_final.source, microphone_final.source] == [
+        AudioSource.SYSTEM,
+        AudioSource.MICROPHONE,
+    ]
+    assert system_final.is_final
+    assert microphone_final.is_final
+    output.task_done()
+    output.task_done()
+    output.join()
+    assert output.unfinished_tasks == 0
+
+
+def test_worker_publication_notifies_consumer_on_supplied_plain_queue(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    output = Queue[TranscriptHypothesis](maxsize=2)
+    worker = StreamingSTTWorker(
+        engine=RecordingEngine(),
+        hypothesis_queue=output,
+    )
+    consumer_waiting = Event()
+    consumed: list[TranscriptHypothesis] = []
+    original_wait = output.not_empty.wait
+
+    def observed_wait(timeout: float | None = None) -> bool:
+        consumer_waiting.set()
+        return original_wait(timeout)
+
+    monkeypatch.setattr(output.not_empty, "wait", observed_wait)
+
+    def consume_one() -> None:
+        consumed.append(output.get())
+        output.task_done()
+
+    consumer = Thread(target=consume_one)
+    consumer.start()
+    assert consumer_waiting.wait(timeout=2.0)
+    hypothesis = _hypothesis(text="wake consumer")
+    try:
+        worker._publish(hypothesis)
+        consumer.join(timeout=2.0)
+    finally:
+        if consumer.is_alive():
+            with output.not_empty:
+                output.not_empty.notify_all()
+            consumer.join(timeout=2.0)
+
+    assert not consumer.is_alive()
+    assert consumed == [hypothesis]
+    assert output.qsize() == 0
+    assert output.unfinished_tasks == 0
+    output.join()
+
+
 class BlockingPublicationQueue(_CoalescingHypothesisQueue):
     def __init__(self) -> None:
         super().__init__(maxsize=1)
@@ -347,6 +431,60 @@ def test_stop_deadline_covers_blocked_publication_and_eventual_cleanup() -> None
     assert worker.system_queue.qsize() == 0
     assert worker.system_queue.unfinished_tasks == 0
     assert all(state.started_at is None for state in worker._states.values())
+
+
+def test_stop_shares_deadline_between_publication_gate_and_thread_join(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    worker = StreamingSTTWorker(engine=RecordingEngine())
+    gate_held = Event()
+    release_gate = Event()
+    gate_released = Event()
+
+    def briefly_hold_publication_gate() -> None:
+        with worker._publication_gate:
+            gate_held.set()
+            assert release_gate.wait(timeout=2.0)
+        gate_released.set()
+
+    holder = Thread(target=briefly_hold_publication_gate)
+    holder.start()
+    assert gate_held.wait(timeout=2.0)
+
+    class RecordingWorkerThread:
+        def __init__(self) -> None:
+            self.join_timeouts: list[float | None] = []
+
+        def join(self, timeout: float | None = None) -> None:
+            self.join_timeouts.append(timeout)
+
+        def is_alive(self) -> bool:
+            return True
+
+    recording_thread = RecordingWorkerThread()
+    worker._thread = recording_thread  # type: ignore[assignment]
+    monotonic_values = iter((100.0, 100.0, 100.04))
+    monotonic_calls = 0
+
+    def controlled_monotonic() -> float:
+        nonlocal monotonic_calls
+        monotonic_calls += 1
+        if monotonic_calls == 2:
+            release_gate.set()
+            assert gate_released.wait(timeout=2.0)
+        return next(monotonic_values)
+
+    monkeypatch.setattr(stt_worker, "monotonic", controlled_monotonic)
+    try:
+        stopped = worker.stop(timeout=0.10)
+    finally:
+        release_gate.set()
+        holder.join(timeout=2.0)
+
+    assert not holder.is_alive()
+    assert stopped is False
+    assert recording_thread.join_timeouts == [pytest.approx(0.06)]
+    assert monotonic_calls == 3
 
 
 def test_callback_can_reentrantly_stop_worker() -> None:
