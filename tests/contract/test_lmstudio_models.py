@@ -4,8 +4,15 @@ from pathlib import Path
 import httpx
 import pytest
 import respx
+from pydantic import ValidationError
 
 from interview_assistant.lmstudio.client import LMStudioClient
+from interview_assistant.lmstudio.models import (
+    LoadResult,
+    ModelCapabilities,
+    ModelLoadConfig,
+    NativeModelList,
+)
 
 
 FIXTURE_PATH = Path(__file__).parents[1] / "fixtures" / "lmstudio_models.json"
@@ -30,7 +37,7 @@ async def test_list_models_uses_openai_compatible_endpoint() -> None:
 
 
 @respx.mock
-async def test_list_model_details_parses_loaded_instances_and_optional_metadata() -> None:
+async def test_list_model_details_preserves_loaded_instances_and_additive_metadata() -> None:
     route = respx.get("http://lmstudio.local:1234/api/v1/models").mock(
         return_value=httpx.Response(
             200,
@@ -54,9 +61,11 @@ async def test_list_model_details_parses_loaded_instances_and_optional_metadata(
                                     "parallel": 2,
                                     "flash_attention": True,
                                     "offload_kv_cache_to_gpu": True,
-                                    "future_config_field": "accepted",
+                                    "tensor_allocation": [
+                                        {"device": "Strix Halo", "bytes": 10_000_000}
+                                    ],
                                 },
-                                "future_instance_field": "accepted",
+                                "device": {"name": "Strix Halo", "kind": "lmlink"},
                             }
                         ],
                         "max_context_length": 131_072,
@@ -72,7 +81,7 @@ async def test_list_model_details_parses_loaded_instances_and_optional_metadata(
                         "description": None,
                         "variants": ["qwen3.5@q4_k_m"],
                         "selected_variant": "qwen3.5@q4_k_m",
-                        "future_model_field": "accepted",
+                        "allocation": {"device": "Strix Halo", "remote": True},
                     },
                     {
                         "type": "embedding",
@@ -105,8 +114,28 @@ async def test_list_model_details_parses_loaded_instances_and_optional_metadata(
     assert loaded.instance_id == "qwen3.5:1"
     assert loaded.config.context_length == 32_768
     assert loaded.config.flash_attention is True
+    assert models[0].model_extra == {
+        "allocation": {"device": "Strix Halo", "remote": True}
+    }
+    assert loaded.model_extra == {"device": {"name": "Strix Halo", "kind": "lmlink"}}
+    assert loaded.config.model_extra == {
+        "tensor_allocation": [{"device": "Strix Halo", "bytes": 10_000_000}]
+    }
     assert models[1].architecture is None
     assert models[1].capabilities is None
+
+
+def test_native_model_list_preserves_additive_envelope_metadata() -> None:
+    payload = NativeModelList.model_validate(
+        {
+            "models": [],
+            "request_metadata": {"server": "lmstudio", "node": "main-pc"},
+        }
+    )
+
+    assert payload.model_extra == {
+        "request_metadata": {"server": "lmstudio", "node": "main-pc"}
+    }
 
 
 @respx.mock
@@ -125,8 +154,9 @@ async def test_load_model_posts_explicit_configuration_and_preserves_instance_id
                     "flash_attention": False,
                     "offload_kv_cache_to_gpu": False,
                     "num_experts": 4,
+                    "tensor_allocation": [{"device": "Strix Halo", "bytes": 9_000_000}],
                 },
-                "future_response_field": "accepted",
+                "allocation": {"device": "Strix Halo", "remote": True},
             },
         )
     )
@@ -152,6 +182,12 @@ async def test_load_model_posts_explicit_configuration_and_preserves_instance_id
     assert result.status == "loaded"
     assert result.load_config is not None
     assert result.load_config.num_experts == 4
+    assert result.model_extra == {
+        "allocation": {"device": "Strix Halo", "remote": True}
+    }
+    assert result.load_config.model_extra == {
+        "tensor_allocation": [{"device": "Strix Halo", "bytes": 9_000_000}]
+    }
 
 
 @respx.mock
@@ -173,13 +209,47 @@ async def test_load_model_accepts_a_key_without_explicit_configuration() -> None
 
     assert json.loads(route.calls.last.request.content) == {
         "model": "qwen3.5",
-        "context_length": 32_768,
-        "flash_attention": True,
-        "offload_kv_cache_to_gpu": True,
         "echo_load_config": True,
     }
     assert result.instance_id == "qwen3.5"
     assert result.load_config is None
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"vision": True},
+        {"trained_for_tool_use": True},
+        {"vision": "true", "trained_for_tool_use": True},
+        {"vision": True, "trained_for_tool_use": 1},
+    ],
+)
+def test_capabilities_require_both_strict_booleans(payload: dict[str, object]) -> None:
+    with pytest.raises(ValidationError):
+        ModelCapabilities.model_validate(payload)
+
+
+@pytest.mark.parametrize(
+    ("contract", "payload"),
+    [
+        (ModelLoadConfig, {"context_length": "32768"}),
+        (
+            LoadResult,
+            {
+                "type": "llm",
+                "instance_id": "qwen3.5",
+                "load_time_seconds": "9.099",
+                "status": "loaded",
+            },
+        ),
+    ],
+)
+def test_known_numeric_fields_reject_string_coercion(
+    contract: type[ModelLoadConfig] | type[LoadResult],
+    payload: dict[str, object],
+) -> None:
+    with pytest.raises(ValidationError):
+        contract.model_validate(payload)
 
 
 @pytest.mark.parametrize(

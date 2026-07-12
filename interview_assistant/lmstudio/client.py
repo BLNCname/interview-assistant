@@ -5,7 +5,6 @@ from .models import LoadResult, ModelDetails, ModelSummary, NativeModelList, Ope
 
 DISCOVERY_TIMEOUT_SECONDS = 5.0
 REQUEST_TIMEOUT_SECONDS = 120.0
-DEFAULT_CONTEXT_LENGTH = 32_768
 
 
 class LMStudioClient:
@@ -39,19 +38,24 @@ class LMStudioClient:
         self,
         key: str,
         *,
-        context_length: int = DEFAULT_CONTEXT_LENGTH,
-        flash_attention: bool = True,
-        offload_kv_cache_to_gpu: bool = True,
+        context_length: int | None = None,
+        flash_attention: bool | None = None,
+        offload_kv_cache_to_gpu: bool | None = None,
     ) -> LoadResult:
+        payload: dict[str, object] = {
+            "model": key,
+            "echo_load_config": True,
+        }
+        if context_length is not None:
+            payload["context_length"] = context_length
+        if flash_attention is not None:
+            payload["flash_attention"] = flash_attention
+        if offload_kv_cache_to_gpu is not None:
+            payload["offload_kv_cache_to_gpu"] = offload_kv_cache_to_gpu
+
         response = await self._http.post(
             "/api/v1/models/load",
-            json={
-                "model": key,
-                "context_length": context_length,
-                "flash_attention": flash_attention,
-                "offload_kv_cache_to_gpu": offload_kv_cache_to_gpu,
-                "echo_load_config": True,
-            },
+            json=payload,
             timeout=REQUEST_TIMEOUT_SECONDS,
         )
         response.raise_for_status()

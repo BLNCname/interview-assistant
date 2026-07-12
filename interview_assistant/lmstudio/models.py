@@ -4,9 +4,9 @@ from pydantic import BaseModel, ConfigDict, Field
 
 
 class LMStudioContract(BaseModel):
-    """Base contract that ignores additive LM Studio response metadata."""
+    """Strict contract that preserves additive LM Studio response metadata."""
 
-    model_config = ConfigDict(extra="ignore", populate_by_name=True)
+    model_config = ConfigDict(extra="allow", populate_by_name=True, strict=True)
 
 
 class ModelSummary(LMStudioContract):
@@ -31,8 +31,8 @@ class ReasoningCapabilities(LMStudioContract):
 
 
 class ModelCapabilities(LMStudioContract):
-    vision: bool = False
-    trained_for_tool_use: bool = False
+    vision: bool
+    trained_for_tool_use: bool
     reasoning: ReasoningCapabilities | None = None
 
 
