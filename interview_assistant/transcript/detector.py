@@ -70,6 +70,18 @@ _THEORY_IMPERATIVE = re.compile(
     r"объясните|опишите|сравните|расскажите|дайте\s+определение)\b",
     re.IGNORECASE,
 )
+_EXPLICIT_REQUEST = re.compile(
+    r"^(?:(?:please|пожалуйста)[,\s]+)?(?:"
+    r"explain|describe|compare|define|tell\s+me|"
+    r"analy[sz]e|inspect|review|look\s+at|find\s+(?:the\s+)?(?:bug|error)|"
+    r"design|architect|scale|implement|write|code|debug|optimi[sz]e|solve|"
+    r"объясните|опишите|сравните|расскажите|дайте\s+определение|"
+    r"проанализируйте|посмотрите|разберите|найдите\s+(?:ошибку|баг)|"
+    r"спроектируйте|спроектировать|разработайте\s+архитектуру|масштабируйте|"
+    r"реализуйте|реализовать|напишите|закодируйте|отладьте|оптимизируйте|решите"
+    r")\b",
+    re.IGNORECASE,
+)
 _SCREEN_OBJECT = re.compile(
     r"\b(?:screenshot|screen|image|picture|diagram|code\s+shown|"
     r"скриншот\w*|экран\w*|изображени\w*|картин\w*|диаграмм\w*|"
@@ -254,8 +266,11 @@ class QuestionDetector:
         if min(len(semantic_tokens), len(recent.semantic_tokens)) < 2:
             return False
         overlap = len(semantic_tokens & recent.semantic_tokens)
-        smaller_coverage = overlap / min(len(semantic_tokens), len(recent.semantic_tokens))
-        return smaller_coverage >= self.similarity_threshold
+        symmetric_coverage = overlap / max(
+            len(semantic_tokens),
+            len(recent.semantic_tokens),
+        )
+        return symmetric_coverage >= self.similarity_threshold
 
 
 def _normalize(text: str) -> str:
@@ -292,6 +307,8 @@ def _stem_english(token: str) -> str:
 
 def _classify(text: str) -> AutoQuestionKind | None:
     question_like = "?" in text or bool(_INTERROGATIVE.search(text))
+    if not question_like and not _EXPLICIT_REQUEST.search(text):
+        return None
     if _SCREEN_OBJECT.search(text) and (question_like or _SCREEN_ACTION.search(text)):
         return "screen_analysis"
     if _BEHAVIORAL.search(text):

@@ -140,12 +140,106 @@ def test_recovery_is_capped_and_contains_only_minimal_current_context(
     }
 
 
-def test_recovery_rejects_supplied_context_that_cannot_fit_hard_cap() -> None:
+def test_recovery_omits_oversized_optional_screenshot_within_hard_cap() -> None:
     builder = ContextBuilder(
         TranscriptStore(clock=lambda: 100.0),
         latest_question=DetectedQuestion(1, "screen_analysis", "latest question", 99.0),
         screenshot="x" * 6_000,
     )
 
-    with pytest.raises(ContextBudgetError, match="recovery"):
-        builder.recovery(max_tokens=10_000)
+    snapshot = builder.recovery(max_tokens=10_000)
+
+    assert snapshot.max_tokens == 2_000
+    assert snapshot.estimated_tokens <= snapshot.max_tokens
+    assert {item.kind for item in snapshot.items} == {"system", "task", "question"}
+
+
+def test_recovery_drops_clarification_before_screenshot_under_tight_budget() -> None:
+    question = DetectedQuestion(1, "screen_analysis", "latest question", 99.0)
+    screenshot = "relevant screenshot"
+    screenshot_only = ContextBuilder(
+        TranscriptStore(clock=lambda: 100.0),
+        latest_question=question,
+        screenshot=screenshot,
+    ).recovery()
+
+    clarification_store = TranscriptStore(clock=lambda: 100.0)
+    add_final(
+        clarification_store,
+        AudioSource.MICROPHONE,
+        "latest clarification",
+        90.0,
+    )
+    clarification_only = ContextBuilder(
+        clarification_store,
+        latest_question=question,
+    ).recovery()
+    budget = max(
+        screenshot_only.estimated_tokens,
+        clarification_only.estimated_tokens,
+    )
+    builder = ContextBuilder(
+        clarification_store,
+        latest_question=question,
+        screenshot=screenshot,
+    )
+
+    snapshot = builder.recovery(max_tokens=budget)
+
+    assert "relevant screenshot" in snapshot.prompt
+    assert "latest clarification" not in snapshot.prompt
+    assert {item.kind for item in snapshot.items} == {
+        "system",
+        "task",
+        "question",
+        "screenshot",
+    }
+
+
+def test_recovery_raises_only_when_mandatory_context_cannot_fit() -> None:
+    builder = ContextBuilder(
+        TranscriptStore(clock=lambda: 100.0),
+        latest_question=DetectedQuestion(1, "coding", "latest question", 99.0),
+    )
+    minimum = builder.recovery()
+
+    with pytest.raises(ContextBudgetError, match="mandatory"):
+        builder.recovery(max_tokens=minimum.estimated_tokens - 1)
+
+
+def test_normal_overrides_can_clear_stored_optional_context_for_next_question(
+    context_builder: ContextBuilder,
+) -> None:
+    first = context_builder.normal(max_tokens=2_000)
+    second = context_builder.normal(
+        max_tokens=2_000,
+        latest_question=DetectedQuestion(2, "coding", "second question", 100.0),
+        resume=None,
+        job_description="",
+        stack=None,
+        screenshot="",
+        search_results=(),
+        previous_answer=None,
+    )
+
+    assert "relevant screenshot" in first.prompt
+    assert "old assistant answer" in first.prompt
+    assert "relevant screenshot" not in second.prompt
+    assert "old assistant answer" not in second.prompt
+    assert "Python backend engineer" not in second.prompt
+    assert "Distributed storage role" not in second.prompt
+    assert "Python, PostgreSQL" not in second.prompt
+    assert "relevant search result" not in second.prompt
+    assert second.question == "second question"
+
+
+def test_recovery_screenshot_override_can_clear_stored_default(
+    context_builder: ContextBuilder,
+) -> None:
+    default = context_builder.recovery()
+    cleared_with_none = context_builder.recovery(screenshot=None)
+    cleared_with_empty = context_builder.recovery(screenshot="")
+
+    assert "relevant screenshot" in default.prompt
+    assert "relevant screenshot" not in cleared_with_none.prompt
+    assert "relevant screenshot" not in cleared_with_empty.prompt

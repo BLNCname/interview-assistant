@@ -24,6 +24,13 @@ DEFAULT_MAX_TOKENS = 4_000
 RECOVERY_MAX_TOKENS = 2_000
 
 
+class _Unset:
+    __slots__ = ()
+
+
+_UNSET = _Unset()
+
+
 @dataclass(frozen=True, slots=True)
 class _Candidate:
     item: ContextItem
@@ -71,27 +78,33 @@ class ContextBuilder:
         max_tokens: int = DEFAULT_MAX_TOKENS,
         *,
         latest_question: DetectedQuestion | None = None,
-        resume: str | None = None,
-        job_description: str | None = None,
-        stack: str | None = None,
-        screenshot: str | None = None,
+        resume: str | None | _Unset = _UNSET,
+        job_description: str | None | _Unset = _UNSET,
+        stack: str | None | _Unset = _UNSET,
+        screenshot: str | None | _Unset = _UNSET,
         search_results: str | Sequence[str] | None = None,
-        previous_answer: str | None = None,
+        previous_answer: str | None | _Unset = _UNSET,
     ) -> ContextSnapshot:
         budget = _validate_budget(max_tokens)
         question = latest_question or self._latest_question
         candidates = self._normal_candidates(
             question,
-            resume=_optional_text(resume) or self._resume,
-            job_description=_optional_text(job_description) or self._job_description,
-            stack=_optional_text(stack) or self._stack,
-            screenshot=_optional_text(screenshot) or self._screenshot,
+            resume=_resolve_optional_text(resume, self._resume),
+            job_description=_resolve_optional_text(
+                job_description,
+                self._job_description,
+            ),
+            stack=_resolve_optional_text(stack, self._stack),
+            screenshot=_resolve_optional_text(screenshot, self._screenshot),
             search_results=(
                 _normalize_search_results(search_results)
                 if search_results is not None
                 else self._search_results
             ),
-            previous_answer=_optional_text(previous_answer) or self._previous_answer,
+            previous_answer=_resolve_optional_text(
+                previous_answer,
+                self._previous_answer,
+            ),
         )
         return _bounded_snapshot(question, candidates, budget)
 
@@ -100,46 +113,52 @@ class ContextBuilder:
         max_tokens: int = RECOVERY_MAX_TOKENS,
         *,
         latest_question: DetectedQuestion | None = None,
-        screenshot: str | None = None,
+        screenshot: str | None | _Unset = _UNSET,
     ) -> ContextSnapshot:
         requested_budget = _validate_budget(max_tokens)
         budget = min(requested_budget, RECOVERY_MAX_TOKENS)
         question = latest_question or self._latest_question
-        items = [
-            ContextItem("system", "System", self._recovery_system_prompt),
-            ContextItem("task", "Task kind", question.kind),
-            ContextItem("question", "Latest question", _question_text(question)),
+        candidates = [
+            _Candidate(
+                ContextItem("system", "System", self._recovery_system_prompt),
+                None,
+                0,
+            ),
+            _Candidate(ContextItem("task", "Task kind", question.kind), None, 1),
+            _Candidate(
+                ContextItem("question", "Latest question", _question_text(question)),
+                None,
+                2,
+            ),
         ]
+        sequence = len(candidates)
 
         clarification = self._transcript_store.latest(AudioSource.MICROPHONE)
         if clarification is not None and (text := _optional_text(clarification.text)):
-            items.append(
-                ContextItem(
-                    "clarification",
-                    "Latest clarification from You",
-                    text,
-                    source=AudioSource.MICROPHONE,
-                    timestamp=clarification.ended_at,
+            candidates.append(
+                _Candidate(
+                    ContextItem(
+                        "clarification",
+                        "Latest clarification from You",
+                        text,
+                        source=AudioSource.MICROPHONE,
+                        timestamp=clarification.ended_at,
+                    ),
+                    10,
+                    sequence,
                 )
             )
-        screenshot_text = _optional_text(screenshot) or self._screenshot
+            sequence += 1
+        screenshot_text = _resolve_optional_text(screenshot, self._screenshot)
         if screenshot_text:
-            items.append(ContextItem("screenshot", "Screenshot", screenshot_text))
-
-        prompt = _render(tuple(items))
-        estimated = estimate_tokens(prompt)
-        if estimated > budget:
-            raise ContextBudgetError(
-                f"recovery context requires {estimated} tokens but budget is {budget}"
+            candidates.append(
+                _Candidate(
+                    ContextItem("screenshot", "Screenshot", screenshot_text),
+                    50,
+                    sequence,
+                )
             )
-        return ContextSnapshot(
-            question=_question_text(question),
-            task_kind=question.kind,
-            items=tuple(items),
-            prompt=prompt,
-            estimated_tokens=estimated,
-            max_tokens=budget,
-        )
+        return _bounded_snapshot(question, candidates, budget)
 
     def _normal_candidates(
         self,
@@ -281,6 +300,15 @@ def _optional_text(value: str | None) -> str | None:
     if value is None:
         return None
     return " ".join(value.split()) or None
+
+
+def _resolve_optional_text(
+    value: str | None | _Unset,
+    stored_default: str | None,
+) -> str | None:
+    if isinstance(value, _Unset):
+        return stored_default
+    return _optional_text(value)
 
 
 def _normalize_search_results(values: str | Sequence[str] | None) -> tuple[str, ...]:

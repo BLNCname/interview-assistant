@@ -75,6 +75,39 @@ def test_non_question_declarative_text_is_ignored() -> None:
     assert detector.detect(AudioSource.SYSTEM, "The cache is warm and ready") is None
 
 
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Our system design uses a scalable cache",
+        "Наша распределённая система использует кэш",
+        "Your experience includes resolving a conflict",
+        "Ваш опыт включает конфликт в команде",
+        "We implement binary search in Python",
+        "Мы планируем реализовать алгоритм двоичного поиска",
+        "We review the code shown on this screenshot",
+        "В документации сказано: посмотрите код на экране",
+        "We explain the cache behavior in onboarding",
+        "В документации просят: объясните работу кэша",
+    ],
+)
+def test_intent_keywords_in_declarative_text_do_not_auto_trigger(text: str) -> None:
+    detector = QuestionDetector()
+
+    assert detector.detect(AudioSource.SYSTEM, text) is None
+
+
+def test_polite_anchored_question_is_classified() -> None:
+    detector = QuestionDetector()
+
+    result = detector.detect(
+        AudioSource.SYSTEM,
+        "Could you compare Redis and Memcached?",
+    )
+
+    assert result is not None
+    assert result.kind == "theory"
+
+
 def test_detection_normalizes_whitespace() -> None:
     detector = QuestionDetector()
 
@@ -125,6 +158,22 @@ def test_similar_question_shape_with_different_subject_is_not_suppressed() -> No
     assert cache is not None
     assert chat is not None
     assert (cache.request_id, chat.request_id) == (1, 2)
+
+
+def test_question_with_new_qualifier_is_not_suppressed() -> None:
+    clock = ManualClock(27.0)
+    detector = QuestionDetector(cooldown_seconds=10.0, clock=clock)
+
+    redis = detector.detect(AudioSource.SYSTEM, "How does Redis work?")
+    clock.advance(1.0)
+    redis_cluster = detector.detect(
+        AudioSource.SYSTEM,
+        "How does Redis cluster work?",
+    )
+
+    assert redis is not None
+    assert redis_cluster is not None
+    assert (redis.request_id, redis_cluster.request_id) == (1, 2)
 
 
 def test_strong_coding_imperative_without_question_mark_is_classified() -> None:
