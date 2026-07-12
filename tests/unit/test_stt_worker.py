@@ -300,13 +300,15 @@ def test_worker_publication_notifies_consumer_on_supplied_plain_queue(
     hypothesis = _hypothesis(text="wake consumer")
     try:
         worker._publish(hypothesis)
-        consumer.join(timeout=2.0)
+        consumer.join(timeout=0.1)
+        completed_before_fallback = not consumer.is_alive()
     finally:
         if consumer.is_alive():
             with output.not_empty:
                 output.not_empty.notify_all()
             consumer.join(timeout=2.0)
 
+    assert completed_before_fallback is True
     assert not consumer.is_alive()
     assert consumed == [hypothesis]
     assert output.qsize() == 0
