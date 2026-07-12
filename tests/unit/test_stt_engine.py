@@ -59,6 +59,7 @@ def test_whisper_engine_loads_production_model_lazily_once() -> None:
             "beam_size": 1,
             "condition_on_previous_text": False,
             "multilingual": True,
+            "temperature": 0.0,
         },
         {
             "beam_size": 3,

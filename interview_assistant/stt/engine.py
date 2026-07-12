@@ -87,12 +87,14 @@ class WhisperEngine:
         if beam_size <= 0:
             raise ValueError("beam_size must be positive")
         samples = np.asarray(audio, dtype=np.float32)
-        options = {
+        options: dict[str, object] = {
             "beam_size": beam_size,
             "condition_on_previous_text": condition_on_previous_text,
             "multilingual": True,
-            **decode_options,
         }
+        if beam_size == 1:
+            options["temperature"] = 0.0
+        options.update(decode_options)
         segments, info = self._get_model().transcribe(samples, **options)
         text = " ".join(
             segment_text

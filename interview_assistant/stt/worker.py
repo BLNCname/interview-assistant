@@ -1,3 +1,4 @@
+import unicodedata
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from queue import Empty, Full, Queue
@@ -23,6 +24,7 @@ _DEFAULT_HYPOTHESIS_CAPACITY = 32
 _DEFAULT_PARTIAL_INTERVAL_SECONDS = 0.5
 _DEFAULT_PARTIAL_WINDOW_SECONDS = 8.0
 _DEFAULT_PARTIAL_OVERLAP_SECONDS = 0.8
+_DEFAULT_MAX_RETAINED_AUDIO_SECONDS = 12.0
 _DEFAULT_SILENCE_DURATION_SECONDS = 0.6
 _DEFAULT_LANGUAGE_THRESHOLD = 0.8
 _DEFAULT_LANGUAGE_DETECTION_SECONDS = 1.5
@@ -59,14 +61,17 @@ class _SourceState:
     chunks: list[NDArray[np.float32]] = field(default_factory=list)
     started_at: float | None = None
     last_voiced_end: float = 0.0
+    last_frame_end: float = 0.0
     voiced_seconds: float = 0.0
     last_partial_seconds: float = 0.0
     silence_seconds: float = 0.0
     samples_through_last_voice: int = 0
     total_samples: int = 0
+    buffer_start_sample: int = 0
     partial_window_start_sample: int = 0
     last_partial_end_sample: int = 0
     committed_partial: str = ""
+    last_raw_partial: str = ""
     last_published_partial: str = ""
     previous_language: str | None = None
 
@@ -74,14 +79,17 @@ class _SourceState:
         self.chunks.clear()
         self.started_at = None
         self.last_voiced_end = 0.0
+        self.last_frame_end = 0.0
         self.voiced_seconds = 0.0
         self.last_partial_seconds = 0.0
         self.silence_seconds = 0.0
         self.samples_through_last_voice = 0
         self.total_samples = 0
+        self.buffer_start_sample = 0
         self.partial_window_start_sample = 0
         self.last_partial_end_sample = 0
         self.committed_partial = ""
+        self.last_raw_partial = ""
         self.last_published_partial = ""
         self.stable_prefix.reset()
         self.language.reset_utterance()
@@ -101,6 +109,7 @@ class StreamingSTTWorker:
         partial_interval_seconds: float = _DEFAULT_PARTIAL_INTERVAL_SECONDS,
         partial_window_seconds: float = _DEFAULT_PARTIAL_WINDOW_SECONDS,
         partial_overlap_seconds: float = _DEFAULT_PARTIAL_OVERLAP_SECONDS,
+        max_retained_audio_seconds: float = _DEFAULT_MAX_RETAINED_AUDIO_SECONDS,
         silence_duration_seconds: float = _DEFAULT_SILENCE_DURATION_SECONDS,
         language_threshold: float = _DEFAULT_LANGUAGE_THRESHOLD,
         language_detection_seconds: float = _DEFAULT_LANGUAGE_DETECTION_SECONDS,
@@ -117,6 +126,10 @@ class StreamingSTTWorker:
         if not 0 < partial_overlap_seconds < partial_window_seconds:
             raise ValueError(
                 "partial_overlap_seconds must be positive and smaller than the window"
+            )
+        if max_retained_audio_seconds <= partial_window_seconds:
+            raise ValueError(
+                "max_retained_audio_seconds must be greater than the partial window"
             )
         if silence_duration_seconds <= 0:
             raise ValueError("silence_duration_seconds must be positive")
@@ -157,6 +170,9 @@ class StreamingSTTWorker:
         )
         self._partial_overlap_samples = round(
             partial_overlap_seconds * _TARGET_SAMPLE_RATE
+        )
+        self._max_retained_audio_samples = round(
+            max_retained_audio_seconds * _TARGET_SAMPLE_RATE
         )
         self._silence_duration_seconds = silence_duration_seconds
         self._language_detection_seconds = language_detection_seconds
@@ -231,21 +247,26 @@ class StreamingSTTWorker:
         return stopped
 
     def _run(self) -> None:
-        while not self._stop_event.is_set():
-            queued = self._dequeue_next()
-            if queued is None:
-                continue
-            expected_source, queue, frame = queued
-            try:
-                if frame.source is not expected_source:
-                    raise ValueError(
-                        f"{expected_source.value} queue received {frame.source.value} frame"
-                    )
-                self._process_frame(frame)
-            except Exception as error:
-                self._record_error(error)
-            finally:
-                queue.task_done()
+        try:
+            while not self._stop_event.is_set():
+                queued = self._dequeue_next()
+                if queued is None:
+                    continue
+                expected_source, queue, frame = queued
+                try:
+                    if frame.source is not expected_source:
+                        raise ValueError(
+                            f"{expected_source.value} queue received {frame.source.value} frame"
+                        )
+                    self._process_frame(frame)
+                except Exception as error:
+                    self._record_error(error)
+                finally:
+                    queue.task_done()
+        finally:
+            self._discard_pending_frames()
+            for state in self._states.values():
+                state.reset_utterance()
 
     def _dequeue_next(
         self,
@@ -272,6 +293,13 @@ class StreamingSTTWorker:
         duration = samples.size / frame.sample_rate
         is_speech = state.vad.is_speech(frame)
 
+        if (
+            state.started_at is not None
+            and frame.timestamp - state.last_frame_end
+            >= self._silence_duration_seconds
+        ):
+            self._finish_utterance(frame.source, state)
+
         if state.started_at is None:
             if not is_speech:
                 return
@@ -279,6 +307,7 @@ class StreamingSTTWorker:
 
         state.chunks.append(samples)
         state.total_samples += samples.size
+        state.last_frame_end = frame.timestamp + duration
         if is_speech:
             state.voiced_seconds += duration
             state.silence_seconds = 0.0
@@ -290,12 +319,14 @@ class StreamingSTTWorker:
             ):
                 self._decode_partial(frame.source, state)
                 state.last_partial_seconds = state.voiced_seconds
+            self._prune_retained_audio(state)
             return
 
         state.silence_seconds += duration
         if state.silence_seconds >= self._silence_duration_seconds:
-            self._decode_final(frame.source, state)
-            state.reset_utterance()
+            self._finish_utterance(frame.source, state)
+        else:
+            self._prune_retained_audio(state)
 
     def _decode_partial(self, source: AudioSource, state: _SourceState) -> None:
         self._roll_partial_window(state)
@@ -305,13 +336,14 @@ class StreamingSTTWorker:
             condition_on_previous_text=False,
         )
         state.last_partial_end_sample = state.samples_through_last_voice
+        state.last_raw_partial = result.text.strip()
         language = self._language_for_result(
             state,
             result.language,
             result.language_probability,
             is_final=False,
         )
-        reconciled = state.stable_prefix.update(result.text)
+        reconciled = state.stable_prefix.update(state.last_raw_partial)
         if not reconciled:
             return
         stable_text = _merge_transcript(state.committed_partial, reconciled)
@@ -331,13 +363,20 @@ class StreamingSTTWorker:
 
     def _decode_final(self, source: AudioSource, state: _SourceState) -> None:
         result = self._engine.transcribe(
-            _utterance_audio(state),
+            _utterance_audio(
+                state,
+                start_sample=max(
+                    state.buffer_start_sample,
+                    state.partial_window_start_sample,
+                ),
+            ),
             beam_size=3,
             condition_on_previous_text=False,
         )
-        text = result.text.strip()
-        if not text:
+        raw_text = result.text.strip()
+        if not raw_text:
             return
+        text = _merge_transcript(state.committed_partial, raw_text)
         language = self._language_for_result(
             state,
             result.language,
@@ -361,13 +400,62 @@ class StreamingSTTWorker:
         )
         if current_length <= self._partial_window_samples:
             return
-        if state.last_published_partial:
-            state.committed_partial = state.last_published_partial
+        committed_words = [
+            _normalized_word(word) for word in state.committed_partial.split()
+        ]
+        commit_candidate = state.last_published_partial
+        candidate_words = [
+            _normalized_word(word) for word in commit_candidate.split()
+        ]
+        if not commit_candidate or (
+            committed_words[: len(candidate_words)] == candidate_words
+        ):
+            commit_candidate = state.last_raw_partial
+            candidate_words = [
+                _normalized_word(word) for word in commit_candidate.split()
+            ]
+        if commit_candidate and (
+            committed_words[: len(candidate_words)] != candidate_words
+        ):
+            state.committed_partial = _merge_transcript(
+                state.committed_partial,
+                commit_candidate,
+            )
         state.partial_window_start_sample = max(
+            state.buffer_start_sample,
             state.last_partial_end_sample - self._partial_overlap_samples,
             state.samples_through_last_voice - self._partial_window_samples,
         )
         state.stable_prefix.reset()
+
+    def _prune_retained_audio(self, state: _SourceState) -> None:
+        keep_from = max(
+            0,
+            state.samples_through_last_voice - self._max_retained_audio_samples,
+        )
+        if keep_from <= state.buffer_start_sample:
+            return
+        if state.last_raw_partial:
+            state.committed_partial = _merge_transcript(
+                state.committed_partial,
+                state.last_raw_partial,
+            )
+        _prune_audio_before(state, keep_from)
+        if state.partial_window_start_sample < state.buffer_start_sample:
+            state.partial_window_start_sample = state.buffer_start_sample
+            state.stable_prefix.reset()
+
+    def _finish_utterance(
+        self,
+        source: AudioSource,
+        state: _SourceState,
+    ) -> None:
+        try:
+            self._decode_final(source, state)
+        except Exception as error:
+            self._record_error(error)
+        finally:
+            state.reset_utterance()
 
     def _language_for_result(
         self,
@@ -392,7 +480,9 @@ class StreamingSTTWorker:
         return selected
 
     def _publish(self, hypothesis: TranscriptHypothesis) -> None:
-        _put_latest(self._hypothesis_queue, hypothesis)
+        if self._stop_event.is_set():
+            return
+        _put_hypothesis(self._hypothesis_queue, hypothesis)
         if self._on_hypothesis is None:
             return
         try:
@@ -419,12 +509,13 @@ def _utterance_audio(
     *,
     start_sample: int = 0,
 ) -> NDArray[np.float32]:
+    start_sample = max(start_sample, state.buffer_start_sample)
     end_sample = state.samples_through_last_voice
     if not state.chunks or end_sample <= start_sample:
         return np.empty(0, dtype=np.float32)
 
     pieces: list[NDArray[np.float32]] = []
-    position = 0
+    position = state.buffer_start_sample
     for chunk in state.chunks:
         chunk_end = position + chunk.size
         if chunk_end <= start_sample:
@@ -441,6 +532,23 @@ def _utterance_audio(
     return np.concatenate(pieces)
 
 
+def _prune_audio_before(state: _SourceState, start_sample: int) -> None:
+    keep_from = min(max(start_sample, state.buffer_start_sample), state.total_samples)
+    samples_to_drop = keep_from - state.buffer_start_sample
+    dropped_chunks = 0
+    while dropped_chunks < len(state.chunks):
+        chunk = state.chunks[dropped_chunks]
+        if samples_to_drop < chunk.size:
+            break
+        samples_to_drop -= chunk.size
+        dropped_chunks += 1
+    if dropped_chunks:
+        del state.chunks[:dropped_chunks]
+    if samples_to_drop and state.chunks:
+        state.chunks[0] = state.chunks[0][samples_to_drop:]
+    state.buffer_start_sample = keep_from
+
+
 def _started_at(state: _SourceState) -> float:
     if state.started_at is None:
         raise RuntimeError("utterance has no start timestamp")
@@ -454,10 +562,63 @@ def _merge_transcript(committed: str, current: str) -> str:
     current_words = current.split()
     overlap = 0
     for count in range(min(len(committed_words), len(current_words)), 0, -1):
-        if committed_words[-count:] == current_words[:count]:
+        committed_overlap = [_normalized_word(word) for word in committed_words[-count:]]
+        current_overlap = [_normalized_word(word) for word in current_words[:count]]
+        if committed_overlap == current_overlap:
             overlap = count
             break
     return " ".join((*committed_words, *current_words[overlap:]))
+
+
+def _normalized_word(word: str) -> str:
+    normalized = unicodedata.normalize("NFKC", word).casefold()
+    return "".join(
+        character
+        for character in normalized
+        if not unicodedata.category(character).startswith("P")
+    )
+
+
+def _put_hypothesis(
+    queue: Queue[TranscriptHypothesis],
+    item: TranscriptHypothesis,
+) -> None:
+    candidates: list[TranscriptHypothesis] = []
+    while True:
+        try:
+            candidates.append(queue.get_nowait())
+        except Empty:
+            break
+        else:
+            queue.task_done()
+
+    latest_by_source: dict[AudioSource, tuple[int, TranscriptHypothesis]] = {}
+    for sequence, candidate in enumerate((*candidates, item)):
+        previous = latest_by_source.get(candidate.source)
+        if previous is None or _hypothesis_priority(candidate) >= _hypothesis_priority(
+            previous[1]
+        ):
+            latest_by_source[candidate.source] = (sequence, candidate)
+
+    retained = sorted(
+        latest_by_source.values(),
+        key=lambda entry: (_hypothesis_priority(entry[1]), entry[0]),
+        reverse=True,
+    )[: queue.maxsize]
+    for _, candidate in retained:
+        try:
+            queue.put_nowait(candidate)
+        except Full:
+            # A consumer may race with publication; bounded non-blocking delivery wins.
+            break
+
+
+def _hypothesis_priority(hypothesis: TranscriptHypothesis) -> int:
+    if not hypothesis.is_final:
+        return 0
+    if hypothesis.source is AudioSource.MICROPHONE:
+        return 1
+    return 2
 
 
 def _put_latest(queue: Queue[_T], item: _T) -> None:
