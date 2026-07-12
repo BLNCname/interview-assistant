@@ -1,13 +1,18 @@
 from collections.abc import Callable
-from threading import Event, get_ident
+from threading import Event, Thread, get_ident
 from time import monotonic, sleep
 
 import numpy as np
 import pytest
 
 from interview_assistant.audio.models import AudioFrame, AudioSource
-from interview_assistant.stt.engine import TranscriptionResult
-from interview_assistant.stt.worker import StreamingSTTWorker, _merge_transcript
+from interview_assistant.stt.engine import TranscriptHypothesis, TranscriptionResult
+from interview_assistant.stt.worker import (
+    StreamingSTTWorker,
+    _CoalescingHypothesisQueue,
+    _merge_transcript,
+    _put_hypothesis,
+)
 
 
 def _wait_for(predicate: Callable[[], bool], timeout: float = 2.0) -> None:
@@ -29,6 +34,22 @@ def _frame(
         source,
         timestamp,
         np.full(round(16_000 * duration_seconds), value, dtype=np.float32),
+    )
+
+
+def _hypothesis(
+    source: AudioSource = AudioSource.SYSTEM,
+    *,
+    text: str = "answer",
+    is_final: bool = True,
+) -> TranscriptHypothesis:
+    return TranscriptHypothesis(
+        source=source,
+        text=text,
+        language="en",
+        is_final=is_final,
+        started_at=1.0,
+        ended_at=2.0,
     )
 
 
@@ -137,6 +158,137 @@ def test_worker_keeps_final_source_language_and_timestamps_separate() -> None:
     assert worker.hypothesis_queue.maxsize == 1
     assert worker.hypothesis_queue.qsize() == 1
     assert worker.hypothesis_queue.get_nowait() is system
+
+
+class BlockingPublicationQueue(_CoalescingHypothesisQueue):
+    def __init__(self) -> None:
+        super().__init__(maxsize=1)
+        self.entered = Event()
+        self.release = Event()
+        self.mutated_after_stop = False
+        self.stop_returned: Event | None = None
+
+    def put_coalesced(self, item: TranscriptHypothesis) -> None:
+        self.entered.set()
+        assert self.release.wait(timeout=2.0)
+        assert self.stop_returned is not None
+        self.mutated_after_stop = self.stop_returned.is_set()
+        super().put_coalesced(item)
+
+
+def test_stop_linearizes_with_in_progress_queue_publication() -> None:
+    output = BlockingPublicationQueue()
+    stop_returned = Event()
+    output.stop_returned = stop_returned
+    callback_after_stop: list[bool] = []
+    worker = StreamingSTTWorker(
+        engine=RecordingEngine(),
+        on_hypothesis=lambda _: callback_after_stop.append(stop_returned.is_set()),
+    )
+    worker._hypothesis_queue = output
+    publisher = Thread(target=worker._publish, args=(_hypothesis(),))
+    publisher.start()
+    assert output.entered.wait(timeout=2.0)
+
+    def release_publication() -> None:
+        sleep(0.05)
+        output.release.set()
+
+    releaser = Thread(target=release_publication)
+    releaser.start()
+    worker.stop()
+    stop_returned.set()
+    publisher.join(timeout=2.0)
+    releaser.join(timeout=2.0)
+
+    assert not publisher.is_alive()
+    assert output.qsize() == 1
+    assert output.mutated_after_stop is False
+    assert callback_after_stop == [False]
+
+
+def test_callback_can_reentrantly_stop_worker() -> None:
+    callback_returned = Event()
+    worker: StreamingSTTWorker
+
+    def stop_from_callback(_: TranscriptHypothesis) -> None:
+        worker.stop()
+        callback_returned.set()
+
+    worker = StreamingSTTWorker(
+        engine=RecordingEngine(),
+        on_hypothesis=stop_from_callback,
+    )
+    publisher = Thread(target=worker._publish, args=(_hypothesis(),))
+    publisher.start()
+    publisher.join(timeout=2.0)
+
+    assert callback_returned.is_set()
+    assert not publisher.is_alive()
+
+
+class PausingReplacementQueue(_CoalescingHypothesisQueue):
+    def __init__(self) -> None:
+        super().__init__(maxsize=1)
+        self.pause_replacement = False
+        self.replacement_started = Event()
+        self.release_replacement = Event()
+
+    def _replace_locked(
+        self,
+        retained: list[TranscriptHypothesis],
+        *,
+        discarded_existing: int,
+        incoming_retained: bool,
+    ) -> None:
+        if self.pause_replacement:
+            self.replacement_started.set()
+            assert self.release_replacement.wait(timeout=2.0)
+        super()._replace_locked(
+            retained,
+            discarded_existing=discarded_existing,
+            incoming_retained=incoming_retained,
+        )
+
+
+def test_coalescing_replacement_cannot_let_join_return_early() -> None:
+    output = PausingReplacementQueue()
+    partial = _hypothesis(
+        AudioSource.MICROPHONE,
+        text="draft",
+        is_final=False,
+    )
+    system_final = _hypothesis(text="retained final")
+    output.put_coalesced(partial)
+    output.pause_replacement = True
+
+    publisher = Thread(target=_put_hypothesis, args=(output, system_final))
+    publisher.start()
+    assert output.replacement_started.wait(timeout=2.0)
+
+    join_returned = Event()
+
+    def join_output() -> None:
+        output.join()
+        join_returned.set()
+
+    joiner = Thread(target=join_output)
+    joiner.start()
+    returned_before_consumption = join_returned.wait(timeout=0.05)
+    output.release_replacement.set()
+    publisher.join(timeout=2.0)
+
+    retained = output.get_nowait()
+    still_waiting_for_retained = not join_returned.is_set()
+    output.task_done()
+    joiner.join(timeout=2.0)
+
+    assert returned_before_consumption is False
+    assert retained is system_final
+    assert still_waiting_for_retained is True
+    assert join_returned.is_set()
+    assert not publisher.is_alive()
+    assert not joiner.is_alive()
 
 
 class PriorityEngine:
@@ -480,6 +632,54 @@ def test_timed_out_stop_eventually_cleans_up_without_late_publish() -> None:
     assert worker.hypothesis_queue.qsize() == 0
     assert published == []
     assert all(state.started_at is None for state in worker._states.values())
+
+
+class AlwaysFailingPartialEngine:
+    def __init__(self) -> None:
+        self.error = RuntimeError("partial decode failed")
+        self.audio_sizes: list[int] = []
+
+    def transcribe(
+        self,
+        audio: np.ndarray,
+        *,
+        beam_size: int,
+        condition_on_previous_text: bool,
+    ) -> TranscriptionResult:
+        assert (beam_size, condition_on_previous_text) == (1, False)
+        self.audio_sizes.append(audio.size)
+        raise self.error
+
+
+def test_partial_failures_keep_audio_bounded_without_advancing_decode_window() -> None:
+    engine = AlwaysFailingPartialEngine()
+    worker = StreamingSTTWorker(
+        engine=engine,
+        partial_interval_seconds=0.5,
+        partial_window_seconds=1.0,
+        partial_overlap_seconds=0.5,
+        max_retained_audio_seconds=1.5,
+    )
+    for index in range(32):
+        worker.submit(
+            _frame(AudioSource.SYSTEM, index * 0.125, 0.25, 0.125)
+        )
+
+    worker.start()
+    _wait_for(lambda: worker.system_queue.unfinished_tasks == 0)
+    state = worker._states[AudioSource.SYSTEM]
+    retained_samples = sum(chunk.size for chunk in state.chunks)
+
+    assert engine.audio_sizes
+    assert len(engine.audio_sizes) == 8
+    assert retained_samples <= 24_000
+    assert state.partial_window_start_sample == state.buffer_start_sample
+    assert state.last_raw_partial == ""
+    assert state.committed_partial == ""
+    assert worker.hypothesis_queue.qsize() == 0
+    assert worker.last_error is engine.error
+
+    worker.stop()
 
 
 class StablePartialEngine:
