@@ -1,0 +1,480 @@
+from collections.abc import Callable
+from dataclasses import dataclass, field
+from queue import Empty, Full, Queue
+from threading import Event, Lock, Thread, current_thread
+from typing import Protocol, TypeVar
+
+import numpy as np
+from numpy.typing import NDArray
+
+from interview_assistant.audio.models import AudioFrame, AudioSource
+
+from .engine import (
+    LanguageLatch,
+    TranscriptHypothesis,
+    TranscriptionEngine,
+    WhisperEngine,
+)
+from .stable_prefix import StablePrefix
+
+_TARGET_SAMPLE_RATE = 16_000
+_DEFAULT_INPUT_CAPACITY = 64
+_DEFAULT_HYPOTHESIS_CAPACITY = 32
+_DEFAULT_PARTIAL_INTERVAL_SECONDS = 0.5
+_DEFAULT_PARTIAL_WINDOW_SECONDS = 8.0
+_DEFAULT_PARTIAL_OVERLAP_SECONDS = 0.8
+_DEFAULT_SILENCE_DURATION_SECONDS = 0.6
+_DEFAULT_LANGUAGE_THRESHOLD = 0.8
+_DEFAULT_LANGUAGE_DETECTION_SECONDS = 1.5
+_DEFAULT_VAD_THRESHOLD = 0.01
+_QUEUE_POLL_SECONDS = 0.01
+
+_HypothesisCallback = Callable[[TranscriptHypothesis], None]
+_T = TypeVar("_T")
+
+
+class VoiceActivityDetector(Protocol):
+    def is_speech(self, frame: AudioFrame) -> bool: ...
+
+
+class EnergyVoiceActivityDetector:
+    def __init__(self, threshold: float = _DEFAULT_VAD_THRESHOLD) -> None:
+        if threshold < 0:
+            raise ValueError("VAD threshold must be non-negative")
+        self._threshold = threshold
+
+    def is_speech(self, frame: AudioFrame) -> bool:
+        samples = np.asarray(frame.samples, dtype=np.float32)
+        if samples.size == 0:
+            return False
+        rms = float(np.sqrt(np.mean(np.square(samples, dtype=np.float64))))
+        return rms >= self._threshold
+
+
+@dataclass(slots=True)
+class _SourceState:
+    vad: VoiceActivityDetector
+    language: LanguageLatch
+    stable_prefix: StablePrefix = field(default_factory=StablePrefix)
+    chunks: list[NDArray[np.float32]] = field(default_factory=list)
+    started_at: float | None = None
+    last_voiced_end: float = 0.0
+    voiced_seconds: float = 0.0
+    last_partial_seconds: float = 0.0
+    silence_seconds: float = 0.0
+    samples_through_last_voice: int = 0
+    total_samples: int = 0
+    partial_window_start_sample: int = 0
+    last_partial_end_sample: int = 0
+    committed_partial: str = ""
+    last_published_partial: str = ""
+    previous_language: str | None = None
+
+    def reset_utterance(self) -> None:
+        self.chunks.clear()
+        self.started_at = None
+        self.last_voiced_end = 0.0
+        self.voiced_seconds = 0.0
+        self.last_partial_seconds = 0.0
+        self.silence_seconds = 0.0
+        self.samples_through_last_voice = 0
+        self.total_samples = 0
+        self.partial_window_start_sample = 0
+        self.last_partial_end_sample = 0
+        self.committed_partial = ""
+        self.last_published_partial = ""
+        self.stable_prefix.reset()
+        self.language.reset_utterance()
+
+
+class StreamingSTTWorker:
+    def __init__(
+        self,
+        system_queue: Queue[AudioFrame] | None = None,
+        microphone_queue: Queue[AudioFrame] | None = None,
+        *,
+        engine: TranscriptionEngine | None = None,
+        on_hypothesis: _HypothesisCallback | None = None,
+        hypothesis_queue: Queue[TranscriptHypothesis] | None = None,
+        queue_capacity: int = _DEFAULT_INPUT_CAPACITY,
+        hypothesis_capacity: int = _DEFAULT_HYPOTHESIS_CAPACITY,
+        partial_interval_seconds: float = _DEFAULT_PARTIAL_INTERVAL_SECONDS,
+        partial_window_seconds: float = _DEFAULT_PARTIAL_WINDOW_SECONDS,
+        partial_overlap_seconds: float = _DEFAULT_PARTIAL_OVERLAP_SECONDS,
+        silence_duration_seconds: float = _DEFAULT_SILENCE_DURATION_SECONDS,
+        language_threshold: float = _DEFAULT_LANGUAGE_THRESHOLD,
+        language_detection_seconds: float = _DEFAULT_LANGUAGE_DETECTION_SECONDS,
+        vad_factory: Callable[[], VoiceActivityDetector] | None = None,
+    ) -> None:
+        if queue_capacity <= 0:
+            raise ValueError("queue_capacity must be positive")
+        if hypothesis_capacity <= 0:
+            raise ValueError("hypothesis_capacity must be positive")
+        if partial_interval_seconds <= 0:
+            raise ValueError("partial_interval_seconds must be positive")
+        if partial_window_seconds <= 0:
+            raise ValueError("partial_window_seconds must be positive")
+        if not 0 < partial_overlap_seconds < partial_window_seconds:
+            raise ValueError(
+                "partial_overlap_seconds must be positive and smaller than the window"
+            )
+        if silence_duration_seconds <= 0:
+            raise ValueError("silence_duration_seconds must be positive")
+        if language_detection_seconds <= 0:
+            raise ValueError("language_detection_seconds must be positive")
+
+        self._queues = {
+            AudioSource.SYSTEM: system_queue
+            or Queue[AudioFrame](maxsize=queue_capacity),
+            AudioSource.MICROPHONE: microphone_queue
+            or Queue[AudioFrame](maxsize=queue_capacity),
+        }
+        if self._queues[AudioSource.SYSTEM] is self._queues[AudioSource.MICROPHONE]:
+            raise ValueError("system and microphone queues must be distinct")
+        if any(queue.maxsize <= 0 for queue in self._queues.values()):
+            raise ValueError("input queues must be bounded")
+
+        output = hypothesis_queue or Queue[TranscriptHypothesis](
+            maxsize=hypothesis_capacity
+        )
+        if output.maxsize <= 0:
+            raise ValueError("hypothesis queue must be bounded")
+
+        make_vad = vad_factory or EnergyVoiceActivityDetector
+        self._states = {
+            source: _SourceState(
+                vad=make_vad(),
+                language=LanguageLatch(language_threshold),
+            )
+            for source in AudioSource
+        }
+        self._engine = engine or WhisperEngine()
+        self._on_hypothesis = on_hypothesis
+        self._hypothesis_queue = output
+        self._partial_interval_seconds = partial_interval_seconds
+        self._partial_window_samples = round(
+            partial_window_seconds * _TARGET_SAMPLE_RATE
+        )
+        self._partial_overlap_samples = round(
+            partial_overlap_seconds * _TARGET_SAMPLE_RATE
+        )
+        self._silence_duration_seconds = silence_duration_seconds
+        self._language_detection_seconds = language_detection_seconds
+        self._stop_event = Event()
+        self._input_available = Event()
+        self._lifecycle_lock = Lock()
+        self._error_lock = Lock()
+        self._thread: Thread | None = None
+        self._stopped = False
+        self._last_error: Exception | None = None
+
+    @property
+    def system_queue(self) -> Queue[AudioFrame]:
+        return self._queues[AudioSource.SYSTEM]
+
+    @property
+    def microphone_queue(self) -> Queue[AudioFrame]:
+        return self._queues[AudioSource.MICROPHONE]
+
+    @property
+    def hypothesis_queue(self) -> Queue[TranscriptHypothesis]:
+        return self._hypothesis_queue
+
+    @property
+    def is_running(self) -> bool:
+        thread = self._thread
+        return thread is not None and thread.is_alive()
+
+    @property
+    def last_error(self) -> Exception | None:
+        with self._error_lock:
+            return self._last_error
+
+    def submit(self, frame: AudioFrame) -> None:
+        with self._lifecycle_lock:
+            if self._stopped:
+                raise RuntimeError("stopped STT worker cannot accept audio")
+            queue = self._queues[frame.source]
+            _put_latest(queue, frame)
+            self._input_available.set()
+
+    def start(self) -> None:
+        with self._lifecycle_lock:
+            if self._stopped:
+                raise RuntimeError("stopped STT worker cannot be started")
+            if self.is_running:
+                return
+            thread = Thread(
+                target=self._run,
+                name="streaming-stt-worker",
+                daemon=True,
+            )
+            self._thread = thread
+            thread.start()
+
+    def stop(self, timeout: float = 5.0) -> bool:
+        if timeout < 0:
+            raise ValueError("timeout must be non-negative")
+        with self._lifecycle_lock:
+            self._stopped = True
+            self._stop_event.set()
+            self._input_available.set()
+            thread = self._thread
+
+        if thread is not None and thread is not current_thread():
+            thread.join(timeout=timeout)
+        stopped = thread is None or not thread.is_alive()
+        if stopped:
+            self._discard_pending_frames()
+            for state in self._states.values():
+                state.reset_utterance()
+        return stopped
+
+    def _run(self) -> None:
+        while not self._stop_event.is_set():
+            queued = self._dequeue_next()
+            if queued is None:
+                continue
+            expected_source, queue, frame = queued
+            try:
+                if frame.source is not expected_source:
+                    raise ValueError(
+                        f"{expected_source.value} queue received {frame.source.value} frame"
+                    )
+                self._process_frame(frame)
+            except Exception as error:
+                self._record_error(error)
+            finally:
+                queue.task_done()
+
+    def _dequeue_next(
+        self,
+    ) -> tuple[AudioSource, Queue[AudioFrame], AudioFrame] | None:
+        while not self._stop_event.is_set():
+            for source in (AudioSource.SYSTEM, AudioSource.MICROPHONE):
+                queue = self._queues[source]
+                try:
+                    return source, queue, queue.get_nowait()
+                except Empty:
+                    pass
+            self._input_available.wait(timeout=_QUEUE_POLL_SECONDS)
+            self._input_available.clear()
+        return None
+
+    def _process_frame(self, frame: AudioFrame) -> None:
+        if frame.sample_rate != _TARGET_SAMPLE_RATE:
+            raise ValueError(
+                f"STT expects {_TARGET_SAMPLE_RATE} Hz audio, got {frame.sample_rate} Hz"
+            )
+
+        state = self._states[frame.source]
+        samples = np.asarray(frame.samples, dtype=np.float32).reshape(-1)
+        duration = samples.size / frame.sample_rate
+        is_speech = state.vad.is_speech(frame)
+
+        if state.started_at is None:
+            if not is_speech:
+                return
+            state.started_at = frame.timestamp
+
+        state.chunks.append(samples)
+        state.total_samples += samples.size
+        if is_speech:
+            state.voiced_seconds += duration
+            state.silence_seconds = 0.0
+            state.last_voiced_end = frame.timestamp + duration
+            state.samples_through_last_voice = state.total_samples
+            if (
+                state.voiced_seconds - state.last_partial_seconds
+                >= self._partial_interval_seconds
+            ):
+                self._decode_partial(frame.source, state)
+                state.last_partial_seconds = state.voiced_seconds
+            return
+
+        state.silence_seconds += duration
+        if state.silence_seconds >= self._silence_duration_seconds:
+            self._decode_final(frame.source, state)
+            state.reset_utterance()
+
+    def _decode_partial(self, source: AudioSource, state: _SourceState) -> None:
+        self._roll_partial_window(state)
+        result = self._engine.transcribe(
+            _utterance_audio(state, start_sample=state.partial_window_start_sample),
+            beam_size=1,
+            condition_on_previous_text=False,
+        )
+        state.last_partial_end_sample = state.samples_through_last_voice
+        language = self._language_for_result(
+            state,
+            result.language,
+            result.language_probability,
+            is_final=False,
+        )
+        reconciled = state.stable_prefix.update(result.text)
+        if not reconciled:
+            return
+        stable_text = _merge_transcript(state.committed_partial, reconciled)
+        if stable_text == state.last_published_partial:
+            return
+        state.last_published_partial = stable_text
+        self._publish(
+            TranscriptHypothesis(
+                source=source,
+                text=stable_text,
+                language=language,
+                is_final=False,
+                started_at=_started_at(state),
+                ended_at=state.last_voiced_end,
+            )
+        )
+
+    def _decode_final(self, source: AudioSource, state: _SourceState) -> None:
+        result = self._engine.transcribe(
+            _utterance_audio(state),
+            beam_size=3,
+            condition_on_previous_text=False,
+        )
+        text = result.text.strip()
+        if not text:
+            return
+        language = self._language_for_result(
+            state,
+            result.language,
+            result.language_probability,
+            is_final=True,
+        )
+        self._publish(
+            TranscriptHypothesis(
+                source=source,
+                text=text,
+                language=language,
+                is_final=True,
+                started_at=_started_at(state),
+                ended_at=state.last_voiced_end,
+            )
+        )
+
+    def _roll_partial_window(self, state: _SourceState) -> None:
+        current_length = (
+            state.samples_through_last_voice - state.partial_window_start_sample
+        )
+        if current_length <= self._partial_window_samples:
+            return
+        if state.last_published_partial:
+            state.committed_partial = state.last_published_partial
+        state.partial_window_start_sample = max(
+            state.last_partial_end_sample - self._partial_overlap_samples,
+            state.samples_through_last_voice - self._partial_window_samples,
+        )
+        state.stable_prefix.reset()
+
+    def _language_for_result(
+        self,
+        state: _SourceState,
+        language: str,
+        probability: float,
+        *,
+        is_final: bool,
+    ) -> str:
+        if state.language.language is not None:
+            return state.language.language
+        if not is_final and state.voiced_seconds < self._language_detection_seconds:
+            return state.previous_language or language
+        if (
+            state.previous_language is not None
+            and probability < state.language.threshold
+        ):
+            selected = state.language.update(state.previous_language, 1.0)
+        else:
+            selected = state.language.update(language, probability)
+        state.previous_language = selected
+        return selected
+
+    def _publish(self, hypothesis: TranscriptHypothesis) -> None:
+        _put_latest(self._hypothesis_queue, hypothesis)
+        if self._on_hypothesis is None:
+            return
+        try:
+            self._on_hypothesis(hypothesis)
+        except Exception as error:
+            self._record_error(error)
+
+    def _record_error(self, error: Exception) -> None:
+        with self._error_lock:
+            self._last_error = error
+
+    def _discard_pending_frames(self) -> None:
+        for queue in self._queues.values():
+            while True:
+                try:
+                    queue.get_nowait()
+                except Empty:
+                    break
+                queue.task_done()
+
+
+def _utterance_audio(
+    state: _SourceState,
+    *,
+    start_sample: int = 0,
+) -> NDArray[np.float32]:
+    end_sample = state.samples_through_last_voice
+    if not state.chunks or end_sample <= start_sample:
+        return np.empty(0, dtype=np.float32)
+
+    pieces: list[NDArray[np.float32]] = []
+    position = 0
+    for chunk in state.chunks:
+        chunk_end = position + chunk.size
+        if chunk_end <= start_sample:
+            position = chunk_end
+            continue
+        if position >= end_sample:
+            break
+        local_start = max(0, start_sample - position)
+        local_end = min(chunk.size, end_sample - position)
+        pieces.append(chunk[local_start:local_end])
+        position = chunk_end
+    if len(pieces) == 1:
+        return pieces[0]
+    return np.concatenate(pieces)
+
+
+def _started_at(state: _SourceState) -> float:
+    if state.started_at is None:
+        raise RuntimeError("utterance has no start timestamp")
+    return state.started_at
+
+
+def _merge_transcript(committed: str, current: str) -> str:
+    if not committed:
+        return current
+    committed_words = committed.split()
+    current_words = current.split()
+    overlap = 0
+    for count in range(min(len(committed_words), len(current_words)), 0, -1):
+        if committed_words[-count:] == current_words[:count]:
+            overlap = count
+            break
+    return " ".join((*committed_words, *current_words[overlap:]))
+
+
+def _put_latest(queue: Queue[_T], item: _T) -> None:
+    try:
+        queue.put_nowait(item)
+        return
+    except Full:
+        pass
+
+    try:
+        queue.get_nowait()
+    except Empty:
+        pass
+    else:
+        queue.task_done()
+    try:
+        queue.put_nowait(item)
+    except Full:
+        # Another producer won the race; the queue remains bounded and current.
+        pass
