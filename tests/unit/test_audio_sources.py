@@ -134,6 +134,98 @@ class SecondOpenFailsBackend(FakeAudioBackend):
         return stream
 
 
+class StartEmitsOrFailsStream(FakeInputStream):
+    def __init__(
+        self,
+        device_id: str,
+        callback: Callable[[bytes, int, int], None],
+        *,
+        emitted_samples: np.ndarray | None = None,
+        start_error: Exception | None = None,
+    ) -> None:
+        super().__init__(device_id, callback)
+        self._emitted_samples = emitted_samples
+        self._start_error = start_error
+
+    def start_stream(self) -> None:
+        super().start_stream()
+        if self._emitted_samples is not None:
+            self.emit(self._emitted_samples, sample_rate=48_000, channels=1)
+        if self._start_error is not None:
+            raise self._start_error
+
+
+class SecondStartFailsBackend(FakeAudioBackend):
+    def open_input_stream(
+        self,
+        *,
+        device_id: str,
+        frames_per_buffer: int,
+        callback: Callable[[bytes, int, int], None],
+    ) -> FakeInputStream:
+        assert frames_per_buffer > 0
+        stream = StartEmitsOrFailsStream(
+            device_id,
+            callback,
+            emitted_samples=(
+                np.array([100, 200], dtype=np.int16) if device_id == "system" else None
+            ),
+            start_error=(
+                OSError("microphone cannot be started") if device_id == "mic" else None
+            ),
+        )
+        self.streams[device_id] = stream
+        return stream
+
+
+class ResumeTrackingStream(FakeInputStream):
+    def __init__(
+        self,
+        device_id: str,
+        callback: Callable[[bytes, int, int], None],
+        *,
+        failing_start_count: int | None = None,
+        fail_when_stopped: bool = False,
+    ) -> None:
+        super().__init__(device_id, callback)
+        self._failing_start_count = failing_start_count
+        self._fail_when_stopped = fail_when_stopped
+        self._active = False
+
+    def start_stream(self) -> None:
+        self.start_count += 1
+        if self._active:
+            raise RuntimeError(f"{self.device_id} stream is already active")
+        if self.start_count == self._failing_start_count:
+            raise OSError("microphone cannot be resumed")
+        self._active = True
+
+    def stop_stream(self) -> None:
+        self.stop_count += 1
+        if not self._active and self._fail_when_stopped:
+            raise RuntimeError(f"{self.device_id} stream is not active")
+        self._active = False
+
+
+class ResumeFailsOnceBackend(FakeAudioBackend):
+    def open_input_stream(
+        self,
+        *,
+        device_id: str,
+        frames_per_buffer: int,
+        callback: Callable[[bytes, int, int], None],
+    ) -> FakeInputStream:
+        assert frames_per_buffer > 0
+        stream = ResumeTrackingStream(
+            device_id,
+            callback,
+            failing_start_count=2 if device_id == "mic" else None,
+            fail_when_stopped=device_id == "mic",
+        )
+        self.streams[device_id] = stream
+        return stream
+
+
 class BlockingOpenBackend(FakeAudioBackend):
     def __init__(self, stop_returned: Event) -> None:
         super().__init__()
@@ -277,6 +369,30 @@ def test_worker_bounds_each_source_queue_without_cross_source_eviction() -> None
     worker.stop()
 
 
+def test_worker_marks_internally_evicted_frames_done() -> None:
+    from interview_assistant.audio.worker import AudioWorker
+
+    backend = FakeAudioBackend()
+    worker = AudioWorker(
+        "system", "mic", backend_factory=lambda: backend, queue_capacity=1
+    )
+
+    worker.start()
+    backend.streams["system"].emit(
+        np.array([10], dtype=np.int16), sample_rate=16_000, channels=1
+    )
+    backend.streams["system"].emit(
+        np.array([20], dtype=np.int16), sample_rate=16_000, channels=1
+    )
+
+    assert worker.system_queue.unfinished_tasks == 1
+    worker.system_queue.get_nowait()
+    worker.system_queue.task_done()
+    assert worker.system_queue.unfinished_tasks == 0
+
+    worker.stop()
+
+
 def test_worker_pause_resume_and_stop_lifecycle_is_safe() -> None:
     from interview_assistant.audio.worker import AudioWorker
 
@@ -308,6 +424,36 @@ def test_worker_pause_resume_and_stop_lifecycle_is_safe() -> None:
     assert backend.close_count == 1
 
 
+def test_worker_failed_resume_stays_paused_rolls_back_and_can_retry() -> None:
+    from interview_assistant.audio.worker import AudioWorker
+
+    backend = ResumeFailsOnceBackend()
+    worker = AudioWorker("system", "mic", backend_factory=lambda: backend)
+
+    worker.start()
+    worker.pause()
+
+    with pytest.raises(OSError, match="microphone cannot be resumed"):
+        worker.resume()
+
+    backend.streams["system"].emit(
+        np.array([10], dtype=np.int16), sample_rate=16_000, channels=1
+    )
+    with pytest.raises(Empty):
+        worker.system_queue.get_nowait()
+    assert all(stream.stop_count == 2 for stream in backend.streams.values())
+
+    worker.resume()
+
+    assert all(stream.start_count == 3 for stream in backend.streams.values())
+    backend.streams["system"].emit(
+        np.array([20], dtype=np.int16), sample_rate=16_000, channels=1
+    )
+    assert worker.system_queue.get_nowait().source is AudioSource.SYSTEM
+
+    worker.stop()
+
+
 def test_worker_preserves_start_error_while_cleaning_partially_opened_streams() -> None:
     from interview_assistant.audio.worker import AudioWorker
 
@@ -319,6 +465,38 @@ def test_worker_preserves_start_error_while_cleaning_partially_opened_streams() 
 
     assert backend.streams["system"].close_count == 1
     assert backend.close_count == 1
+
+
+def test_worker_failed_second_stream_start_discards_callbacks_and_can_retry() -> None:
+    from interview_assistant.audio.worker import AudioWorker
+
+    failing_backend = SecondStartFailsBackend()
+    retry_backend = FakeAudioBackend()
+    worker = AudioWorker(
+        "system",
+        "mic",
+        backend_factory=iter([failing_backend, retry_backend]).__next__,
+    )
+
+    with pytest.raises(OSError, match="microphone cannot be started"):
+        worker.start()
+
+    with pytest.raises(Empty):
+        worker.system_queue.get_nowait()
+
+    worker.start()
+    retry_backend.streams["system"].emit(
+        np.array([300, 400], dtype=np.int16), sample_rate=48_000, channels=1
+    )
+
+    frame = worker.system_queue.get_nowait()
+    np.testing.assert_allclose(
+        frame.samples,
+        np.array([300 / 32_768], dtype=np.float32),
+    )
+    assert failing_backend.close_count == 1
+
+    worker.stop()
 
 
 def test_concurrent_stop_waits_for_start_then_closes_all_resources() -> None:

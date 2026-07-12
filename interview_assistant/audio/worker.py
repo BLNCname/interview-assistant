@@ -134,7 +134,6 @@ class AudioWorker:
                     raise RuntimeError("stopped audio worker cannot be started")
                 if self._started:
                     return
-                self._started = True
 
             backend: _AudioBackend | None = None
             streams: dict[AudioSource, _InputStream] = {}
@@ -150,13 +149,12 @@ class AudioWorker:
                     stream.start_stream()
             except BaseException:
                 self._close_resources(streams.values(), backend, suppress_errors=True)
-                with self._lock:
-                    self._started = False
                 raise
 
             with self._lock:
                 self._backend = backend
                 self._streams = streams
+                self._started = True
 
     def pause(self) -> None:
         with self._lifecycle_lock:
@@ -173,10 +171,19 @@ class AudioWorker:
             with self._lock:
                 if not self._started or not self._paused or self._stopped:
                     return
-                self._paused = False
                 streams = tuple(self._streams.values())
-            for stream in streams:
-                stream.start_stream()
+            try:
+                for stream in streams:
+                    stream.start_stream()
+            except BaseException:
+                for stream in streams:
+                    try:
+                        stream.stop_stream()
+                    except Exception:
+                        pass
+                raise
+            with self._lock:
+                self._paused = False
 
     def stop(self) -> None:
         with self._lifecycle_lock:
@@ -194,6 +201,9 @@ class AudioWorker:
 
     def _callback_for(self, source: AudioSource) -> _AudioCallback:
         def callback(data: bytes, sample_rate: int, channels: int) -> None:
+            with self._lock:
+                if not self._started or self._paused or self._stopped:
+                    return
             samples = self._converters[source].convert(data, sample_rate, channels)
             frame = AudioFrame(source, self._clock(), samples)
             with self._lock:
@@ -207,6 +217,8 @@ class AudioWorker:
                         queue.get_nowait()
                     except Empty:
                         pass
+                    else:
+                        queue.task_done()
                     queue.put_nowait(frame)
 
         return callback
