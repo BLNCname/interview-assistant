@@ -1,4 +1,5 @@
 from collections.abc import Callable
+from queue import Queue
 from threading import Event, Thread, get_ident
 from time import monotonic, sleep
 
@@ -160,6 +161,75 @@ def test_worker_keeps_final_source_language_and_timestamps_separate() -> None:
     assert worker.hypothesis_queue.get_nowait() is system
 
 
+def test_worker_preserves_supplied_bounded_hypothesis_queue() -> None:
+    output = Queue[TranscriptHypothesis](maxsize=2)
+
+    worker = StreamingSTTWorker(
+        engine=RecordingEngine(),
+        hypothesis_queue=output,
+    )
+
+    assert worker.hypothesis_queue is output
+
+
+def test_worker_rejects_unbounded_supplied_hypothesis_queue() -> None:
+    with pytest.raises(ValueError, match="hypothesis queue must be bounded"):
+        StreamingSTTWorker(
+            engine=RecordingEngine(),
+            hypothesis_queue=Queue[TranscriptHypothesis](),
+        )
+
+
+def test_plain_hypothesis_queue_coalesces_at_capacity_without_losing_join_work() -> None:
+    output = Queue[TranscriptHypothesis](maxsize=1)
+    partial = _hypothesis(
+        AudioSource.MICROPHONE,
+        text="draft",
+        is_final=False,
+    )
+    system_final = _hypothesis(text="retained final")
+    output.put_nowait(partial)
+
+    _put_hypothesis(output, system_final)
+
+    assert output.qsize() == 1
+    assert output.unfinished_tasks == 1
+    assert output.get_nowait() is system_final
+    output.task_done()
+    output.join()
+
+
+def test_plain_hypothesis_queue_preserves_in_flight_join_accounting() -> None:
+    output = Queue[TranscriptHypothesis](maxsize=1)
+    in_flight = _hypothesis(text="in flight")
+    retained = _hypothesis(
+        AudioSource.MICROPHONE,
+        text="queued final",
+    )
+    output.put_nowait(in_flight)
+    assert output.get_nowait() is in_flight
+
+    _put_hypothesis(output, retained)
+
+    join_returned = Event()
+
+    def join_output() -> None:
+        output.join()
+        join_returned.set()
+
+    joiner = Thread(target=join_output)
+    joiner.start()
+    assert join_returned.wait(timeout=0.05) is False
+    output.task_done()
+    assert join_returned.wait(timeout=0.05) is False
+    assert output.get_nowait() is retained
+    output.task_done()
+    joiner.join(timeout=2.0)
+
+    assert join_returned.is_set()
+    assert not joiner.is_alive()
+
+
 class BlockingPublicationQueue(_CoalescingHypothesisQueue):
     def __init__(self) -> None:
         super().__init__(maxsize=1)
@@ -168,12 +238,22 @@ class BlockingPublicationQueue(_CoalescingHypothesisQueue):
         self.mutated_after_stop = False
         self.stop_returned: Event | None = None
 
-    def put_coalesced(self, item: TranscriptHypothesis) -> None:
+    def _replace_locked(
+        self,
+        retained: list[TranscriptHypothesis],
+        *,
+        discarded_existing: int,
+        incoming_retained: bool,
+    ) -> None:
         self.entered.set()
         assert self.release.wait(timeout=2.0)
         assert self.stop_returned is not None
         self.mutated_after_stop = self.stop_returned.is_set()
-        super().put_coalesced(item)
+        super()._replace_locked(
+            retained,
+            discarded_existing=discarded_existing,
+            incoming_retained=incoming_retained,
+        )
 
 
 def test_stop_linearizes_with_in_progress_queue_publication() -> None:
@@ -184,8 +264,8 @@ def test_stop_linearizes_with_in_progress_queue_publication() -> None:
     worker = StreamingSTTWorker(
         engine=RecordingEngine(),
         on_hypothesis=lambda _: callback_after_stop.append(stop_returned.is_set()),
+        hypothesis_queue=output,
     )
-    worker._hypothesis_queue = output
     publisher = Thread(target=worker._publish, args=(_hypothesis(),))
     publisher.start()
     assert output.entered.wait(timeout=2.0)
@@ -205,6 +285,68 @@ def test_stop_linearizes_with_in_progress_queue_publication() -> None:
     assert output.qsize() == 1
     assert output.mutated_after_stop is False
     assert callback_after_stop == [False]
+
+
+def test_stop_deadline_covers_blocked_publication_and_eventual_cleanup() -> None:
+    callback_entered = Event()
+    release_callback = Event()
+    published: list[TranscriptHypothesis] = []
+
+    def blocking_callback(hypothesis: TranscriptHypothesis) -> None:
+        published.append(hypothesis)
+        callback_entered.set()
+        assert release_callback.wait(timeout=2.0)
+
+    worker = StreamingSTTWorker(
+        engine=RecordingEngine(),
+        on_hypothesis=blocking_callback,
+        partial_interval_seconds=1.0,
+        silence_duration_seconds=0.6,
+    )
+    worker.submit(_frame(AudioSource.SYSTEM, 0.0, 0.25, 0.2))
+    worker.submit(_frame(AudioSource.SYSTEM, 0.2, 0.0, 0.6))
+    worker.start()
+    assert callback_entered.wait(timeout=2.0)
+
+    stop_results: list[bool] = []
+    stop_elapsed: list[float] = []
+    stop_returned = Event()
+
+    def stop_worker() -> None:
+        started_at = monotonic()
+        stop_results.append(worker.stop(timeout=0.02))
+        stop_elapsed.append(monotonic() - started_at)
+        stop_returned.set()
+
+    stopper = Thread(target=stop_worker)
+    stopper.start()
+    try:
+        assert stop_returned.wait(timeout=0.5)
+        assert stop_results == [False]
+        assert 0.01 <= stop_elapsed[0] < 0.2
+
+        with pytest.raises(RuntimeError, match="cannot accept audio"):
+            worker.submit(_frame(AudioSource.SYSTEM, 1.0, 0.25, 0.2))
+        with pytest.raises(RuntimeError, match="cannot be started"):
+            worker.start()
+
+        late_publisher = Thread(
+            target=worker._publish,
+            args=(_hypothesis(AudioSource.MICROPHONE, text="late"),),
+        )
+        late_publisher.start()
+        late_publisher.join(timeout=0.2)
+        assert not late_publisher.is_alive()
+        assert len(published) == 1
+    finally:
+        release_callback.set()
+        stopper.join(timeout=2.0)
+
+    _wait_for(lambda: not worker.is_running)
+
+    assert worker.system_queue.qsize() == 0
+    assert worker.system_queue.unfinished_tasks == 0
+    assert all(state.started_at is None for state in worker._states.values())
 
 
 def test_callback_can_reentrantly_stop_worker() -> None:

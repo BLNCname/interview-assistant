@@ -3,6 +3,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from queue import Empty, Full, Queue
 from threading import Event, Lock, RLock, Thread, current_thread
+from time import monotonic
 from typing import Protocol, TypeVar
 
 import numpy as np
@@ -62,34 +63,7 @@ class _CoalescingHypothesisQueue(Queue[TranscriptHypothesis]):
         super().__init__(maxsize=maxsize)
 
     def put_coalesced(self, item: TranscriptHypothesis) -> None:
-        with self.mutex:
-            queued = list(self.queue)
-            latest_by_source: dict[
-                AudioSource,
-                tuple[int, TranscriptHypothesis],
-            ] = {}
-            for sequence, candidate in enumerate((*queued, item)):
-                previous = latest_by_source.get(candidate.source)
-                if previous is None or _hypothesis_priority(
-                    candidate
-                ) >= _hypothesis_priority(previous[1]):
-                    latest_by_source[candidate.source] = (sequence, candidate)
-
-            retained_entries = sorted(
-                latest_by_source.values(),
-                key=lambda entry: (_hypothesis_priority(entry[1]), entry[0]),
-                reverse=True,
-            )[: self.maxsize]
-            retained_existing = sum(
-                sequence < len(queued) for sequence, _ in retained_entries
-            )
-            self._replace_locked(
-                [candidate for _, candidate in retained_entries],
-                discarded_existing=len(queued) - retained_existing,
-                incoming_retained=any(
-                    sequence == len(queued) for sequence, _ in retained_entries
-                ),
-            )
+        _put_hypothesis(self, item)
 
     def _replace_locked(
         self,
@@ -98,28 +72,12 @@ class _CoalescingHypothesisQueue(Queue[TranscriptHypothesis]):
         discarded_existing: int,
         incoming_retained: bool,
     ) -> None:
-        old_size = self._qsize()
-        while self._qsize():
-            self._get()
-        for candidate in retained:
-            self._put(candidate)
-
-        unfinished_tasks = (
-            self.unfinished_tasks
-            - discarded_existing
-            + int(incoming_retained)
+        _replace_hypotheses_locked(
+            self,
+            retained,
+            discarded_existing=discarded_existing,
+            incoming_retained=incoming_retained,
         )
-        if unfinished_tasks < 0:
-            raise ValueError("task_done() called too many times")
-        self.unfinished_tasks = unfinished_tasks
-
-        new_size = self._qsize()
-        if new_size > old_size:
-            self.not_empty.notify()
-        if new_size < old_size:
-            self.not_full.notify_all()
-        if unfinished_tasks == 0:
-            self.all_tasks_done.notify_all()
 
 
 @dataclass(slots=True)
@@ -185,6 +143,7 @@ class StreamingSTTWorker:
         *,
         engine: TranscriptionEngine | None = None,
         on_hypothesis: _HypothesisCallback | None = None,
+        hypothesis_queue: Queue[TranscriptHypothesis] | None = None,
         queue_capacity: int = _DEFAULT_INPUT_CAPACITY,
         hypothesis_capacity: int = _DEFAULT_HYPOTHESIS_CAPACITY,
         partial_interval_seconds: float = _DEFAULT_PARTIAL_INTERVAL_SECONDS,
@@ -228,6 +187,12 @@ class StreamingSTTWorker:
         if any(queue.maxsize <= 0 for queue in self._queues.values()):
             raise ValueError("input queues must be bounded")
 
+        output = hypothesis_queue
+        if output is None:
+            output = _CoalescingHypothesisQueue(maxsize=hypothesis_capacity)
+        if output.maxsize <= 0:
+            raise ValueError("hypothesis queue must be bounded")
+
         make_vad = vad_factory or EnergyVoiceActivityDetector
         self._states = {
             source: _SourceState(
@@ -238,9 +203,7 @@ class StreamingSTTWorker:
         }
         self._engine = engine or WhisperEngine()
         self._on_hypothesis = on_hypothesis
-        self._hypothesis_queue = _CoalescingHypothesisQueue(
-            maxsize=hypothesis_capacity
-        )
+        self._hypothesis_queue = output
         self._partial_interval_seconds = partial_interval_seconds
         self._partial_window_samples = round(
             partial_window_seconds * _TARGET_SAMPLE_RATE
@@ -253,6 +216,7 @@ class StreamingSTTWorker:
         )
         self._silence_duration_seconds = silence_duration_seconds
         self._language_detection_seconds = language_detection_seconds
+        self._stop_requested = Event()
         self._stop_event = Event()
         self._input_available = Event()
         self._publication_gate = RLock()
@@ -286,7 +250,7 @@ class StreamingSTTWorker:
 
     def submit(self, frame: AudioFrame) -> None:
         with self._lifecycle_lock:
-            if self._stopped:
+            if self._stop_requested.is_set() or self._stopped:
                 raise RuntimeError("stopped STT worker cannot accept audio")
             queue = self._queues[frame.source]
             _put_latest(queue, frame)
@@ -294,7 +258,7 @@ class StreamingSTTWorker:
 
     def start(self) -> None:
         with self._lifecycle_lock:
-            if self._stopped:
+            if self._stop_requested.is_set() or self._stopped:
                 raise RuntimeError("stopped STT worker cannot be started")
             if self.is_running:
                 return
@@ -309,21 +273,31 @@ class StreamingSTTWorker:
     def stop(self, timeout: float = 5.0) -> bool:
         if timeout < 0:
             raise ValueError("timeout must be non-negative")
-        with self._publication_gate:
-            with self._lifecycle_lock:
-                self._stopped = True
-                self._stop_event.set()
-                self._input_available.set()
-                thread = self._thread
+        deadline = monotonic() + timeout
+        self._stop_requested.set()
+        remaining = max(0.0, deadline - monotonic())
+        if not self._publication_gate.acquire(timeout=remaining):
+            return False
+        try:
+            thread = self._transition_to_stopped()
+        finally:
+            self._publication_gate.release()
 
         if thread is not None and thread is not current_thread():
-            thread.join(timeout=timeout)
+            thread.join(timeout=max(0.0, deadline - monotonic()))
         stopped = thread is None or not thread.is_alive()
         if stopped:
             self._discard_pending_frames()
             for state in self._states.values():
                 state.reset_utterance()
         return stopped
+
+    def _transition_to_stopped(self) -> Thread | None:
+        with self._lifecycle_lock:
+            self._stopped = True
+            self._stop_event.set()
+            self._input_available.set()
+            return self._thread
 
     def _run(self) -> None:
         try:
@@ -578,16 +552,22 @@ class StreamingSTTWorker:
         return selected
 
     def _publish(self, hypothesis: TranscriptHypothesis) -> None:
+        if self._stop_requested.is_set():
+            return
         with self._publication_gate:
-            if self._stop_event.is_set():
-                return
-            _put_hypothesis(self._hypothesis_queue, hypothesis)
-            if self._on_hypothesis is None:
+            if self._stop_requested.is_set():
+                self._transition_to_stopped()
                 return
             try:
-                self._on_hypothesis(hypothesis)
-            except Exception as error:
-                self._record_error(error)
+                _put_hypothesis(self._hypothesis_queue, hypothesis)
+                if self._on_hypothesis is not None:
+                    try:
+                        self._on_hypothesis(hypothesis)
+                    except Exception as error:
+                        self._record_error(error)
+            finally:
+                if self._stop_requested.is_set():
+                    self._transition_to_stopped()
 
     def _record_error(self, error: Exception) -> None:
         with self._error_lock:
@@ -679,10 +659,86 @@ def _normalized_word(word: str) -> str:
 
 
 def _put_hypothesis(
-    queue: _CoalescingHypothesisQueue,
+    queue: Queue[TranscriptHypothesis],
     item: TranscriptHypothesis,
 ) -> None:
-    queue.put_coalesced(item)
+    with queue.mutex:
+        _coalesce_hypothesis_locked(queue, item)
+
+
+def _coalesce_hypothesis_locked(
+    queue: Queue[TranscriptHypothesis],
+    item: TranscriptHypothesis,
+) -> None:
+    queued = list(queue.queue)
+    latest_by_source: dict[
+        AudioSource,
+        tuple[int, TranscriptHypothesis],
+    ] = {}
+    for sequence, candidate in enumerate((*queued, item)):
+        previous = latest_by_source.get(candidate.source)
+        if previous is None or _hypothesis_priority(
+            candidate
+        ) >= _hypothesis_priority(previous[1]):
+            latest_by_source[candidate.source] = (sequence, candidate)
+
+    retained_entries = sorted(
+        latest_by_source.values(),
+        key=lambda entry: (_hypothesis_priority(entry[1]), entry[0]),
+        reverse=True,
+    )[: queue.maxsize]
+    retained_existing = sum(
+        sequence < len(queued) for sequence, _ in retained_entries
+    )
+    retained = [candidate for _, candidate in retained_entries]
+    discarded_existing = len(queued) - retained_existing
+    incoming_retained = any(
+        sequence == len(queued) for sequence, _ in retained_entries
+    )
+    if isinstance(queue, _CoalescingHypothesisQueue):
+        queue._replace_locked(
+            retained,
+            discarded_existing=discarded_existing,
+            incoming_retained=incoming_retained,
+        )
+        return
+    _replace_hypotheses_locked(
+        queue,
+        retained,
+        discarded_existing=discarded_existing,
+        incoming_retained=incoming_retained,
+    )
+
+
+def _replace_hypotheses_locked(
+    queue: Queue[TranscriptHypothesis],
+    retained: list[TranscriptHypothesis],
+    *,
+    discarded_existing: int,
+    incoming_retained: bool,
+) -> None:
+    old_size = queue._qsize()
+    while queue._qsize():
+        queue._get()
+    for candidate in retained:
+        queue._put(candidate)
+
+    unfinished_tasks = (
+        queue.unfinished_tasks
+        - discarded_existing
+        + int(incoming_retained)
+    )
+    if unfinished_tasks < 0:
+        raise ValueError("task_done() called too many times")
+    queue.unfinished_tasks = unfinished_tasks
+
+    new_size = queue._qsize()
+    if new_size > old_size:
+        queue.not_empty.notify()
+    if new_size < old_size:
+        queue.not_full.notify_all()
+    if unfinished_tasks == 0:
+        queue.all_tasks_done.notify_all()
 
 
 def _hypothesis_priority(hypothesis: TranscriptHypothesis) -> int:
