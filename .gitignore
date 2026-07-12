@@ -12,4 +12,5 @@ dist/
 logs/
 screenshots/
 .superpowers/
+.worktrees/
 interview_assistant.log
