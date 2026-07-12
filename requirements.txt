@@ -1,0 +1,22 @@
+# Audio & Transcription
+pyaudio>=0.2.14
+faster-whisper>=1.0.3
+ctranslate2>=4.4.0
+
+# Screen Capture
+mss>=9.0.1
+
+# LLM Client
+requests>=2.32.3
+
+# GUI & Overlay
+PyQt6>=6.7.0
+pywin32>=308  # Win32 API hooks для Windows
+
+# Hotkeys & Utilities
+pynput>=1.7.7
+pyyaml>=6.0.2
+watchdog>=4.0.1
+
+# Image processing (для base64 кодирования)
+Pillow>=10.4.0
