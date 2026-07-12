@@ -108,6 +108,22 @@ def test_polite_anchored_question_is_classified() -> None:
     assert result.kind == "theory"
 
 
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Please, could you compare Redis and Memcached",
+        "Пожалуйста, могли бы вы сравнить Redis и Memcached",
+    ],
+)
+def test_polite_prefixed_question_without_question_mark_is_classified(text: str) -> None:
+    detector = QuestionDetector()
+
+    result = detector.detect(AudioSource.SYSTEM, text, is_final=True)
+
+    assert result is not None
+    assert result.kind == "theory"
+
+
 def test_detection_normalizes_whitespace() -> None:
     detector = QuestionDetector()
 

@@ -55,7 +55,7 @@ _CANONICAL_PUNCTUATION = re.compile(r"[^\w]+", re.UNICODE)
 _TOKEN = re.compile(r"\w+", re.UNICODE)
 
 _INTERROGATIVE = re.compile(
-    r"^(?:please\s+)?(?:"
+    r"^(?:(?:please|пожалуйста)[,\s]+)?(?:"
     r"who|what|when|where|why|how|which|whose|whom|"
     r"can\s+you|could\s+you|would\s+you|will\s+you|should\s+(?:i|we)|"
     r"do\s+you|does\s+|did\s+|is\s+|are\s+|was\s+|were\s+|"
