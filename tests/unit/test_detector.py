@@ -1,0 +1,163 @@
+from dataclasses import FrozenInstanceError
+from typing import Literal, get_type_hints
+
+import pytest
+
+from interview_assistant.audio.models import AudioSource
+from interview_assistant.transcript.detector import DetectedQuestion, QuestionDetector
+
+
+class ManualClock:
+    def __init__(self, now: float = 0.0) -> None:
+        self.now = now
+
+    def __call__(self) -> float:
+        return self.now
+
+    def advance(self, seconds: float) -> None:
+        self.now += seconds
+
+
+def test_microphone_never_auto_triggers() -> None:
+    detector = QuestionDetector()
+
+    assert detector.detect(AudioSource.MICROPHONE, "Как работает B-tree?") is None
+
+
+def test_partial_system_hypothesis_never_auto_triggers() -> None:
+    detector = QuestionDetector()
+
+    assert detector.detect(AudioSource.SYSTEM, "How does a B-tree work?", is_final=False) is None
+
+
+def test_system_design_question_is_classified() -> None:
+    detector = QuestionDetector()
+
+    result = detector.detect(
+        AudioSource.SYSTEM,
+        "Спроектируйте сервис коротких ссылок",
+    )
+
+    assert result is not None
+    assert result.kind == "system_design"
+
+
+@pytest.mark.parametrize(
+    ("text", "expected_kind"),
+    [
+        ("What is eventual consistency?", "theory"),
+        ("Как работает B-tree?", "theory"),
+        ("Implement binary search in Python", "coding"),
+        ("Реализуйте алгоритм LRU-кэша", "coding"),
+        ("Design a scalable URL shortener", "system_design"),
+        ("Спроектируйте распределённый чат", "system_design"),
+        ("Tell me about a time you resolved a conflict", "behavioral"),
+        ("Расскажите о случае конфликта в команде", "behavioral"),
+        ("What is wrong with the code on this screenshot?", "screen_analysis"),
+        ("Проанализируйте код на экране", "screen_analysis"),
+    ],
+)
+def test_ru_and_en_question_intents_are_classified(
+    text: str,
+    expected_kind: str,
+) -> None:
+    detector = QuestionDetector()
+
+    result = detector.detect(AudioSource.SYSTEM, text)
+
+    assert result is not None
+    assert result.kind == expected_kind
+
+
+def test_non_question_declarative_text_is_ignored() -> None:
+    detector = QuestionDetector()
+
+    assert detector.detect(AudioSource.SYSTEM, "The cache is warm and ready") is None
+
+
+def test_detection_normalizes_whitespace() -> None:
+    detector = QuestionDetector()
+
+    result = detector.detect(AudioSource.SYSTEM, "  How\n does\tRedis work?  ")
+
+    assert result is not None
+    assert result.text == "How does Redis work?"
+
+
+def test_exact_duplicate_is_suppressed_until_cooldown_expires() -> None:
+    clock = ManualClock(10.0)
+    detector = QuestionDetector(cooldown_seconds=5.0, clock=clock)
+
+    first = detector.detect(AudioSource.SYSTEM, "How does a B-tree work?")
+    clock.advance(4.9)
+    duplicate = detector.detect(AudioSource.SYSTEM, "  how does a B-tree work? ")
+    clock.advance(0.1)
+    after_cooldown = detector.detect(AudioSource.SYSTEM, "How does a B-tree work?")
+
+    assert first == DetectedQuestion(1, "theory", "How does a B-tree work?", 10.0)
+    assert duplicate is None
+    assert after_cooldown == DetectedQuestion(2, "theory", "How does a B-tree work?", 15.0)
+
+
+def test_semantic_near_duplicate_is_suppressed_during_cooldown() -> None:
+    clock = ManualClock(20.0)
+    detector = QuestionDetector(cooldown_seconds=10.0, clock=clock)
+
+    first = detector.detect(AudioSource.SYSTEM, "How does a B-tree work?")
+    clock.advance(1.0)
+    near_duplicate = detector.detect(
+        AudioSource.SYSTEM,
+        "Could you explain how B trees work?",
+    )
+
+    assert first is not None
+    assert near_duplicate is None
+
+
+def test_similar_question_shape_with_different_subject_is_not_suppressed() -> None:
+    clock = ManualClock(25.0)
+    detector = QuestionDetector(cooldown_seconds=10.0, clock=clock)
+
+    cache = detector.detect(AudioSource.SYSTEM, "How would you design a cache?")
+    clock.advance(1.0)
+    chat = detector.detect(AudioSource.SYSTEM, "How would you design a chat?")
+
+    assert cache is not None
+    assert chat is not None
+    assert (cache.request_id, chat.request_id) == (1, 2)
+
+
+def test_strong_coding_imperative_without_question_mark_is_classified() -> None:
+    detector = QuestionDetector()
+
+    result = detector.detect(AudioSource.SYSTEM, "Implement an LRU cache")
+
+    assert result is not None
+    assert result.kind == "coding"
+
+
+def test_manual_force_bypasses_audio_role_and_deduplication() -> None:
+    clock = ManualClock(30.0)
+    detector = QuestionDetector(clock=clock)
+
+    assert detector.detect(AudioSource.MICROPHONE, "Explain the code") is None
+    first = detector.force("  Explain\n the code  ")
+    second = detector.force("Explain the code")
+
+    assert first == DetectedQuestion(1, "manual", "Explain the code", 30.0)
+    assert second == DetectedQuestion(2, "manual", "Explain the code", 30.0)
+
+
+def test_detected_question_has_exact_frozen_typed_contract() -> None:
+    question = DetectedQuestion(1, "coding", "Implement a queue", 1.0)
+
+    assert get_type_hints(DetectedQuestion)["kind"] == Literal[
+        "theory",
+        "coding",
+        "system_design",
+        "behavioral",
+        "screen_analysis",
+        "manual",
+    ]
+    with pytest.raises(FrozenInstanceError):
+        question.text = "changed"  # type: ignore[misc]
