@@ -1,4 +1,5 @@
 import math
+from unittest.mock import Mock
 
 import pytest
 from PyQt6.QtCore import QEvent, QPointF, QSettings, Qt
@@ -7,7 +8,8 @@ from PyQt6.QtWidgets import QApplication, QLabel, QStyle, QWidget
 
 from interview_assistant.config import OverlayConfig
 from interview_assistant.events import EventBus
-from interview_assistant.state import ApplicationState
+from interview_assistant.state import ApplicationState, StateMachine
+from interview_assistant.ui import overlay as overlay_module
 from interview_assistant.ui.overlay import (
     _ANSWER_BACKGROUND_ALPHA,
     _ANSWER_BACKGROUND_RGB,
@@ -17,6 +19,16 @@ from interview_assistant.ui.overlay import (
     _STATUS_CHIP_RGB,
     LiquidRibbon,
 )
+from interview_assistant.ui.windows_affinity import AffinityResult, WDA_EXCLUDEFROMCAPTURE
+
+
+@pytest.fixture(autouse=True)
+def _prevent_real_user32_calls(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        overlay_module,
+        "apply_capture_exclusion",
+        lambda _hwnd: AffinityResult(True, WDA_EXCLUDEFROMCAPTURE, None),
+    )
 
 
 def test_streaming_delta_appends_without_replacing(qtbot) -> None:
@@ -92,6 +104,77 @@ def test_state_signal_is_connected_before_window_is_shown(qtbot) -> None:
     bus.state_changed.emit("Generating")
 
     assert ribbon.status_label.text() == "Generating"
+    assert ribbon.status_label.textFormat() is Qt.TextFormat.PlainText
+
+
+def test_capture_exclusion_runs_only_after_native_hwnd_exists(qtbot) -> None:
+    expected = AffinityResult(True, WDA_EXCLUDEFROMCAPTURE, None)
+    applier = Mock(return_value=expected)
+    ribbon = LiquidRibbon(EventBus(), settings=None, affinity_applier=applier)
+    qtbot.addWidget(ribbon)
+
+    assert ribbon.affinity_result is None
+    applier.assert_not_called()
+
+    ribbon.show()
+    qtbot.waitExposed(ribbon)
+
+    native_hwnd = int(ribbon.winId())
+    assert native_hwnd != 0
+    applier.assert_called_once_with(native_hwnd)
+    assert ribbon.affinity_result is expected
+    with pytest.raises(AttributeError):
+        setattr(ribbon, "affinity_result", expected)
+
+
+def test_capture_exclusion_reapplies_only_when_qt_creates_a_new_hwnd(
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    handles = [101]
+    expected = AffinityResult(True, WDA_EXCLUDEFROMCAPTURE, None)
+    applier = Mock(return_value=expected)
+    monkeypatch.setattr(LiquidRibbon, "winId", lambda _ribbon: handles[-1])
+    ribbon = LiquidRibbon(EventBus(), settings=None, affinity_applier=applier)
+    qtbot.addWidget(ribbon)
+
+    ribbon.show()
+    qtbot.waitExposed(ribbon)
+    ribbon.hide()
+    ribbon.show()
+    qtbot.waitExposed(ribbon)
+
+    assert [entry.args[0] for entry in applier.call_args_list] == [101]
+
+    handles.append(202)
+    ribbon.hide()
+    ribbon.show()
+    qtbot.waitExposed(ribbon)
+
+    assert [entry.args[0] for entry in applier.call_args_list] == [101, 202]
+
+
+def test_capture_exclusion_failure_remains_visible_across_state_changes(qtbot) -> None:
+    bus = EventBus()
+    failure = AffinityResult(False, None, 5)
+    ribbon = LiquidRibbon(
+        bus,
+        settings=None,
+        affinity_applier=Mock(return_value=failure),
+    )
+    qtbot.addWidget(ribbon)
+
+    ribbon.show()
+    qtbot.waitExposed(ribbon)
+
+    assert ribbon.affinity_result is failure
+    assert ribbon.status_label.text() == "Capture exclusion unavailable"
+    assert ribbon.status_dot._color.name() == "#fb7185"
+
+    bus.state_changed.emit("ready")
+    bus.state_changed.emit("Generating")
+
+    assert ribbon.status_label.text() == "Capture exclusion unavailable"
     assert ribbon.status_label.textFormat() is Qt.TextFormat.PlainText
 
 
@@ -600,6 +683,170 @@ def test_application_owns_ribbon_and_shows_it_only_when_started(qtbot) -> None:
     assert app.ribbon.isVisible()
     assert app.states.state is ApplicationState.READY
     assert app.ribbon.status_label.text() == ApplicationState.READY.value
+    app.shutdown()
+
+
+def test_application_stays_offline_when_capture_exclusion_is_not_verified(qtbot) -> None:
+    from interview_assistant.app import InterviewApplication
+
+    qt_app = QApplication.instance()
+    assert isinstance(qt_app, QApplication)
+    failure = AffinityResult(False, 0x00000001, None)
+    app = InterviewApplication(
+        qt_app,
+        EventBus(),
+        StateMachine(),
+        overlay_settings=None,
+        affinity_applier=Mock(return_value=failure),
+    )
+    qtbot.addWidget(app.ribbon)
+    announced_states: list[str] = []
+    app.events.state_changed.connect(announced_states.append)
+
+    app.start()
+    qtbot.waitExposed(app.ribbon)
+
+    assert app.states.state is ApplicationState.OFFLINE
+    assert announced_states == [ApplicationState.OFFLINE.value]
+    assert app.ribbon.affinity_result is failure
+    assert app.ribbon.status_label.text() == "Capture exclusion unavailable"
+    app.events.state_changed.emit(ApplicationState.READY.value)
+    assert app.ribbon.status_label.text() == "Capture exclusion unavailable"
+    app.shutdown()
+
+
+def test_new_hwnd_affinity_failure_revokes_application_readiness(
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from interview_assistant.app import InterviewApplication
+
+    handles = [101]
+    verified = AffinityResult(True, WDA_EXCLUDEFROMCAPTURE, None)
+    failure = AffinityResult(False, 0x00000001, None)
+    applier = Mock(side_effect=[verified, failure])
+    monkeypatch.setattr(LiquidRibbon, "winId", lambda _ribbon: handles[-1])
+    qt_app = QApplication.instance()
+    assert isinstance(qt_app, QApplication)
+    app = InterviewApplication(
+        qt_app,
+        EventBus(),
+        StateMachine(),
+        overlay_settings=None,
+        affinity_applier=applier,
+    )
+    qtbot.addWidget(app.ribbon)
+    announced_states: list[str] = []
+    app.events.state_changed.connect(announced_states.append)
+
+    app.start()
+    qtbot.waitExposed(app.ribbon)
+    assert app.states.state is ApplicationState.READY
+
+    handles.append(202)
+    app.ribbon.hide()
+    app.ribbon.show()
+    qtbot.waitExposed(app.ribbon)
+
+    assert [entry.args[0] for entry in applier.call_args_list] == [101, 202]
+    assert app.ribbon.affinity_result is failure
+    assert app.states.state is ApplicationState.OFFLINE
+    assert announced_states == [
+        ApplicationState.READY.value,
+        ApplicationState.OFFLINE.value,
+    ]
+    assert app.ribbon.status_label.text() == "Capture exclusion unavailable"
+    app.shutdown()
+
+
+def test_new_hwnd_verified_affinity_restores_application_readiness(
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from interview_assistant.app import InterviewApplication
+
+    handles = [101]
+    failure = AffinityResult(False, None, 5)
+    verified = AffinityResult(True, WDA_EXCLUDEFROMCAPTURE, None)
+    applier = Mock(side_effect=[failure, verified])
+    monkeypatch.setattr(LiquidRibbon, "winId", lambda _ribbon: handles[-1])
+    qt_app = QApplication.instance()
+    assert isinstance(qt_app, QApplication)
+    app = InterviewApplication(
+        qt_app,
+        EventBus(),
+        StateMachine(),
+        overlay_settings=None,
+        affinity_applier=applier,
+    )
+    qtbot.addWidget(app.ribbon)
+    announced_states: list[str] = []
+    app.events.state_changed.connect(announced_states.append)
+
+    app.start()
+    qtbot.waitExposed(app.ribbon)
+    assert app.states.state is ApplicationState.OFFLINE
+
+    handles.append(202)
+    app.ribbon.hide()
+    app.ribbon.show()
+    qtbot.waitExposed(app.ribbon)
+
+    assert app.ribbon.affinity_result is verified
+    assert app.states.state is ApplicationState.READY
+    assert announced_states == [
+        ApplicationState.OFFLINE.value,
+        ApplicationState.READY.value,
+    ]
+    assert app.ribbon.status_label.text() == ApplicationState.READY.value
+    app.shutdown()
+
+
+def test_application_for_test_never_calls_real_user32(
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from interview_assistant.app import InterviewApplication
+
+    default_applier = Mock(return_value=AffinityResult(False, None, 999))
+    monkeypatch.setattr(
+        overlay_module,
+        "apply_capture_exclusion",
+        default_applier,
+    )
+    app = InterviewApplication.for_test()
+    qtbot.addWidget(app.ribbon)
+
+    app.start()
+    qtbot.waitExposed(app.ribbon)
+
+    default_applier.assert_not_called()
+    assert app.states.state is ApplicationState.READY
+    assert app.ribbon.affinity_result == AffinityResult(
+        True,
+        WDA_EXCLUDEFROMCAPTURE,
+        None,
+    )
+    app.shutdown()
+
+
+def test_application_missing_affinity_result_is_non_ready_and_visible(
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from interview_assistant.app import InterviewApplication
+
+    app = InterviewApplication.for_test()
+    qtbot.addWidget(app.ribbon)
+    monkeypatch.setattr(app.ribbon, "show", lambda: None)
+
+    app.start()
+
+    assert app.states.state is ApplicationState.OFFLINE
+    assert app.ribbon.affinity_result is None
+    assert app.ribbon.status_label.text() == "Capture exclusion unavailable"
+    app.events.state_changed.emit(ApplicationState.READY.value)
+    assert app.ribbon.status_label.text() == "Capture exclusion unavailable"
     app.shutdown()
 
 

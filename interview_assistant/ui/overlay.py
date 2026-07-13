@@ -4,7 +4,7 @@ import math
 import re
 from collections.abc import Iterable, Iterator
 
-from PyQt6.QtCore import QByteArray, QPoint, QRect, QRectF, QSettings, QSize, Qt
+from PyQt6.QtCore import QByteArray, QPoint, QRect, QRectF, QSettings, QSize, Qt, pyqtSignal
 from PyQt6.QtGui import (
     QColor,
     QCloseEvent,
@@ -17,6 +17,7 @@ from PyQt6.QtGui import (
     QPainterPath,
     QPen,
     QResizeEvent,
+    QShowEvent,
     QTextCharFormat,
     QTextCursor,
 )
@@ -36,6 +37,11 @@ from PyQt6.QtWidgets import (
 
 from interview_assistant.config import OverlayConfig
 from interview_assistant.events import EventBus
+from interview_assistant.ui.windows_affinity import (
+    AffinityApplier,
+    AffinityResult,
+    apply_capture_exclusion,
+)
 
 _MARKDOWN_TOKEN = re.compile(r"\*\*([^*\n]+)\*\*|`([^`\n]+)`")
 _LONG_UNBROKEN_TOKEN = re.compile(r"\S{65,}")
@@ -202,7 +208,11 @@ class _StatusDot(QWidget):
 
     def set_state(self, state: str) -> None:
         normalized = state.casefold()
-        if "offline" in normalized or "protected" in normalized:
+        if (
+            "offline" in normalized
+            or "protected" in normalized
+            or "unavailable" in normalized
+        ):
             self._color = QColor("#fb7185")
         elif "recover" in normalized or "search" in normalized:
             self._color = QColor("#fbbf24")
@@ -225,7 +235,10 @@ class _StatusDot(QWidget):
 
 
 class LiquidRibbon(QMainWindow):
+    affinity_changed = pyqtSignal(AffinityResult)
+
     GEOMETRY_KEY = "overlay/geometry"
+    CAPTURE_EXCLUSION_UNAVAILABLE = "Capture exclusion unavailable"
     collapsed_height = 48
     resize_margin = 8
 
@@ -235,6 +248,7 @@ class LiquidRibbon(QMainWindow):
         *,
         config: OverlayConfig | None = None,
         settings: QSettings | None = None,
+        affinity_applier: AffinityApplier | None = None,
     ) -> None:
         flags = (
             Qt.WindowType.FramelessWindowHint
@@ -245,6 +259,13 @@ class LiquidRibbon(QMainWindow):
         self._events = events
         self._config = config or OverlayConfig()
         self._settings = settings
+        self._affinity_applier = (
+            affinity_applier if affinity_applier is not None else apply_capture_exclusion
+        )
+        self._affinity_result: AffinityResult | None = None
+        self._affinity_hwnd: int | None = None
+        self._capture_exclusion_unavailable = False
+        self._state_text = "Starting"
         self._active_request_id: int | None = None
         self._expanded_height = min(180, self._config.max_height)
         self._minimum_expanded_height = min(120, self._config.max_height)
@@ -269,6 +290,25 @@ class LiquidRibbon(QMainWindow):
         events.state_changed.connect(self.show_state)
         events.answer_reset.connect(self._reset_answer)
         events.answer_delta.connect(self.append_delta)
+
+    @property
+    def affinity_result(self) -> AffinityResult | None:
+        return self._affinity_result
+
+    def showEvent(self, event: QShowEvent | None) -> None:
+        super().showEvent(event)
+        hwnd = int(self.winId())
+        if hwnd == 0 or hwnd == self._affinity_hwnd:
+            return
+        self._affinity_hwnd = hwnd
+        self._affinity_result = self._affinity_applier(hwnd)
+        self._capture_exclusion_unavailable = not self._affinity_result.ok
+        self._refresh_status()
+        self.affinity_changed.emit(self._affinity_result)
+
+    def mark_capture_exclusion_unavailable(self) -> None:
+        self._capture_exclusion_unavailable = True
+        self._refresh_status()
 
     def _build_content(self) -> None:
         self.surface = _RibbonSurface(self._config.opacity, self)
@@ -500,8 +540,17 @@ class LiquidRibbon(QMainWindow):
         return False
 
     def show_state(self, state: str) -> None:
-        self.status_label.setText(state)
-        self.status_dot.set_state(state)
+        self._state_text = state
+        self._refresh_status()
+
+    def _refresh_status(self) -> None:
+        status = (
+            self.CAPTURE_EXCLUSION_UNAVAILABLE
+            if self._capture_exclusion_unavailable
+            else self._state_text
+        )
+        self.status_label.setText(status)
+        self.status_dot.set_state(status)
 
     def set_question(self, question: str) -> None:
         self.question_text = str(question)
