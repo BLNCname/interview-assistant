@@ -64,11 +64,17 @@ class RequestCoordinator:
         payload: Mapping[str, object],
     ) -> None:
         try:
-            async for event in self._client.stream_chat(payload):
-                if request_id != self._active_id:
-                    return
-                if event.type == "message.delta":
-                    self._events.answer_delta.emit(request_id, event.content)
+            stream = self._client.stream_chat(payload)
+            try:
+                async for event in stream:
+                    if request_id != self._active_id:
+                        return
+                    if event.type == "message.delta":
+                        self._events.answer_delta.emit(request_id, event.content)
+            finally:
+                close = getattr(stream, "aclose", None)
+                if close is not None:
+                    await close()
         except asyncio.CancelledError:
             raise
         except Exception:

@@ -170,18 +170,23 @@ class CancellationSuppressingDeltaClient:
     def __init__(self) -> None:
         self.started = asyncio.Event()
         self.attempted_delta = asyncio.Event()
+        self.closed = asyncio.Event()
 
     async def stream_chat(
         self,
         _payload: Mapping[str, object],
     ) -> AsyncIterator[ChatEvent]:
-        self.started.set()
         try:
-            await asyncio.Future()
-        except asyncio.CancelledError:
-            pass
-        self.attempted_delta.set()
-        yield ChatEvent(type="message.delta", content="too late")
+            self.started.set()
+            try:
+                await asyncio.Future()
+            except asyncio.CancelledError:
+                pass
+            self.attempted_delta.set()
+            yield ChatEvent(type="message.delta", content="too late")
+        finally:
+            await asyncio.sleep(0)
+            self.closed.set()
 
 
 async def test_submit_returns_monotonic_ids_resets_and_emits_current_deltas() -> None:
@@ -347,6 +352,7 @@ async def test_cancel_active_rejects_delta_when_generator_suppresses_cancellatio
     await coordinator.cancel_active()
 
     assert client.attempted_delta.is_set()
+    assert client.closed.is_set()
     assert events.answer_delta.calls == []
     assert events.notification.calls == []
     assert coordinator._active_task is None
