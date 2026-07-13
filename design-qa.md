@@ -3,7 +3,7 @@
 ## Evidence
 
 - Source visual truth: `C:\Users\temab\interview-assistant\.superpowers\brainstorm\119-1783842418\content\overlay-layout-options-v2.html`, variant B.
-- Source capture: `C:\Users\temab\interview-assistant\.worktrees\feature-interview-assistant\.superpowers\sdd\task-10-reference-ribbon.png` (`1872×116`).
+- Source capture: `C:\Users\temab\interview-assistant\.worktrees\feature-interview-assistant\.superpowers\sdd\task-10-reference-ribbon.png` (`1872×117`).
 - Rendered implementation: `C:\Users\temab\interview-assistant\.worktrees\feature-interview-assistant\.superpowers\sdd\task-10-overlay-windows-final.png` (`1888×142`).
 - Full-view comparison: `C:\Users\temab\interview-assistant\.worktrees\feature-interview-assistant\.superpowers\sdd\task-10-comparison-native-final.png`.
 - Focused comparisons:
@@ -18,7 +18,7 @@ The HTML reference was opened successfully in the local browser preview. The imp
 
 No actionable P0, P1, or P2 findings remain.
 
-The final full-view comparison preserves variant B's wide ribbon composition, `105:170` question/answer proportions, 16 px screen inset, 18 px corner radius, 14×12 px inner padding, 14 px body gap, slate glass gradient, and cyan/violet edge treatment. The implementation is 26 px taller than the source capture because it includes the required persistent sources row and a native collapse control. This is an intentional product constraint, not uncontrolled layout drift.
+The final full-view comparison preserves variant B's wide ribbon composition, `105:170` question/answer proportions, 16 px screen inset, 18 px corner radius, 14×12 px inner padding, 14 px body gap, slate glass gradient, and cyan/violet edge treatment. The implementation is 25 px taller than the source capture because it includes the required persistent sources row and a native collapse control. This is an intentional product constraint, not uncontrolled layout drift.
 
 ### Required fidelity surfaces
 
@@ -47,7 +47,7 @@ The final full-view comparison preserves variant B's wide ribbon composition, `1
 
 - incremental answer streaming, reset, stale-request rejection, and automatic scroll;
 - safe complete-delta bold/inline-code formatting with inert HTML and disabled external links;
-- collapse/expand, native and fallback move/resize paths, maximum-height scrolling, and geometry persistence/restoration;
+- collapse/expand, the deterministic fallback move/resize path forced by automated tests, maximum-height scrolling, and geometry persistence/restoration;
 - long question/source input before show and through collapse/expand;
 - low-opacity contrast, normal short content, app ownership, show, and idempotent close.
 
@@ -62,6 +62,6 @@ The final full-view comparison preserves variant B's wide ribbon composition, `1
 
 ## Follow-up polish
 
-No P3 polish is required for handoff. Real multi-monitor DPI behavior and Teams full-screen exclusion remain system acceptance checks in later tasks, not visual-QA findings for Task 10.
+No P3 polish is required for handoff. Native Windows `startSystemMove()`/`startSystemResize()`, real multi-monitor DPI behavior, and Teams full-screen exclusion remain system acceptance checks in later tasks, not visual-QA findings for Task 10.
 
 final result: passed
