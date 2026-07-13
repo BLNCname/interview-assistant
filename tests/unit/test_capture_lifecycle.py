@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Sequence
 from pathlib import Path
-from threading import Event, Lock, get_ident, main_thread
+from threading import Event, Lock, Timer, get_ident, main_thread
 from typing import Any
 from uuid import UUID
 
@@ -72,6 +72,8 @@ class FakeCaptureHandle:
                 self._owner.capture_entered.set()
                 if not self._owner.release_capture.wait(timeout=2.0):
                     raise TimeoutError("test did not release fake capture")
+            if self._owner.capture_error is not None:
+                raise self._owner.capture_error
             return self._owner.frames[call_index].copy()
         finally:
             with self._owner._lock:
@@ -80,6 +82,8 @@ class FakeCaptureHandle:
     def close(self) -> None:
         self._owner.close_calls += 1
         self._owner.close_threads.append(get_ident())
+        if self._owner.close_error is not None:
+            raise self._owner.close_error
 
 
 class FakeBackendFactory:
@@ -87,10 +91,18 @@ class FakeBackendFactory:
         self,
         frames: Sequence[NDArray[np.uint8]],
         *,
+        block_factory: bool = False,
         block_first_capture: bool = False,
+        factory_error: Exception | None = None,
+        capture_error: Exception | None = None,
+        close_error: Exception | None = None,
     ) -> None:
         self.frames = tuple(frames)
+        self.block_factory = block_factory
         self.block_first_capture = block_first_capture
+        self.factory_error = factory_error
+        self.capture_error = capture_error
+        self.close_error = close_error
         self.factory_calls = 0
         self.capture_calls = 0
         self.close_calls = 0
@@ -100,6 +112,8 @@ class FakeBackendFactory:
         self.handles: list[FakeCaptureHandle] = []
         self.active_captures = 0
         self.max_active_captures = 0
+        self.factory_entered = Event()
+        self.release_factory = Event()
         self.capture_entered = Event()
         self.release_capture = Event()
         self._lock = Lock()
@@ -107,9 +121,35 @@ class FakeBackendFactory:
     def __call__(self) -> FakeCaptureHandle:
         self.factory_calls += 1
         self.factory_threads.append(get_ident())
+        if self.block_factory:
+            self.factory_entered.set()
+            if not self.release_factory.wait(timeout=2.0):
+                raise TimeoutError("test did not release fake factory")
+        if self.factory_error is not None:
+            raise self.factory_error
         handle = FakeCaptureHandle(self)
         self.handles.append(handle)
         return handle
+
+
+class PartialFailingSaver:
+    def __init__(self, error: OSError) -> None:
+        self.error = error
+        self.calls = 0
+        self.threads: list[int] = []
+
+    def __call__(
+        self,
+        frame: NDArray[np.uint8],
+        path: Path,
+        quality: int,
+    ) -> None:
+        assert frame.shape == (120, 160, 3)
+        assert quality == 85
+        self.calls += 1
+        self.threads.append(get_ident())
+        path.write_bytes(b"partial-jpeg")
+        raise self.error
 
 
 @pytest.mark.parametrize("kind", ["coding", "system_design", "screen_analysis"])
@@ -290,3 +330,241 @@ async def test_capture_after_shutdown_fails_clearly_without_opening_backend() ->
         await worker.capture_for_event("coding")
     assert factory.factory_calls == 0
     assert not temporary_directory.exists()
+
+
+async def test_cancelled_slow_factory_is_drained_before_shutdown_finalizes() -> None:
+    factory = FakeBackendFactory([_visual_frame(35)], block_factory=True)
+    worker = CaptureWorker(backend_factory=factory)
+    temporary_directory = worker.temp_directory
+    capture = asyncio.create_task(worker.capture_for_event("coding"))
+    await asyncio.sleep(0)
+    assert factory.factory_entered.wait(timeout=2.0)
+
+    capture.cancel()
+    release_timer = Timer(0.1, factory.release_factory.set)
+    release_timer.start()
+    shutdown = asyncio.create_task(worker.shutdown())
+    try:
+        with pytest.raises(asyncio.CancelledError):
+            await capture
+        await shutdown
+    finally:
+        factory.release_factory.set()
+        release_timer.cancel()
+        release_timer.join(timeout=1.0)
+
+    assert factory.factory_calls == 1
+    assert factory.capture_calls == 1
+    assert factory.close_calls == 1
+    owner_thread = factory.factory_threads[0]
+    assert factory.capture_threads == [owner_thread]
+    assert factory.close_threads == [owner_thread]
+    assert not temporary_directory.exists()
+
+
+async def test_repeated_capture_cancellation_cannot_queue_executor_backlog() -> None:
+    factory = FakeBackendFactory(
+        [_visual_frame(seed) for seed in range(36, 40)],
+        block_first_capture=True,
+    )
+    worker = CaptureWorker(backend_factory=factory)
+    temporary_directory = worker.temp_directory
+    first = asyncio.create_task(worker.capture_for_event("coding"))
+    await asyncio.sleep(0)
+    assert factory.capture_entered.wait(timeout=2.0)
+
+    first.cancel()
+    await asyncio.sleep(0)
+    first.cancel()
+    await asyncio.sleep(0)
+    cancellation_returned_before_pipeline_settled = first.done()
+    extras: list[asyncio.Task[Any]] = []
+    for _ in range(3):
+        task = asyncio.create_task(worker.capture_for_event("coding"))
+        await asyncio.sleep(0)
+        task.cancel()
+        await asyncio.sleep(0)
+        extras.append(task)
+
+    shutdown = asyncio.create_task(worker.shutdown())
+    await asyncio.sleep(0)
+    factory.release_capture.set()
+    results = await asyncio.gather(first, *extras, return_exceptions=True)
+    await shutdown
+
+    assert all(isinstance(result, asyncio.CancelledError) for result in results)
+    assert cancellation_returned_before_pipeline_settled is False
+    assert factory.capture_calls == 1
+    assert factory.close_calls == 1
+    assert not temporary_directory.exists()
+
+
+async def test_cancelled_shutdown_waits_for_cleanup_before_propagating() -> None:
+    factory = FakeBackendFactory([_visual_frame(40)], block_first_capture=True)
+    worker = CaptureWorker(backend_factory=factory)
+    temporary_directory = worker.temp_directory
+    capture = asyncio.create_task(worker.capture_for_event("coding"))
+    await asyncio.sleep(0)
+    assert factory.capture_entered.wait(timeout=2.0)
+
+    shutdown = asyncio.create_task(worker.shutdown())
+    await asyncio.sleep(0)
+    shutdown.cancel()
+    await asyncio.sleep(0)
+    shutdown.cancel()
+    await asyncio.sleep(0)
+    returned_before_capture_settled = shutdown.done()
+
+    factory.release_capture.set()
+    await capture
+    with pytest.raises(asyncio.CancelledError):
+        await shutdown
+    cleaned_before_fallback = (
+        factory.close_calls == 1 and not temporary_directory.exists()
+    )
+    if temporary_directory.exists():
+        await worker.shutdown()
+
+    assert returned_before_capture_settled is False
+    assert cleaned_before_fallback
+    assert factory.close_threads == factory.factory_threads
+
+
+async def test_shutdown_request_rejects_admission_before_lock_is_available() -> None:
+    factory = FakeBackendFactory([_visual_frame(41)], block_first_capture=True)
+    worker = CaptureWorker(backend_factory=factory)
+    capture = asyncio.create_task(worker.capture_for_event("coding"))
+    await asyncio.sleep(0)
+    assert factory.capture_entered.wait(timeout=2.0)
+
+    shutdown = asyncio.create_task(worker.shutdown())
+    await asyncio.sleep(0)
+    late_capture = asyncio.create_task(worker.capture_for_event("coding"))
+    await asyncio.sleep(0)
+    rejected_without_waiting = late_capture.done()
+    if not rejected_without_waiting:
+        late_capture.cancel()
+
+    factory.release_capture.set()
+    await capture
+    await shutdown
+
+    assert rejected_without_waiting
+    with pytest.raises(RuntimeError, match="shut down"):
+        await late_capture
+    assert factory.capture_calls == 1
+
+
+async def test_factory_failure_propagates_and_shutdown_removes_tempdir() -> None:
+    error = RuntimeError("factory failed")
+    factory = FakeBackendFactory([_visual_frame(42)], factory_error=error)
+    worker = CaptureWorker(backend_factory=factory)
+    temporary_directory = worker.temp_directory
+
+    with pytest.raises(RuntimeError) as raised:
+        await worker.capture_for_event("coding")
+    assert raised.value is error
+    assert tuple(temporary_directory.iterdir()) == ()
+
+    await worker.shutdown()
+
+    assert factory.factory_calls == 1
+    assert factory.capture_calls == 0
+    assert factory.close_calls == 0
+    assert not temporary_directory.exists()
+
+
+async def test_capture_failure_propagates_then_owner_thread_closes_backend() -> None:
+    error = RuntimeError("capture failed")
+    factory = FakeBackendFactory([_visual_frame(43)], capture_error=error)
+    worker = CaptureWorker(backend_factory=factory)
+    temporary_directory = worker.temp_directory
+
+    with pytest.raises(RuntimeError) as raised:
+        await worker.capture_for_event("coding")
+    assert raised.value is error
+    assert tuple(temporary_directory.iterdir()) == ()
+
+    await worker.shutdown()
+
+    assert factory.close_calls == 1
+    assert factory.close_threads == factory.factory_threads
+    assert not temporary_directory.exists()
+
+
+async def test_partial_jpeg_save_is_unlinked_before_error_propagates() -> None:
+    error = OSError("jpeg save failed")
+    saver = PartialFailingSaver(error)
+    factory = FakeBackendFactory([_visual_frame(44)])
+    worker = CaptureWorker(backend_factory=factory, frame_saver=saver)
+    temporary_directory = worker.temp_directory
+
+    with pytest.raises(OSError) as raised:
+        await worker.capture_for_event("coding")
+    assert raised.value is error
+    assert tuple(temporary_directory.iterdir()) == ()
+
+    await worker.shutdown()
+
+    assert saver.calls == 1
+    assert saver.threads == factory.factory_threads
+    assert factory.close_threads == factory.factory_threads
+    assert not temporary_directory.exists()
+
+
+async def test_all_shutdown_callers_observe_close_failure_after_cleanup() -> None:
+    error = RuntimeError("close failed")
+    factory = FakeBackendFactory([_visual_frame(45)], close_error=error)
+    worker = CaptureWorker(backend_factory=factory)
+    result = await worker.capture_for_event("coding")
+    temporary_directory = worker.temp_directory
+
+    first = asyncio.create_task(worker.shutdown())
+    second = asyncio.create_task(worker.shutdown())
+    outcomes = await asyncio.gather(first, second, return_exceptions=True)
+
+    assert outcomes == [error, error]
+    assert result.path is not None and not result.path.exists()
+    assert not temporary_directory.exists()
+    assert factory.close_calls == 1
+    with pytest.raises(RuntimeError) as repeated:
+        await worker.shutdown()
+    assert repeated.value is error
+
+
+async def test_close_failure_wins_over_shutdown_caller_cancellation() -> None:
+    error = RuntimeError("close failed during cancellation")
+    factory = FakeBackendFactory(
+        [_visual_frame(46)],
+        block_first_capture=True,
+        close_error=error,
+    )
+    worker = CaptureWorker(backend_factory=factory)
+    temporary_directory = worker.temp_directory
+    capture = asyncio.create_task(worker.capture_for_event("coding"))
+    await asyncio.sleep(0)
+    assert factory.capture_entered.wait(timeout=2.0)
+
+    shutdown = asyncio.create_task(worker.shutdown())
+    await asyncio.sleep(0)
+    shutdown.cancel()
+    await asyncio.sleep(0)
+    factory.release_capture.set()
+    await capture
+    observed: BaseException | None = None
+    try:
+        await shutdown
+    except asyncio.CancelledError as cancelled:
+        observed = cancelled
+    except RuntimeError as close_failure:
+        observed = close_failure
+    cleaned_before_fallback = (
+        factory.close_calls == 1 and not temporary_directory.exists()
+    )
+    if temporary_directory.exists():
+        with pytest.raises(RuntimeError):
+            await worker.shutdown()
+
+    assert observed is error
+    assert cleaned_before_fallback
+    assert factory.close_calls == 1
