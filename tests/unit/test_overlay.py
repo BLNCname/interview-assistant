@@ -3,7 +3,7 @@ from unittest.mock import Mock
 
 import pytest
 from PyQt6.QtCore import QEvent, QPointF, QSettings, Qt
-from PyQt6.QtGui import QFont, QMouseEvent, QPalette, QTextCursor
+from PyQt6.QtGui import QFont, QMouseEvent, QPalette, QShowEvent, QTextCursor
 from PyQt6.QtWidgets import QApplication, QLabel, QStyle, QWidget
 
 from interview_assistant.config import OverlayConfig
@@ -150,6 +150,28 @@ def test_capture_exclusion_reapplies_only_when_qt_creates_a_new_hwnd(
     ribbon.hide()
     ribbon.show()
     qtbot.waitExposed(ribbon)
+
+    assert [entry.args[0] for entry in applier.call_args_list] == [101, 202]
+
+
+def test_win_id_change_reapplies_for_new_handle_without_same_handle_retry(
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    handles = [101]
+    verified = AffinityResult(True, WDA_EXCLUDEFROMCAPTURE, None)
+    applier = Mock(return_value=verified)
+    monkeypatch.setattr(LiquidRibbon, "winId", lambda _ribbon: handles[-1])
+    ribbon = LiquidRibbon(EventBus(), settings=None, affinity_applier=applier)
+    qtbot.addWidget(ribbon)
+
+    applier.assert_not_called()
+    ribbon.show()
+    qtbot.waitExposed(ribbon)
+
+    handles.append(202)
+    QApplication.sendEvent(ribbon, QEvent(QEvent.Type.WinIdChange))
+    QApplication.sendEvent(ribbon, QEvent(QEvent.Type.WinIdChange))
 
     assert [entry.args[0] for entry in applier.call_args_list] == [101, 202]
 
@@ -715,6 +737,52 @@ def test_application_stays_offline_when_capture_exclusion_is_not_verified(qtbot)
     app.shutdown()
 
 
+def test_startup_reentrant_handle_failure_wins_over_initial_ready(
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from interview_assistant.app import InterviewApplication
+
+    handles = [101]
+    verified = AffinityResult(True, WDA_EXCLUDEFROMCAPTURE, None)
+    failure = AffinityResult(False, 0x00000001, None)
+    events = EventBus()
+    applier = Mock(side_effect=[verified, failure])
+    monkeypatch.setattr(LiquidRibbon, "winId", lambda _ribbon: handles[-1])
+    qt_app = QApplication.instance()
+    assert isinstance(qt_app, QApplication)
+    app = InterviewApplication(
+        qt_app,
+        events,
+        StateMachine(),
+        overlay_settings=None,
+        affinity_applier=applier,
+    )
+    qtbot.addWidget(app.ribbon)
+    announced_states: list[str] = []
+
+    def change_handle_reentrantly(state: str) -> None:
+        announced_states.append(state)
+        if state == ApplicationState.READY.value and len(handles) == 1:
+            handles.append(202)
+            app.ribbon.hide()
+            app.ribbon.show()
+
+    events.state_changed.connect(change_handle_reentrantly)
+
+    app.start()
+    qtbot.waitExposed(app.ribbon)
+
+    assert [entry.args[0] for entry in applier.call_args_list] == [101, 202]
+    assert app.ribbon.affinity_result is failure
+    assert app.states.state is ApplicationState.OFFLINE
+    assert announced_states == [
+        ApplicationState.READY.value,
+        ApplicationState.OFFLINE.value,
+    ]
+    app.shutdown()
+
+
 def test_new_hwnd_affinity_failure_revokes_application_readiness(
     qtbot,
     monkeypatch: pytest.MonkeyPatch,
@@ -759,6 +827,57 @@ def test_new_hwnd_affinity_failure_revokes_application_readiness(
     app.shutdown()
 
 
+@pytest.mark.parametrize(
+    ("applier_error", "expected_error_code"),
+    [(OSError(5, "access denied"), 5), (RuntimeError("boom"), 31)],
+    ids=["oserror", "generic-exception"],
+)
+def test_new_hwnd_applier_exception_fails_closed_without_retry(
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+    applier_error: Exception,
+    expected_error_code: int,
+) -> None:
+    from interview_assistant.app import InterviewApplication
+
+    handles = [101]
+    verified = AffinityResult(True, WDA_EXCLUDEFROMCAPTURE, None)
+    failure = AffinityResult(False, None, expected_error_code)
+    applier = Mock(side_effect=[verified, applier_error])
+    monkeypatch.setattr(LiquidRibbon, "winId", lambda _ribbon: handles[-1])
+    qt_app = QApplication.instance()
+    assert isinstance(qt_app, QApplication)
+    app = InterviewApplication(
+        qt_app,
+        EventBus(),
+        StateMachine(),
+        overlay_settings=None,
+        affinity_applier=applier,
+    )
+    qtbot.addWidget(app.ribbon)
+    app.start()
+    qtbot.waitExposed(app.ribbon)
+    observed_results: list[AffinityResult] = []
+    app.ribbon.affinity_changed.connect(observed_results.append)
+
+    handles.append(202)
+    try:
+        app.ribbon.showEvent(QShowEvent())
+    except Exception as error:
+        pytest.fail(f"applier exception escaped the Ribbon boundary: {error}")
+
+    assert app.ribbon.affinity_result == failure
+    assert observed_results == [failure]
+    assert app.states.state is ApplicationState.OFFLINE
+    assert app.ribbon.status_label.text() == "Capture exclusion unavailable"
+    app.events.state_changed.emit(ApplicationState.READY.value)
+    assert app.ribbon.status_label.text() == "Capture exclusion unavailable"
+
+    app.ribbon.showEvent(QShowEvent())
+    assert [entry.args[0] for entry in applier.call_args_list] == [101, 202]
+    app.shutdown()
+
+
 def test_new_hwnd_verified_affinity_restores_application_readiness(
     qtbot,
     monkeypatch: pytest.MonkeyPatch,
@@ -799,6 +918,183 @@ def test_new_hwnd_verified_affinity_restores_application_readiness(
         ApplicationState.READY.value,
     ]
     assert app.ribbon.status_label.text() == ApplicationState.READY.value
+    app.shutdown()
+
+
+def test_startup_affinity_failure_does_not_own_external_offline_state(
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from interview_assistant.app import InterviewApplication
+
+    handles = [101]
+    failure = AffinityResult(False, None, 5)
+    verified = AffinityResult(True, WDA_EXCLUDEFROMCAPTURE, None)
+    applier = Mock(side_effect=[failure, verified])
+    monkeypatch.setattr(LiquidRibbon, "winId", lambda _ribbon: handles[-1])
+    qt_app = QApplication.instance()
+    assert isinstance(qt_app, QApplication)
+    states = StateMachine()
+    states.transition(ApplicationState.OFFLINE)
+    app = InterviewApplication(
+        qt_app,
+        EventBus(),
+        states,
+        overlay_settings=None,
+        affinity_applier=applier,
+    )
+    qtbot.addWidget(app.ribbon)
+    announced_states: list[str] = []
+    app.events.state_changed.connect(announced_states.append)
+
+    app.start()
+    qtbot.waitExposed(app.ribbon)
+    assert app.states.state is ApplicationState.OFFLINE
+
+    handles.append(202)
+    app.ribbon.hide()
+    app.ribbon.show()
+    qtbot.waitExposed(app.ribbon)
+
+    assert app.ribbon.affinity_result is verified
+    assert app.states.state is ApplicationState.OFFLINE
+    assert announced_states == [ApplicationState.OFFLINE.value]
+    app.shutdown()
+
+
+def test_external_offline_does_not_transfer_ownership_to_affinity(
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from interview_assistant.app import InterviewApplication
+
+    handles = [101]
+    verified = AffinityResult(True, WDA_EXCLUDEFROMCAPTURE, None)
+    failure = AffinityResult(False, 0x00000001, None)
+    applier = Mock(side_effect=[verified, failure, verified])
+    monkeypatch.setattr(LiquidRibbon, "winId", lambda _ribbon: handles[-1])
+    qt_app = QApplication.instance()
+    assert isinstance(qt_app, QApplication)
+    app = InterviewApplication(
+        qt_app,
+        EventBus(),
+        StateMachine(),
+        overlay_settings=None,
+        affinity_applier=applier,
+    )
+    qtbot.addWidget(app.ribbon)
+    announced_states: list[str] = []
+    app.events.state_changed.connect(announced_states.append)
+    app.start()
+    qtbot.waitExposed(app.ribbon)
+
+    app.states.transition(ApplicationState.OFFLINE)
+    app.events.state_changed.emit(ApplicationState.OFFLINE.value)
+    handles.append(202)
+    app.ribbon.hide()
+    app.ribbon.show()
+    handles.append(303)
+    app.ribbon.hide()
+    app.ribbon.show()
+
+    assert app.ribbon.affinity_result is verified
+    assert app.states.state is ApplicationState.OFFLINE
+    assert announced_states == [
+        ApplicationState.READY.value,
+        ApplicationState.OFFLINE.value,
+    ]
+    app.shutdown()
+
+
+def test_external_state_after_affinity_offline_is_not_overwritten_on_success(
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from interview_assistant.app import InterviewApplication
+
+    handles = [101]
+    verified = AffinityResult(True, WDA_EXCLUDEFROMCAPTURE, None)
+    failure = AffinityResult(False, None, 5)
+    applier = Mock(side_effect=[verified, failure, verified])
+    monkeypatch.setattr(LiquidRibbon, "winId", lambda _ribbon: handles[-1])
+    qt_app = QApplication.instance()
+    assert isinstance(qt_app, QApplication)
+    app = InterviewApplication(
+        qt_app,
+        EventBus(),
+        StateMachine(),
+        overlay_settings=None,
+        affinity_applier=applier,
+    )
+    qtbot.addWidget(app.ribbon)
+    announced_states: list[str] = []
+    app.events.state_changed.connect(announced_states.append)
+    app.start()
+    qtbot.waitExposed(app.ribbon)
+
+    handles.append(202)
+    app.ribbon.hide()
+    app.ribbon.show()
+    app.states.transition(ApplicationState.PAUSED)
+    app.events.state_changed.emit(ApplicationState.PAUSED.value)
+    handles.append(303)
+    app.ribbon.hide()
+    app.ribbon.show()
+
+    assert app.ribbon.affinity_result is verified
+    assert app.states.state is ApplicationState.PAUSED
+    assert app.ribbon.status_label.text() == ApplicationState.PAUSED.value
+    assert announced_states == [
+        ApplicationState.READY.value,
+        ApplicationState.OFFLINE.value,
+        ApplicationState.PAUSED.value,
+    ]
+    app.shutdown()
+
+
+def test_affinity_recovery_restores_previous_non_offline_state(
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from interview_assistant.app import InterviewApplication
+
+    handles = [101]
+    verified = AffinityResult(True, WDA_EXCLUDEFROMCAPTURE, None)
+    failure = AffinityResult(False, None, 5)
+    applier = Mock(side_effect=[verified, failure, verified])
+    monkeypatch.setattr(LiquidRibbon, "winId", lambda _ribbon: handles[-1])
+    qt_app = QApplication.instance()
+    assert isinstance(qt_app, QApplication)
+    app = InterviewApplication(
+        qt_app,
+        EventBus(),
+        StateMachine(),
+        overlay_settings=None,
+        affinity_applier=applier,
+    )
+    qtbot.addWidget(app.ribbon)
+    announced_states: list[str] = []
+    app.events.state_changed.connect(announced_states.append)
+    app.start()
+    qtbot.waitExposed(app.ribbon)
+
+    app.states.transition(ApplicationState.LISTENING)
+    app.events.state_changed.emit(ApplicationState.LISTENING.value)
+    handles.append(202)
+    app.ribbon.hide()
+    app.ribbon.show()
+    handles.append(303)
+    app.ribbon.hide()
+    app.ribbon.show()
+
+    assert app.ribbon.affinity_result is verified
+    assert app.states.state is ApplicationState.LISTENING
+    assert announced_states == [
+        ApplicationState.READY.value,
+        ApplicationState.LISTENING.value,
+        ApplicationState.OFFLINE.value,
+        ApplicationState.LISTENING.value,
+    ]
     app.shutdown()
 
 

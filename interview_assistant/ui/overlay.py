@@ -4,7 +4,7 @@ import math
 import re
 from collections.abc import Iterable, Iterator
 
-from PyQt6.QtCore import QByteArray, QPoint, QRect, QRectF, QSettings, QSize, Qt, pyqtSignal
+from PyQt6.QtCore import QByteArray, QEvent, QPoint, QRect, QRectF, QSettings, QSize, Qt, pyqtSignal
 from PyQt6.QtGui import (
     QColor,
     QCloseEvent,
@@ -40,6 +40,7 @@ from interview_assistant.events import EventBus
 from interview_assistant.ui.windows_affinity import (
     AffinityApplier,
     AffinityResult,
+    affinity_failure_from_exception,
     apply_capture_exclusion,
 )
 
@@ -290,6 +291,7 @@ class LiquidRibbon(QMainWindow):
         events.state_changed.connect(self.show_state)
         events.answer_reset.connect(self._reset_answer)
         events.answer_delta.connect(self.append_delta)
+        self._affinity_events_enabled = True
 
     @property
     def affinity_result(self) -> AffinityResult | None:
@@ -297,11 +299,31 @@ class LiquidRibbon(QMainWindow):
 
     def showEvent(self, event: QShowEvent | None) -> None:
         super().showEvent(event)
+        self._apply_capture_exclusion_to_current_hwnd()
+
+    def event(self, event: QEvent | None) -> bool:
+        handled = super().event(event)
+        if (
+            event is not None
+            and event.type() == QEvent.Type.WinIdChange
+            and getattr(self, "_affinity_events_enabled", False)
+            and self.isVisible()
+        ):
+            self._apply_capture_exclusion_to_current_hwnd()
+        return handled
+
+    def _apply_capture_exclusion_to_current_hwnd(self) -> None:
+        if not getattr(self, "_affinity_events_enabled", False):
+            return
         hwnd = int(self.winId())
         if hwnd == 0 or hwnd == self._affinity_hwnd:
             return
         self._affinity_hwnd = hwnd
-        self._affinity_result = self._affinity_applier(hwnd)
+        try:
+            affinity_result = self._affinity_applier(hwnd)
+        except Exception as error:
+            affinity_result = affinity_failure_from_exception(error)
+        self._affinity_result = affinity_result
         self._capture_exclusion_unavailable = not self._affinity_result.ok
         self._refresh_status()
         self.affinity_changed.emit(self._affinity_result)
