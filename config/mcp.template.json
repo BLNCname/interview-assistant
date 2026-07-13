@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "context7": {
+      "url": "https://mcp.context7.com/mcp"
+    },
+    "duckduckgo": {
+      "command": "C:\\absolute\\path\\duckduckgo-mcp-server.exe",
+      "args": []
+    }
+  }
+}

@@ -1,9 +1,10 @@
 import asyncio
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncIterator, Mapping, Sequence
 from typing import Protocol
 
 from ..events import EventBus
 from ..lmstudio.models import ChatEvent
+from ..retrieval.models import SearchIntegration
 
 
 class StreamClient(Protocol):
@@ -34,6 +35,32 @@ class RequestCoordinator:
         self._active_task = task
         task.add_done_callback(self._task_done)
         return request_id
+
+    def submit_retrieval(
+        self,
+        model: str,
+        integrations: Sequence[SearchIntegration],
+    ) -> int:
+        """Submit one MCP query without copying an answer-generation payload."""
+
+        if not isinstance(model, str):
+            raise TypeError("Retrieval model must be a string")
+        model_key = model.strip()
+        if not model_key:
+            raise ValueError("Retrieval model must not be empty")
+        if len(integrations) != 1:
+            raise ValueError("Retrieval submission requires exactly one integration")
+
+        integration = integrations[0]
+        if not isinstance(integration, SearchIntegration):
+            raise TypeError("Retrieval integration must be a SearchIntegration")
+        return self.submit(
+            {
+                "model": model_key,
+                "input": integration.query,
+                "integrations": [integration.to_lmstudio()],
+            }
+        )
 
     def _task_done(self, task: asyncio.Task[None]) -> None:
         try:

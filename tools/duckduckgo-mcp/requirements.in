@@ -1,0 +1,6 @@
+# Source tag v0.5.0 verified at commit 8992977d65a086995c82826ceead42e890aa17c1.
+# The archive hash is verified before resolution and enforced by this URL fragment.
+duckduckgo-mcp-server @ https://github.com/nickclyde/duckduckgo-mcp-server/archive/8992977d65a086995c82826ceead42e890aa17c1.tar.gz#sha256=81c36632db380c5e45e0a718a1c934ed12c3313de2f7c446c63b34bfeaa70f1e
+
+# Retain the source build backend so final sync can disable unpinned build isolation.
+hatchling
