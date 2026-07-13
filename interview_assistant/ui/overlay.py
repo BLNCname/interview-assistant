@@ -377,13 +377,13 @@ class LiquidRibbon(QMainWindow):
         self.body_layout.setSpacing(14)
 
         self.question_panel = QWidget(self.body_widget)
-        question_layout = QVBoxLayout(self.question_panel)
-        question_layout.setContentsMargins(0, 0, 0, 0)
-        question_layout.setSpacing(4)
-        question_eyebrow = QLabel("ВОПРОС", self.question_panel)
-        question_eyebrow.setTextFormat(Qt.TextFormat.PlainText)
-        question_eyebrow.setStyleSheet(f"color: {secondary_text}; font-size: 11px;")
-        question_layout.addWidget(question_eyebrow)
+        self.question_layout = QVBoxLayout(self.question_panel)
+        self.question_layout.setContentsMargins(0, 0, 0, 0)
+        self.question_layout.setSpacing(4)
+        self.question_eyebrow = QLabel("ВОПРОС", self.question_panel)
+        self.question_eyebrow.setTextFormat(Qt.TextFormat.PlainText)
+        self.question_eyebrow.setStyleSheet(f"color: {secondary_text}; font-size: 11px;")
+        self.question_layout.addWidget(self.question_eyebrow)
         self.question_label = _ElidingLabel(self.question_text, self.question_panel)
         self.question_label.setTextFormat(Qt.TextFormat.PlainText)
         self.question_label.setWordWrap(True)
@@ -398,7 +398,7 @@ class LiquidRibbon(QMainWindow):
         self.question_label.setStyleSheet(
             "color: #ffffff; font-size: 14px; font-weight: 600;"
         )
-        question_layout.addWidget(self.question_label, 1)
+        self.question_layout.addWidget(self.question_label, 1)
         self.body_layout.addWidget(self.question_panel)
 
         answer_panel = QWidget(self.body_widget)
@@ -591,6 +591,10 @@ class LiquidRibbon(QMainWindow):
         assert document is not None
         assert viewport is not None
         body_width = max(320, self.width() - 28 - self.body_layout.spacing())
+        estimated_question_width = max(
+            120,
+            math.floor(body_width * 105 / 275) - 12,
+        )
         estimated_answer_width = math.floor(body_width * 170 / 275) - 12
         text_width = max(160, viewport.width() - 4, estimated_answer_width)
         document.setTextWidth(text_width)
@@ -601,9 +605,17 @@ class LiquidRibbon(QMainWindow):
         frame_height = margins.top() + margins.bottom()
         frame_height += self.header_widget.sizeHint().height()
         frame_height += self.content_layout.spacing()
-        answer_height = document_height + self.sources_label.sizeHint().height()
+        question_margins = self.question_layout.contentsMargins()
+        question_height = question_margins.top() + question_margins.bottom()
+        question_height += self.question_eyebrow.sizeHint().height()
+        question_height += self.question_layout.spacing()
+        question_height += self.question_label.heightForWidth(estimated_question_width)
+        answer_margins = self.answer_layout.contentsMargins()
+        answer_height = answer_margins.top() + answer_margins.bottom()
+        answer_height += document_height
+        answer_height += self.sources_label.heightForWidth(estimated_answer_width)
         answer_height += self.answer_layout.spacing()
-        body_height = max(self.question_panel.sizeHint().height(), answer_height)
+        body_height = max(question_height, answer_height)
         target = min(
             self._config.max_height,
             max(self._minimum_expanded_height, frame_height + body_height + 4),

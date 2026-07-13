@@ -1,3 +1,5 @@
+import math
+
 import pytest
 from PyQt6.QtCore import QEvent, QPointF, QSettings, Qt
 from PyQt6.QtGui import QFont, QMouseEvent, QPalette, QTextCursor
@@ -243,6 +245,71 @@ def test_short_answer_keeps_compact_ribbon_footprint(qtbot) -> None:
     qtbot.waitExposed(ribbon)
 
     assert ribbon._minimum_expanded_height <= ribbon.height() <= 200
+
+
+def test_compact_height_uses_width_aware_label_heights(qtbot) -> None:
+    bus = EventBus()
+    ribbon = LiquidRibbon(bus, config=OverlayConfig(max_height=360), settings=None)
+    qtbot.addWidget(ribbon)
+    ribbon.resize(1_888, 180)
+    ribbon.set_question("Спроектируйте сервис коротких ссылок")
+    ribbon.set_sources(["Context7", "DuckDuckGo"])
+    bus.answer_reset.emit(13)
+    bus.answer_delta.emit(
+        13,
+        "1. Уточнить SLA и объём\n"
+        "2. Base62 + Redis + sharded DB\n"
+        "3. Обсудить hot keys, TTL, analytics",
+    )
+    ribbon.show()
+    qtbot.waitExposed(ribbon)
+
+    body_width = max(320, ribbon.width() - 28 - ribbon.body_layout.spacing())
+    question_width = max(120, math.floor(body_width * 105 / 275) - 12)
+    answer_width = max(160, math.floor(body_width * 170 / 275) - 12)
+    question_layout = ribbon.question_panel.layout()
+    assert question_layout is not None
+    question_eyebrow = question_layout.itemAt(0).widget()
+    assert question_eyebrow is not None
+    question_height = (
+        question_layout.contentsMargins().top()
+        + question_eyebrow.sizeHint().height()
+        + question_layout.spacing()
+        + ribbon.question_label.heightForWidth(question_width)
+        + question_layout.contentsMargins().bottom()
+    )
+    document = ribbon.answer_browser.document()
+    document_layout = document.documentLayout()
+    assert document_layout is not None
+    sources_height = ribbon.sources_label.heightForWidth(answer_width)
+    answer_height = (
+        math.ceil(document_layout.documentSize().height())
+        + ribbon.answer_layout.spacing()
+        + sources_height
+    )
+    margins = ribbon.content_layout.contentsMargins()
+    frame_height = (
+        margins.top()
+        + margins.bottom()
+        + ribbon.header_widget.sizeHint().height()
+        + ribbon.content_layout.spacing()
+    )
+    expected_height = min(
+        ribbon.maximumHeight(),
+        max(
+            ribbon._minimum_expanded_height,
+            frame_height + max(question_height, answer_height) + 4,
+        ),
+    )
+    assert (
+        ribbon.question_label.sizeHint().height()
+        > ribbon.question_label.heightForWidth(question_width)
+    )
+    assert ribbon.sources_label.sizeHint().height() > sources_height
+
+    ribbon._adjust_height(shrink=True)
+
+    assert ribbon.height() == expected_height
 
 
 def test_unbroken_question_and_sources_cannot_expand_ribbon_past_screen(qtbot) -> None:
