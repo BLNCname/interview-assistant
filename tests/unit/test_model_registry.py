@@ -367,7 +367,7 @@ async def test_post_load_rediscovery_enriches_current_instance_metadata() -> Non
                 _model_details(
                     "qwen3.5",
                     _loaded_instance(
-                        "qwen3.5:current",
+                        "qwen3.5:loaded",
                         config_extra={"allocation": {"device": "Strix Halo"}},
                     ),
                 )
@@ -377,9 +377,33 @@ async def test_post_load_rediscovery_enriches_current_instance_metadata() -> Non
 
     instance = await ModelRegistry(client).ensure_ready("qwen3.5")
 
-    assert instance.instance_id == "qwen3.5:current"
+    assert instance.instance_id == "qwen3.5:loaded"
     assert instance.device_name == "Strix Halo"
     assert client.list_calls == 2
+
+
+async def test_post_load_rediscovery_rejects_different_instance_identity() -> None:
+    import interview_assistant.lmstudio.registry as registry_module
+
+    client = FakeLMStudioClient(
+        [
+            [],
+            [
+                _model_details(
+                    "qwen3.5",
+                    _loaded_instance("qwen3.5:rediscovered"),
+                )
+            ],
+        ]
+    )
+
+    with pytest.raises(RuntimeError) as captured:
+        await registry_module.ModelRegistry(client).ensure_ready("qwen3.5")
+
+    assert type(captured.value).__name__ == "ModelInstanceIdentityError"
+    assert captured.value.key == "qwen3.5"
+    assert captured.value.loaded_instance_id == "qwen3.5:loaded"
+    assert captured.value.discovered_instance_id == "qwen3.5:rediscovered"
 
 
 async def test_different_model_keys_do_not_block_each_other() -> None:
@@ -446,3 +470,137 @@ async def test_failed_load_is_not_cached_and_next_attempt_retries() -> None:
 
     assert instance.instance_id == "qwen3.5:loaded"
     assert client.load_calls == ["qwen3.5", "qwen3.5"]
+
+
+@pytest.mark.parametrize(
+    ("failure", "expected_error_name"),
+    [
+        ("load", "RuntimeError"),
+        ("duplicate", "DuplicateModelInstancesError"),
+        ("device", "UnexpectedModelDeviceError"),
+        ("identity", "ModelInstanceIdentityError"),
+    ],
+)
+async def test_failed_refresh_discards_stale_ready_cache_before_plain_retry(
+    failure: str,
+    expected_error_name: str,
+) -> None:
+    import interview_assistant.lmstudio.registry as registry_module
+
+    old = [_model_details("qwen3.5", _loaded_instance("qwen3.5:old"))]
+    fresh = [_model_details("qwen3.5", _loaded_instance("qwen3.5:fresh"))]
+    load_outcomes: list[LoadResult | BaseException] = []
+    if failure == "load":
+        discoveries = [old, [], fresh]
+        load_outcomes.append(RuntimeError("load failed"))
+    elif failure == "duplicate":
+        discoveries = [
+            old,
+            [
+                _model_details(
+                    "qwen3.5",
+                    _loaded_instance("qwen3.5:one"),
+                    _loaded_instance("qwen3.5:two"),
+                )
+            ],
+            fresh,
+        ]
+    elif failure == "device":
+        discoveries = [
+            old,
+            [
+                _model_details(
+                    "qwen3.5",
+                    _loaded_instance(
+                        "qwen3.5:wrong-device",
+                        instance_extra={"device_name": "unexpected"},
+                    ),
+                )
+            ],
+            fresh,
+        ]
+    else:
+        discoveries = [
+            old,
+            [],
+            [_model_details("qwen3.5", _loaded_instance("qwen3.5:other"))],
+            fresh,
+        ]
+        load_outcomes.append(_load_result("qwen3.5"))
+
+    class RefreshFailureClient:
+        def __init__(self) -> None:
+            self.list_calls = 0
+            self.load_calls = 0
+
+        async def list_model_details(self) -> list[ModelDetails]:
+            result = discoveries[self.list_calls]
+            self.list_calls += 1
+            return result
+
+        async def load_model(self, _key: str) -> LoadResult:
+            self.load_calls += 1
+            outcome = load_outcomes.pop(0)
+            if isinstance(outcome, BaseException):
+                raise outcome
+            return outcome
+
+    client = RefreshFailureClient()
+    registry = registry_module.ModelRegistry(client)
+    cached = await registry.ensure_ready("qwen3.5")
+    assert cached.instance_id == "qwen3.5:old"
+
+    with pytest.raises(RuntimeError) as captured:
+        await registry.refresh("qwen3.5")
+
+    assert type(captured.value).__name__ == expected_error_name
+
+    retried = await registry.ensure_ready("qwen3.5")
+
+    assert retried.instance_id == "qwen3.5:fresh"
+    assert client.list_calls == len(discoveries)
+
+
+async def test_invalidate_during_ensure_prevents_cache_resurrection() -> None:
+    import interview_assistant.lmstudio.registry as registry_module
+
+    discovery_started = asyncio.Event()
+    release_discovery = asyncio.Event()
+
+    class InvalidatedClient:
+        def __init__(self) -> None:
+            self.list_calls = 0
+
+        async def list_model_details(self) -> list[ModelDetails]:
+            self.list_calls += 1
+            if self.list_calls == 1:
+                discovery_started.set()
+                await release_discovery.wait()
+                return []
+            if self.list_calls == 2:
+                return []
+            return [
+                _model_details("qwen3.5", _loaded_instance("qwen3.5:fresh"))
+            ]
+
+        async def load_model(self, key: str) -> LoadResult:
+            return _load_result(key)
+
+    client = InvalidatedClient()
+    registry = registry_module.ModelRegistry(client)
+    ensuring = asyncio.create_task(registry.ensure_ready("qwen3.5"))
+    await discovery_started.wait()
+
+    registry.invalidate("qwen3.5")
+    release_discovery.set()
+
+    with pytest.raises(RuntimeError) as captured:
+        await ensuring
+
+    assert type(captured.value).__name__ == "ModelRegistryInvalidatedError"
+    assert captured.value.key == "qwen3.5"
+
+    retried = await registry.ensure_ready("qwen3.5")
+
+    assert retried.instance_id == "qwen3.5:fresh"
+    assert client.list_calls == 3

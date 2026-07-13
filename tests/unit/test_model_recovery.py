@@ -54,10 +54,12 @@ class RecordingActions(Generic[T]):
         trace: list[str] | None = None,
         cancel_error: BaseException | None = None,
         warm_errors: list[BaseException | None] | None = None,
+        replay_errors: list[BaseException | None] | None = None,
     ) -> None:
         self.trace = trace
         self.cancel_error = cancel_error
         self.warm_errors = list(warm_errors or [])
+        self.replay_errors = list(replay_errors or [])
         self.cancel_calls = 0
         self.warmed: list[ModelInstance] = []
         self.replayed: list[tuple[ModelInstance, RecoveryRequest[T]]] = []
@@ -88,6 +90,10 @@ class RecordingActions(Generic[T]):
         self.replayed.append((instance, request))
         if self.trace is not None:
             self.trace.append(f"replay:{request.request_id}")
+        if self.replay_errors:
+            error = self.replay_errors.pop(0)
+            if error is not None:
+                raise error
 
     async def sleep(self, delay: float) -> None:
         self.delays.append(delay)
@@ -399,6 +405,62 @@ async def test_concurrent_same_key_callers_join_one_logical_recovery_wave() -> N
     assert actions.states == ["recovering", "ready"]
 
 
+async def test_sequential_same_request_id_starts_a_fresh_recovery_wave() -> None:
+    first_instance = _instance(suffix="first")
+    second_instance = _instance(suffix="second")
+    registry = ScriptedRegistry([first_instance, second_instance])
+    actions: RecordingActions[str] = RecordingActions()
+    lifecycle = _lifecycle(registry, actions)
+    request = RecoveryRequest(42, "same request")
+
+    first = await lifecycle.recover("qwen3.5", request)
+    second = await lifecycle.recover("qwen3.5", request)
+
+    assert first is first_instance
+    assert second is second_instance
+    assert registry.refresh_calls == ["qwen3.5", "qwen3.5"]
+    assert actions.cancel_calls == 2
+    assert [request.request_id for _, request in actions.replayed] == [42, 42]
+
+
+async def test_newer_concurrent_caller_before_replay_joins_covering_wave() -> None:
+    warm_started = asyncio.Event()
+    release_warm = asyncio.Event()
+    instance = _instance()
+    registry = ScriptedRegistry([instance])
+    actions: RecordingActions[str] = RecordingActions()
+
+    async def warm_up(current: ModelInstance) -> None:
+        actions.warmed.append(current)
+        warm_started.set()
+        await release_warm.wait()
+
+    lifecycle = ModelLifecycle(
+        registry,
+        cancel_active=actions.cancel_active,
+        warm_up=warm_up,
+        replay=actions.replay,
+        sleeper=actions.sleep,
+        on_state=actions.on_state,
+    )
+    first = asyncio.create_task(
+        lifecycle.recover("qwen3.5", RecoveryRequest(50, "old"))
+    )
+    await warm_started.wait()
+    second = asyncio.create_task(
+        lifecycle.recover("qwen3.5", RecoveryRequest(51, "new"))
+    )
+    await asyncio.sleep(0)
+
+    release_warm.set()
+    first_result, second_result = await asyncio.gather(first, second)
+
+    assert first_result is instance
+    assert second_result is instance
+    assert registry.refresh_calls == ["qwen3.5"]
+    assert [request.request_id for _, request in actions.replayed] == [51]
+
+
 async def test_newer_request_after_replay_starts_a_second_wave() -> None:
     replay_started = asyncio.Event()
     release_first_replay = asyncio.Event()
@@ -499,6 +561,60 @@ async def test_different_keys_recover_independently() -> None:
     release_first_refresh.set()
     await first
     assert sorted(replayed) == [("model-a", 15), ("model-b", 16)]
+
+
+async def test_replay_error_terminalizes_wave_until_manual_retry() -> None:
+    replay_error = RuntimeError("partial replay failure")
+    recovered = _instance(suffix="manual")
+    registry = ScriptedRegistry([_instance(suffix="failed"), recovered])
+    actions: RecordingActions[str] = RecordingActions(
+        replay_errors=[replay_error, None]
+    )
+    lifecycle = _lifecycle(registry, actions)
+    request = RecoveryRequest(60, "question")
+
+    with pytest.raises(ModelRecoveryError) as captured:
+        await lifecycle.recover("qwen3.5", request)
+
+    assert captured.value.key == "qwen3.5"
+    assert captured.value.attempts == 1
+    assert captured.value.__cause__ is replay_error
+    assert registry.refresh_calls == ["qwen3.5"]
+    assert actions.states == ["recovering", "offline"]
+
+    with pytest.raises(ModelOfflineError):
+        await lifecycle.recover("qwen3.5")
+    assert registry.refresh_calls == ["qwen3.5"]
+
+    result = await lifecycle.recover("qwen3.5", manual_retry=True)
+
+    assert result is recovered
+    assert registry.refresh_calls == ["qwen3.5", "qwen3.5"]
+    assert [request for _, request in actions.replayed] == [request, request]
+    assert actions.states == ["recovering", "offline", "recovering", "ready"]
+
+
+async def test_replay_cancellation_propagates_without_offlining() -> None:
+    cancellation = asyncio.CancelledError()
+    recovered = _instance(suffix="after-cancellation")
+    registry = ScriptedRegistry([_instance(suffix="cancelled"), recovered])
+    actions: RecordingActions[str] = RecordingActions(
+        replay_errors=[cancellation, None]
+    )
+    lifecycle = _lifecycle(registry, actions)
+    request = RecoveryRequest(61, "question")
+
+    with pytest.raises(asyncio.CancelledError) as captured:
+        await lifecycle.recover("qwen3.5", request)
+
+    assert captured.value is cancellation
+    assert actions.states == ["recovering"]
+
+    result = await lifecycle.recover("qwen3.5")
+
+    assert result is recovered
+    assert registry.refresh_calls == ["qwen3.5", "qwen3.5"]
+    assert actions.states == ["recovering", "recovering", "ready"]
 
 
 async def test_recover_without_queued_or_explicit_request_raises_typed_error() -> None:

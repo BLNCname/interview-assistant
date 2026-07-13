@@ -65,13 +65,14 @@ class ModelLifecycle(Generic[T]):
         self._locks: dict[str, asyncio.Lock] = {}
         self._offline: set[str] = set()
         self._last_replayed: dict[str, tuple[int, ModelInstance]] = {}
+        self._successful_waves: dict[str, int] = {}
 
     def submit(self, key: str, request: RecoveryRequest[T]) -> None:
         pending = self._pending.get(key)
         last_replayed = self._last_replayed.get(key)
         if pending is not None and request.request_id <= pending.request_id:
             return
-        if last_replayed is not None and request.request_id <= last_replayed[0]:
+        if last_replayed is not None and request.request_id < last_replayed[0]:
             return
         self._pending[key] = request
 
@@ -81,6 +82,7 @@ class ModelLifecycle(Generic[T]):
         request: RecoveryRequest[T] | None = None,
         manual_retry: bool = False,
     ) -> ModelInstance:
+        arrival_wave = self._successful_waves.get(key, 0)
         if request is not None:
             self.submit(key, request)
 
@@ -106,14 +108,20 @@ class ModelLifecycle(Generic[T]):
             if current is not None:
                 target_id = max(target_id, current.request_id)
             replayed = self._last_replayed.get(key)
-            if replayed is not None and replayed[0] >= target_id:
+            if (
+                self._successful_waves.get(key, 0) > arrival_wave
+                and replayed is not None
+                and replayed[0] >= target_id
+            ):
+                if current is not None and current.request_id <= replayed[0]:
+                    self._pending.pop(key, None)
                 return replayed[1]
 
             await self._cancel_active()
             self._on_state("recovering")
 
             last_error: Exception | None = None
-            for delay in self._DELAYS:
+            for attempt, delay in enumerate(self._DELAYS, start=1):
                 await self._sleeper(delay)
                 try:
                     instance = await self._registry.refresh(key)
@@ -127,8 +135,17 @@ class ModelLifecycle(Generic[T]):
                 latest = self._pending.get(key)
                 if latest is None:
                     raise NoRecoveryRequestError(key)
-                await self._replay(instance, latest)
+                try:
+                    await self._replay(instance, latest)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as error:
+                    self._offline.add(key)
+                    self._on_state("offline")
+                    raise ModelRecoveryError(key, attempt) from error
+
                 self._last_replayed[key] = (latest.request_id, instance)
+                self._successful_waves[key] = self._successful_waves.get(key, 0) + 1
 
                 still_pending = self._pending.get(key)
                 if still_pending is not None and still_pending.request_id <= latest.request_id:

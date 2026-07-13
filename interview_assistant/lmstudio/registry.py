@@ -44,6 +44,28 @@ class UnexpectedModelDeviceError(RuntimeError):
         )
 
 
+class ModelInstanceIdentityError(RuntimeError):
+    def __init__(
+        self,
+        key: str,
+        loaded_instance_id: str,
+        discovered_instance_id: str,
+    ) -> None:
+        self.key = key
+        self.loaded_instance_id = loaded_instance_id
+        self.discovered_instance_id = discovered_instance_id
+        super().__init__(
+            f"model {key!r} loaded instance {loaded_instance_id!r}, but immediate "
+            f"rediscovery returned {discovered_instance_id!r}"
+        )
+
+
+class ModelRegistryInvalidatedError(RuntimeError):
+    def __init__(self, key: str) -> None:
+        self.key = key
+        super().__init__(f"model {key!r} was invalidated while becoming ready")
+
+
 class ModelRegistry:
     def __init__(
         self,
@@ -54,20 +76,28 @@ class ModelRegistry:
         self._preferred_device_name = preferred_device_name
         self._instances: dict[str, ModelInstance] = {}
         self._locks: dict[str, asyncio.Lock] = {}
+        self._cache_generations: dict[str, int] = {}
 
     async def ensure_ready(self, key: str, refresh: bool = False) -> ModelInstance:
         lock = self._locks.setdefault(key, asyncio.Lock())
         async with lock:
-            cached = self._instances.get(key)
-            if not refresh and cached is not None and cached.state == "ready":
-                return cached
+            generation = self._cache_generations.get(key, 0)
+            if refresh:
+                self._instances.pop(key, None)
+            else:
+                cached = self._instances.get(key)
+                if cached is not None and cached.state == "ready":
+                    return cached
 
             instance = await self._discover_or_load(key)
+            if self._cache_generations.get(key, 0) != generation:
+                raise ModelRegistryInvalidatedError(key)
             self._instances[key] = instance
             return instance
 
     def invalidate(self, key: str) -> None:
         self._instances.pop(key, None)
+        self._cache_generations[key] = self._cache_generations.get(key, 0) + 1
 
     async def refresh(self, key: str) -> ModelInstance:
         return await self.ensure_ready(key, refresh=True)
@@ -90,6 +120,12 @@ class ModelRegistry:
         self._reject_duplicates(key, refreshed)
         if refreshed:
             current = refreshed[0]
+            if current.instance_id != loaded.instance_id:
+                raise ModelInstanceIdentityError(
+                    key,
+                    loaded.instance_id,
+                    current.instance_id,
+                )
             device_name = self._validated_device_name(
                 key,
                 loaded,
