@@ -1,5 +1,6 @@
 import re
 import unicodedata
+from threading import Lock
 from typing import Literal
 from urllib.parse import parse_qsl, unquote, urlencode, urlsplit, urlunsplit
 
@@ -9,18 +10,21 @@ from .models import (
     DUCKDUCKGO_ID,
     DUCKDUCKGO_TOOLS,
     SearchIntegration,
+    _policy_search_integration,
 )
 
 
 SearchMode = Literal["off", "auto", "forced"]
 
-_EMAIL = re.compile(
-    r"(?i)(?<![\w.+-])[\w.+-]+@[a-z0-9-]+(?:\.[a-z0-9-]+)+"
-)
+_EMAIL_PATTERN = r"(?<![\w.+-])[\w.+-]+@[\w-]+(?:\.[\w-]+)+"
+_EMAIL = re.compile(r"(?iu)" + _EMAIL_PATTERN)
 _LABELED_EMAIL = re.compile(
-    r"(?i)\b(?:e-?mail|почта|электронная\s+почта)\s*:\s*"
-    + _EMAIL.pattern.removeprefix("(?i)")
+    r"(?iu)\b(?:e-?mail|почта|электронная\s+почта)\s*:\s*"
+    + _EMAIL_PATTERN
     + r"\s*[.,;!?]?"
+)
+_FOR_EMAIL = re.compile(
+    r"(?iu)\b(?:for|для)\s+" + _EMAIL_PATTERN
 )
 _SOURCE_LINE = re.compile(
     r"(?im)^\s*(?:source|источник)\s*:\s*[^\r\n]*(?:\r?\n|$)"
@@ -32,6 +36,12 @@ _CANDIDATE_NAME_LINE = re.compile(
     r"(?imu)^\s*(?:candidate|кандидат)\s*:\s*"
     r"[A-ZА-ЯЁ][A-Za-zА-Яа-яЁё'’-]+"
     r"(?:\s+[A-ZА-ЯЁ][A-Za-zА-Яа-яЁё'’-]+){0,3}\s*(?:\r?\n|$)"
+)
+_INLINE_CANDIDATE_NAME = re.compile(
+    r"(?iu)\b(?:candidate|кандидат)\s*:\s*"
+    r"[A-ZА-ЯЁ][A-Za-zА-Яа-яЁё'’\-]+"
+    r"(?:\s+[A-ZА-ЯЁ][A-Za-zА-Яа-яЁё'’\-]+){0,3}"
+    r"\s*(?:[.;]\s*|(?=\r?\n|$))"
 )
 _SPEAKER_PREFIX = re.compile(
     r"(?im)^\s*"
@@ -52,6 +62,13 @@ _FIRST_PERSON_NAME = re.compile(
 _NAME_METADATA = re.compile(
     r"(?iu)(?:^|(?<=[.!?])\s+)"
     r"(?:full\s+name|name|имя|фио)\s*:\s*[^\r\n.!?]{1,100}[.!?]?"
+)
+_PERSON_ATTRIBUTION = re.compile(
+    r"(?u)\b(?:[Ff]or|[Ff]rom|"
+    r"(?:[Rr]equested\s+|[Aa]sked\s+)?[Bb]y|[Дд]ля|[Оо]т)\s+"
+    r"(?P<name>[A-ZА-ЯЁ][A-Za-zА-Яа-яЁё'’\-]+"
+    r"(?:\s+[A-ZА-ЯЁ][A-Za-zА-Яа-яЁё'’\-]+){1,3})"
+    r"(?=\s*[,.;:!?]|\s*$)"
 )
 _LEADING_VOCATIVE = re.compile(
     r"^(?P<name>"
@@ -108,6 +125,18 @@ _QUESTION_OR_HOW_TO_INTENT = re.compile(
     r"как|какой|какая|какие|что|где|когда|почему|кто|можно|расскажи|"
     r"объясни|покажи|найди)\b)"
 )
+_CURRENT_QUESTION_LABEL = re.compile(
+    r"(?iu)(?:^|[\r\n;]+|(?<=[.!?])\s+)"
+    r"(?:current\s+question|question|текущ(?:ий|ая)\s+вопрос|вопрос)\s*:\s*"
+)
+_LEADING_CONTEXT_METADATA = re.compile(
+    r"(?iu)^\s*(?:resume|résumé|cv|system\s+(?:prompt|instruction)|"
+    r"previous\s+answer|transcript|job\s+(?:metadata|description)|"
+    r"резюме|системн(?:ый|ая)\s+(?:промпт|инструкц\w*)|"
+    r"предыдущ(?:ий|ая)\s+ответ|стенограмм\w*|транскрипт\w*|"
+    r"(?:метаданн\w*|описани\w*)\s+ваканси\w*)\s*:\s*"
+)
+_SENTENCE_BOUNDARY = re.compile(r"(?<=[.!?])\s+|[\r\n]+")
 
 _SENSITIVE_QUERY_KEYS = {
     "accesskey",
@@ -179,6 +208,7 @@ _NON_PERSON_VOCATIVES = {
     "typescript",
     "vue",
 }
+_NON_PERSON_ATTRIBUTIONS = {"visual studio code"}
 
 
 class SearchPolicy:
@@ -188,6 +218,8 @@ class SearchPolicy:
         if mode not in {"off", "auto", "forced"}:
             raise ValueError(f"Unsupported search mode: {mode!r}")
         self._mode: SearchMode = mode  # type: ignore[assignment]
+        self._forced_lock = Lock()
+        self._forced_available = mode == "forced"
 
     def integrations_for(
         self,
@@ -200,6 +232,12 @@ class SearchPolicy:
         if self._mode == "off":
             return []
 
+        if self._mode == "forced":
+            with self._forced_lock:
+                if not self._forced_available:
+                    return []
+                self._forced_available = False
+
         query = _sanitize_question(question)
         if not query:
             return []
@@ -207,6 +245,8 @@ class SearchPolicy:
         if self._mode == "forced":
             return [_duckduckgo(query)]
         if _INTERNAL_TERMS.search(query):
+            return []
+        if not _has_question_intent(query):
             return []
         if _is_context7_question(query):
             return [_context7(query)]
@@ -216,11 +256,16 @@ class SearchPolicy:
 
 
 def _context7(query: str) -> SearchIntegration:
-    return SearchIntegration(CONTEXT7_ID, query, CONTEXT7_TOOLS)
+    return _policy_search_integration(CONTEXT7_ID, query, CONTEXT7_TOOLS)
 
 
 def _duckduckgo(query: str) -> SearchIntegration:
-    return SearchIntegration(DUCKDUCKGO_ID, query, DUCKDUCKGO_TOOLS)
+    return _policy_search_integration(DUCKDUCKGO_ID, query, DUCKDUCKGO_TOOLS)
+
+
+def _has_question_intent(query: str) -> bool:
+    query_without_urls = _URL.sub(" ", query)
+    return _QUESTION_OR_HOW_TO_INTENT.search(query_without_urls) is not None
 
 
 def _is_context7_question(query: str) -> bool:
@@ -230,7 +275,7 @@ def _is_context7_question(query: str) -> bool:
     has_software = _SOFTWARE_TERMS.search(query) is not None
     has_current = _CURRENT_TERMS.search(query) is not None
     has_version = _VERSION_TERMS.search(query) is not None
-    has_question_intent = _QUESTION_OR_HOW_TO_INTENT.search(query) is not None
+    has_question_intent = _has_question_intent(query)
 
     if _GENERIC_CONTEXT_DEFINITION.fullmatch(query):
         return False
@@ -257,18 +302,48 @@ def _sanitize_question(question: str) -> str:
     text = _SOURCE_LINE.sub(" ", text)
     text = _TIMESTAMP_PREFIX.sub("", text)
     text = _CANDIDATE_NAME_LINE.sub(" ", text)
+    text = _INLINE_CANDIDATE_NAME.sub(" ", text)
     text = _SPEAKER_PREFIX.sub("", text)
+    question_labels = list(_CURRENT_QUESTION_LABEL.finditer(text))
+    if question_labels:
+        text = text[question_labels[-1].end() :]
+    text = _strip_leading_context_metadata(text)
     text = _NAME_INTRODUCTION.sub(" ", text)
     text = _FIRST_PERSON_NAME.sub(" ", text)
     text = _NAME_METADATA.sub(" ", text)
+    text = _PERSON_ATTRIBUTION.sub(_redact_person_attribution, text)
     text = _LEADING_VOCATIVE.sub(_redact_vocative, text)
     text = _URL.sub(_sanitize_url_match, text)
     text = _LABELED_EMAIL.sub(" ", text)
+    text = _FOR_EMAIL.sub(" ", text)
     text = _EMAIL.sub(" ", text)
     text = re.sub(r"\s+", " ", text)
     text = re.sub(r"\s+([,.;!?])", r"\1", text)
     text = re.sub(r"^[\s,.;:!?—-]+", "", text)
     return text.strip()
+
+
+def _strip_leading_context_metadata(text: str) -> str:
+    match = _LEADING_CONTEXT_METADATA.match(text)
+    if match is None:
+        return text
+
+    remainder = text[match.end() :]
+    question_start: int | None = None
+    segment_start = 0
+    boundaries = list(_SENTENCE_BOUNDARY.finditer(remainder))
+    for boundary in boundaries:
+        segment = remainder[segment_start : boundary.start()].strip()
+        if _has_question_intent(segment):
+            question_start = segment_start
+        segment_start = boundary.end()
+
+    segment = remainder[segment_start:].strip()
+    if _has_question_intent(segment):
+        question_start = segment_start
+    if question_start is None:
+        return ""
+    return remainder[question_start:].strip()
 
 
 def _sanitize_url_match(match: re.Match[str]) -> str:
@@ -335,6 +410,12 @@ def _redact_vocative(match: re.Match[str]) -> str:
     return ""
 
 
+def _redact_person_attribution(match: re.Match[str]) -> str:
+    if match.group("name").casefold() in _NON_PERSON_ATTRIBUTIONS:
+        return match.group(0)
+    return " "
+
+
 def _fully_unquote(value: str) -> str:
     decoded = value
     for _ in range(2):
@@ -349,15 +430,29 @@ def _path_contains_sensitive_data(path: str) -> bool:
     for segment in path.split("/"):
         if not segment:
             continue
-        if _is_sensitive_key(segment) or _looks_like_secret(segment):
+        if (
+            _is_sensitive_key(segment)
+            or _is_labeled_sensitive_name(segment)
+            or _looks_like_secret(segment)
+        ):
             return True
     return False
+
+
+def _is_labeled_sensitive_name(segment: str) -> bool:
+    return re.match(
+        r"(?i)^(?:access[_-]?token|token|api[_-]?key|auth|signature|sig|"
+        r"secret|session(?:[_-]?(?:id|state))?|code|nonce|state|credential|"
+        r"jwt|bearer)[=_.-].+",
+        segment,
+    ) is not None
 
 
 def _query_pair_is_safe(key: str, value: str) -> bool:
     decoded_value = _fully_unquote(value)
     return not (
         _is_sensitive_key(key)
+        or _is_labeled_sensitive_name(key)
         or _EMAIL.search(decoded_value)
         or _contains_sensitive_key(decoded_value)
         or _looks_like_secret(decoded_value)

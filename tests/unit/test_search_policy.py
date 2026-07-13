@@ -1,7 +1,10 @@
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import FrozenInstanceError
+from threading import Barrier
 
 import pytest
 
+from interview_assistant.retrieval import models as retrieval_models
 from interview_assistant.retrieval.models import SearchIntegration
 from interview_assistant.retrieval.policy import SearchPolicy
 
@@ -15,10 +18,11 @@ def test_library_question_uses_context7_only() -> None:
     )
 
     assert len(integrations) == 1
-    assert integrations[0] == SearchIntegration(
-        id="mcp/context7",
-        query=question,
-        allowed_tools=("resolve-library-id", "query-docs"),
+    assert integrations[0].id == "mcp/context7"
+    assert integrations[0].query == question
+    assert integrations[0].allowed_tools == (
+        "resolve-library-id",
+        "query-docs",
     )
 
 
@@ -57,13 +61,10 @@ def test_current_library_version_question_uses_context7() -> None:
 def test_general_current_question_uses_duckduckgo(question: str) -> None:
     integrations = SearchPolicy("auto").integrations_for(question)
 
-    assert integrations == [
-        SearchIntegration(
-            id="mcp/duckduckgo",
-            query=question,
-            allowed_tools=("search",),
-        )
-    ]
+    assert len(integrations) == 1
+    assert integrations[0].id == "mcp/duckduckgo"
+    assert integrations[0].query == question
+    assert integrations[0].allowed_tools == ("search",)
 
 
 def test_static_question_exposes_no_tools() -> None:
@@ -93,10 +94,46 @@ def test_internal_static_technical_text_stays_local(question: str) -> None:
         "Python use is slow.",
         "API request failed.",
         "API request failed. https://example.test/status?lang=en",
+        "API request failed. https://example.test/status?",
+        "Python use is slow. https://example.test/?",
     ],
 )
 def test_declarative_operation_words_do_not_trigger_context7(question: str) -> None:
     assert SearchPolicy("auto").integrations_for(question) == []
+
+
+@pytest.mark.parametrize(
+    "question",
+    [
+        "Today Alice Smith joined Acme Corp.",
+        "Python documentation contains Alice Smith's resume details.",
+        "API version is v2.",
+        "Python documentation is difficult to read.",
+        "The latest release broke our build.",
+    ],
+)
+def test_auto_does_not_route_declarative_current_or_documentation_text(
+    question: str,
+) -> None:
+    assert SearchPolicy("auto").integrations_for(question) == []
+
+
+@pytest.mark.parametrize(
+    ("question", "expected_id"),
+    [
+        ("Tell me the latest Python release.", "mcp/duckduckgo"),
+        ("Find the current FastAPI documentation.", "mcp/context7"),
+        ("Расскажи последние новости Python.", "mcp/duckduckgo"),
+        ("Покажи актуальную документацию FastAPI.", "mcp/context7"),
+    ],
+)
+def test_auto_routes_english_and_russian_imperative_questions(
+    question: str,
+    expected_id: str,
+) -> None:
+    integrations = SearchPolicy("auto").integrations_for(question)
+
+    assert [item.id for item in integrations] == [expected_id]
 
 
 def test_off_mode_exposes_no_tools() -> None:
@@ -107,12 +144,49 @@ def test_off_mode_exposes_no_tools() -> None:
 
 
 def test_forced_mode_is_a_per_request_duckduckgo_override() -> None:
-    integrations = SearchPolicy("forced").integrations_for(
+    policy = SearchPolicy("forced")
+
+    integrations = policy.integrations_for(
         "Explain FastAPI lifespan."
     )
+    second = policy.integrations_for("What is the latest Python release?")
 
     assert [item.id for item in integrations] == ["mcp/duckduckgo"]
     assert integrations[0].allowed_tools == ("search",)
+    assert second == []
+
+
+def test_forced_override_is_consumed_by_only_one_concurrent_request() -> None:
+    workers = 8
+    barrier = Barrier(workers)
+    policy = SearchPolicy("forced")
+
+    def route(index: int) -> list[SearchIntegration]:
+        barrier.wait(timeout=2)
+        return policy.integrations_for(f"request {index}")
+
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        results = list(executor.map(route, range(workers)))
+
+    assert sum(bool(result) for result in results) == 1
+    assert {
+        integration.id
+        for result in results
+        for integration in result
+    } == {"mcp/duckduckgo"}
+
+
+def test_auto_and_off_modes_remain_stable_across_repeated_calls() -> None:
+    auto = SearchPolicy("auto")
+    off = SearchPolicy("off")
+
+    first_auto = auto.integrations_for("What is the latest Python release?")
+    second_auto = auto.integrations_for("What is the latest Python release?")
+
+    assert [item.id for item in first_auto] == ["mcp/duckduckgo"]
+    assert second_auto == first_auto
+    assert off.integrations_for("What is the latest Python release?") == []
+    assert off.integrations_for("What is the latest Python release?") == []
 
 
 def test_english_privacy_data_and_transcript_metadata_are_removed() -> None:
@@ -237,6 +311,172 @@ def test_standalone_timestamp_and_candidate_name_metadata_are_removed() -> None:
     assert "Alice Smith" not in integrations[0].query
 
 
+@pytest.mark.parametrize(
+    ("question", "expected"),
+    [
+        (
+            "Candidate: Alice Smith. What is the latest Python release?",
+            "What is the latest Python release?",
+        ),
+        (
+            "Кандидат: Иван Петров. Какая сейчас версия библиотеки Pydantic?",
+            "Какая сейчас версия библиотеки Pydantic?",
+        ),
+    ],
+)
+def test_inline_candidate_name_metadata_is_removed(
+    question: str,
+    expected: str,
+) -> None:
+    integrations = SearchPolicy("auto").integrations_for(question)
+
+    assert integrations[0].query == expected
+
+
+@pytest.mark.parametrize(
+    "question",
+    [
+        (
+            "Resume: private-resume-marker. Current question: "
+            "What is the latest Python release?"
+        ),
+        (
+            "System prompt: private-system-marker. Question: "
+            "What is the latest Python release?"
+        ),
+        (
+            "Previous answer: private-answer-marker. Question: "
+            "What is the latest Python release?"
+        ),
+        (
+            "Transcript: private-transcript-marker. Question: "
+            "What is the latest Python release?"
+        ),
+        (
+            "Job metadata: private-job-marker. Question: "
+            "What is the latest Python release?"
+        ),
+        (
+            "Резюме: приватные-данные. Текущий вопрос: "
+            "Какая сейчас версия библиотеки Pydantic?"
+        ),
+    ],
+)
+def test_labeled_context_contamination_keeps_only_current_question(
+    question: str,
+) -> None:
+    integrations = SearchPolicy("auto").integrations_for(question)
+
+    expected = (
+        "Какая сейчас версия библиотеки Pydantic?"
+        if "Pydantic" in question
+        else "What is the latest Python release?"
+    )
+    assert integrations[0].query == expected
+
+
+@pytest.mark.parametrize(
+    ("question", "expected"),
+    [
+        (
+            "Previous answer: Alice Smith works at Acme. "
+            "What is the latest Python release?",
+            "What is the latest Python release?",
+        ),
+        (
+            "System prompt: candidate Alice Smith. Latest OAuth standard?",
+            "Latest OAuth standard?",
+        ),
+        (
+            "Speaker 1 [00:01]: Previous answer: Alice Smith works at Acme. "
+            "What is the latest Python release?",
+            "What is the latest Python release?",
+        ),
+        (
+            "[00:01] System prompt: secret. Latest OAuth standard?",
+            "Latest OAuth standard?",
+        ),
+    ],
+)
+def test_reviewer_labeled_metadata_without_question_label_is_removed(
+    question: str,
+    expected: str,
+) -> None:
+    integrations = SearchPolicy("auto").integrations_for(question)
+
+    assert integrations[0].query == expected
+
+
+@pytest.mark.parametrize(
+    ("question", "expected"),
+    [
+        (
+            "What is the latest Python release for Alice Smith?",
+            "What is the latest Python release?",
+        ),
+        (
+            "What is the latest Python release requested by Alice Smith?",
+            "What is the latest Python release?",
+        ),
+        (
+            "What is the latest Python release requested by Alice Mary Smith?",
+            "What is the latest Python release?",
+        ),
+        (
+            "What is the latest Python release by Alice Smith?",
+            "What is the latest Python release?",
+        ),
+        (
+            "What is the latest Python release from Alice Smith?",
+            "What is the latest Python release?",
+        ),
+        (
+            "Какая сейчас версия Python для Ивана Петрова?",
+            "Какая сейчас версия Python?",
+        ),
+        (
+            "Какая сейчас версия Python от Ивана Петрова?",
+            "Какая сейчас версия Python?",
+        ),
+        (
+            "Какая сейчас версия Python для иван@пример.рф?",
+            "Какая сейчас версия Python?",
+        ),
+    ],
+)
+def test_reviewer_russian_inline_personal_data_is_removed(
+    question: str,
+    expected: str,
+) -> None:
+    integrations = SearchPolicy("auto").integrations_for(question)
+
+    assert integrations[0].query == expected
+
+
+@pytest.mark.parametrize(
+    "question",
+    [
+        "What does the system prompt parameter do in the current FastAPI API?",
+        "How do I parse transcript metadata in the current Python API?",
+    ],
+)
+def test_legitimate_technical_metadata_questions_are_preserved(
+    question: str,
+) -> None:
+    integrations = SearchPolicy("auto").integrations_for(question)
+
+    assert integrations[0].query == question
+    assert integrations[0].id == "mcp/context7"
+
+
+def test_three_word_product_name_is_not_redacted_as_a_person() -> None:
+    question = "What is the latest release for Visual Studio Code?"
+
+    integrations = SearchPolicy("auto").integrations_for(question)
+
+    assert integrations[0].query == question
+
+
 def test_source_metadata_and_sensitive_url_parameters_are_removed() -> None:
     question = (
         "Source: Teams recording\n"
@@ -313,9 +553,29 @@ def test_url_userinfo_credentials_are_removed() -> None:
             "a8f3d90b71",
         ),
         (
+            "https://example.test/callback?token_value=opaquevalue",
+            "Latest OAuth standard? https://example.test/callback",
+            "opaquevalue",
+        ),
+        (
+            "https://example.test/callback?token-value=opaquevalue",
+            "Latest OAuth standard? https://example.test/callback",
+            "opaquevalue",
+        ),
+        (
+            "https://example.test/callback?token.value=opaquevalue",
+            "Latest OAuth standard? https://example.test/callback",
+            "opaquevalue",
+        ),
+        (
             "https://example.test/users/alice%40example.com",
             "Latest OAuth standard?",
             "alice%40example.com",
+        ),
+        (
+            "https://example.test/reset/token_abcd1234",
+            "Latest OAuth standard?",
+            "token_abcd1234",
         ),
     ],
 )
@@ -359,11 +619,9 @@ def test_empty_sanitized_query_never_enables_an_all_tools_fallback() -> None:
 
 
 def test_integration_is_frozen_slotted_and_serializes_only_native_fields() -> None:
-    integration = SearchIntegration(
-        id="mcp/duckduckgo",
-        query="latest release secret-free",
-        allowed_tools=("search",),
-    )
+    integration = SearchPolicy("forced").integrations_for(
+        "latest release secret-free"
+    )[0]
 
     assert not hasattr(integration, "__dict__")
     with pytest.raises(FrozenInstanceError):
@@ -374,6 +632,67 @@ def test_integration_is_frozen_slotted_and_serializes_only_native_fields() -> No
         "allowed_tools": ["search"],
     }
     assert "query" not in integration.to_lmstudio()
+
+
+def test_raw_search_integration_construction_is_rejected() -> None:
+    with pytest.raises(TypeError, match="sanitized"):
+        SearchIntegration(
+            id="mcp/duckduckgo",
+            query="raw private transcript",
+            allowed_tools=("search",),
+        )
+
+
+def test_unsealed_sanitized_question_is_rejected() -> None:
+    unsealed = object.__new__(retrieval_models._SanitizedQuestion)
+    object.__setattr__(unsealed, "_text", "raw private transcript")
+    object.__setattr__(unsealed, "_proof", object())
+
+    with pytest.raises(TypeError, match="sanitized"):
+        SearchIntegration(
+            id="mcp/duckduckgo",
+            query=unsealed,
+            allowed_tools=("search",),
+        )
+
+
+def test_reused_proof_and_mac_cannot_seal_different_text() -> None:
+    valid = SearchPolicy("forced").integrations_for("safe question")[0]
+    original = valid._sanitized_question
+    forged = retrieval_models._SanitizedQuestion._create(
+        "raw private transcript",
+        original._proof,
+        original._mac,
+    )
+
+    with pytest.raises(TypeError, match="sanitized"):
+        SearchIntegration(
+            id="mcp/duckduckgo",
+            query=forged,
+            allowed_tools=("search",),
+        )
+
+
+def test_sanitized_question_subclass_lookalike_is_rejected() -> None:
+    valid = SearchPolicy("forced").integrations_for("safe question")[0]
+
+    class SanitizedQuestionLookalike(retrieval_models._SanitizedQuestion):
+        pass
+
+    lookalike = object.__new__(SanitizedQuestionLookalike)
+    object.__setattr__(lookalike, "_text", "raw private transcript")
+    object.__setattr__(
+        lookalike,
+        "_proof",
+        valid._sanitized_question._proof,
+    )
+
+    with pytest.raises(TypeError, match="sanitized"):
+        SearchIntegration(
+            id="mcp/duckduckgo",
+            query=lookalike,
+            allowed_tools=("search",),
+        )
 
 
 def test_invalid_mode_is_rejected() -> None:

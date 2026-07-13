@@ -23,6 +23,13 @@ class RequestCoordinator:
         self._active_task: asyncio.Task[None] | None = None
 
     def submit(self, payload: Mapping[str, object]) -> int:
+        if "integrations" in payload:
+            raise ValueError(
+                "Retrieval integrations must be submitted via submit_retrieval"
+            )
+        return self._submit_payload(payload)
+
+    def _submit_payload(self, payload: Mapping[str, object]) -> int:
         self._next_request_id += 1
         request_id = self._next_request_id
         self._active_id = request_id
@@ -52,12 +59,12 @@ class RequestCoordinator:
             raise ValueError("Retrieval submission requires exactly one integration")
 
         integration = integrations[0]
-        if not isinstance(integration, SearchIntegration):
+        if type(integration) is not SearchIntegration:
             raise TypeError("Retrieval integration must be a SearchIntegration")
-        return self.submit(
+        return self._submit_payload(
             {
                 "model": model_key,
-                "input": integration.query,
+                "input": integration._query_for_retrieval(),
                 "integrations": [integration.to_lmstudio()],
             }
         )
