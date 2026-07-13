@@ -1,7 +1,7 @@
 import asyncio
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from typing import Generic, Protocol, TypeVar
+from typing import Generic, Literal, Protocol, TypeVar
 
 from .models import ModelInstance
 
@@ -13,6 +13,25 @@ T = TypeVar("T")
 class RecoveryRequest(Generic[T]):
     request_id: int
     payload: T
+
+
+@dataclass(frozen=True)
+class _QueuedRequest(Generic[T]):
+    request: RecoveryRequest[T]
+    submission_seq: int
+
+
+@dataclass(frozen=True)
+class _ReplayedRequest:
+    request_id: int
+    submission_seq: int
+    instance: ModelInstance
+
+
+@dataclass(frozen=True)
+class _SubmissionOutcome:
+    disposition: Literal["accepted", "targeted", "stale_completed"]
+    target_submission_seq: int
 
 
 class RecoveryRegistry(Protocol):
@@ -61,20 +80,36 @@ class ModelLifecycle(Generic[T]):
         self._replay = replay
         self._sleeper = sleeper
         self._on_state = on_state
-        self._pending: dict[str, RecoveryRequest[T]] = {}
+        self._pending: dict[str, _QueuedRequest[T]] = {}
         self._locks: dict[str, asyncio.Lock] = {}
         self._offline: set[str] = set()
-        self._last_replayed: dict[str, tuple[int, ModelInstance]] = {}
-        self._successful_waves: dict[str, int] = {}
+        self._last_replayed: dict[str, _ReplayedRequest] = {}
+        self._submission_sequences: dict[str, int] = {}
 
     def submit(self, key: str, request: RecoveryRequest[T]) -> None:
+        self._submit(key, request)
+
+    def _submit(
+        self,
+        key: str,
+        request: RecoveryRequest[T],
+    ) -> _SubmissionOutcome:
         pending = self._pending.get(key)
+        if pending is not None and request.request_id <= pending.request.request_id:
+            return _SubmissionOutcome("targeted", pending.submission_seq)
+
         last_replayed = self._last_replayed.get(key)
-        if pending is not None and request.request_id <= pending.request_id:
-            return
-        if last_replayed is not None and request.request_id < last_replayed[0]:
-            return
-        self._pending[key] = request
+        if pending is None and last_replayed is not None:
+            if request.request_id < last_replayed.request_id:
+                return _SubmissionOutcome(
+                    "stale_completed",
+                    last_replayed.submission_seq,
+                )
+
+        submission_seq = self._submission_sequences.get(key, 0) + 1
+        self._submission_sequences[key] = submission_seq
+        self._pending[key] = _QueuedRequest(request, submission_seq)
+        return _SubmissionOutcome("accepted", submission_seq)
 
     async def recover(
         self,
@@ -82,40 +117,34 @@ class ModelLifecycle(Generic[T]):
         request: RecoveryRequest[T] | None = None,
         manual_retry: bool = False,
     ) -> ModelInstance:
-        arrival_wave = self._successful_waves.get(key, 0)
         if request is not None:
-            self.submit(key, request)
-
-        pending = self._pending.get(key)
-        if pending is None:
-            if request is None:
-                raise NoRecoveryRequestError(key)
-            target_id = request.request_id
+            submission = self._submit(key, request)
+            target_submission_seq = submission.target_submission_seq
         else:
-            target_id = pending.request_id
-            if request is not None:
-                target_id = max(target_id, request.request_id)
+            pending = self._pending.get(key)
+            if pending is None:
+                raise NoRecoveryRequestError(key)
+            submission = _SubmissionOutcome("targeted", pending.submission_seq)
+            target_submission_seq = pending.submission_seq
 
         if key in self._offline and not manual_retry:
             raise ModelOfflineError(key)
+
+        if submission.disposition == "stale_completed":
+            completed = self._last_replayed[key]
+            return completed.instance
 
         lock = self._locks.setdefault(key, asyncio.Lock())
         async with lock:
             if key in self._offline and not manual_retry:
                 raise ModelOfflineError(key)
 
-            current = self._pending.get(key)
-            if current is not None:
-                target_id = max(target_id, current.request_id)
             replayed = self._last_replayed.get(key)
             if (
-                self._successful_waves.get(key, 0) > arrival_wave
-                and replayed is not None
-                and replayed[0] >= target_id
+                replayed is not None
+                and replayed.submission_seq >= target_submission_seq
             ):
-                if current is not None and current.request_id <= replayed[0]:
-                    self._pending.pop(key, None)
-                return replayed[1]
+                return replayed.instance
 
             await self._cancel_active()
             self._on_state("recovering")
@@ -136,7 +165,7 @@ class ModelLifecycle(Generic[T]):
                 if latest is None:
                     raise NoRecoveryRequestError(key)
                 try:
-                    await self._replay(instance, latest)
+                    await self._replay(instance, latest.request)
                 except asyncio.CancelledError:
                     raise
                 except Exception as error:
@@ -144,11 +173,17 @@ class ModelLifecycle(Generic[T]):
                     self._on_state("offline")
                     raise ModelRecoveryError(key, attempt) from error
 
-                self._last_replayed[key] = (latest.request_id, instance)
-                self._successful_waves[key] = self._successful_waves.get(key, 0) + 1
+                self._last_replayed[key] = _ReplayedRequest(
+                    latest.request.request_id,
+                    latest.submission_seq,
+                    instance,
+                )
 
                 still_pending = self._pending.get(key)
-                if still_pending is not None and still_pending.request_id <= latest.request_id:
+                if (
+                    still_pending is not None
+                    and still_pending.submission_seq <= latest.submission_seq
+                ):
                     self._pending.pop(key, None)
                 self._offline.discard(key)
                 self._on_state("ready")

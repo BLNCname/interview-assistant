@@ -423,6 +423,145 @@ async def test_sequential_same_request_id_starts_a_fresh_recovery_wave() -> None
     assert [request.request_id for _, request in actions.replayed] == [42, 42]
 
 
+async def test_waiter_does_not_consume_later_equal_id_submission() -> None:
+    refresh_started = asyncio.Event()
+    release_refresh = asyncio.Event()
+    first_instance = _instance(suffix="first")
+    second_instance = _instance(suffix="second")
+
+    class BlockingRegistry:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def refresh(self, _key: str) -> ModelInstance:
+            self.calls += 1
+            if self.calls == 1:
+                refresh_started.set()
+                await release_refresh.wait()
+                return first_instance
+            return second_instance
+
+    actions: RecordingActions[str] = RecordingActions()
+    submitted_later = False
+    lifecycle: ModelLifecycle[str]
+
+    def on_state(state: str) -> None:
+        nonlocal submitted_later
+        actions.on_state(state)
+        if state == "ready" and not submitted_later:
+            submitted_later = True
+            lifecycle.submit(
+                "qwen3.5",
+                RecoveryRequest(42, "genuinely later equal-id event"),
+            )
+
+    registry = BlockingRegistry()
+    lifecycle = ModelLifecycle(
+        registry,
+        cancel_active=actions.cancel_active,
+        warm_up=actions.warm_up,
+        replay=actions.replay,
+        sleeper=actions.sleep,
+        on_state=on_state,
+    )
+    first = asyncio.create_task(
+        lifecycle.recover("qwen3.5", RecoveryRequest(42, "running event"))
+    )
+    await refresh_started.wait()
+    waiter = asyncio.create_task(
+        lifecycle.recover("qwen3.5", RecoveryRequest(42, "overlapping waiter"))
+    )
+    await asyncio.sleep(0)
+
+    release_refresh.set()
+    first_result, waiter_result = await asyncio.gather(first, waiter)
+    later_result = await lifecycle.recover("qwen3.5")
+
+    assert first_result is first_instance
+    assert waiter_result is first_instance
+    assert later_result is second_instance
+    assert registry.calls == 2
+    assert actions.cancel_calls == 2
+    assert [request.payload for _, request in actions.replayed] == [
+        "running event",
+        "genuinely later equal-id event",
+    ]
+
+
+async def test_stale_lower_id_after_success_returns_prior_instance_without_new_wave() -> None:
+    instance = _instance()
+    registry = ScriptedRegistry([instance])
+    actions: RecordingActions[str] = RecordingActions()
+    lifecycle = _lifecycle(registry, actions)
+    first = await lifecycle.recover("qwen3.5", RecoveryRequest(51, "completed"))
+    snapshot = (
+        list(registry.refresh_calls),
+        actions.cancel_calls,
+        list(actions.delays),
+        list(actions.warmed),
+        list(actions.replayed),
+        list(actions.states),
+    )
+
+    stale = await lifecycle.recover("qwen3.5", RecoveryRequest(50, "stale"))
+
+    assert first is instance
+    assert stale is instance
+    assert (
+        registry.refresh_calls,
+        actions.cancel_calls,
+        actions.delays,
+        actions.warmed,
+        actions.replayed,
+        actions.states,
+    ) == snapshot
+
+
+async def test_lower_caller_targets_greater_pending_submission() -> None:
+    refresh_started = asyncio.Event()
+    release_refresh = asyncio.Event()
+    instance = _instance()
+
+    class BlockingRegistry:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def refresh(self, _key: str) -> ModelInstance:
+            self.calls += 1
+            refresh_started.set()
+            await release_refresh.wait()
+            return instance
+
+    registry = BlockingRegistry()
+    actions: RecordingActions[str] = RecordingActions()
+    lifecycle = ModelLifecycle(
+        registry,
+        cancel_active=actions.cancel_active,
+        warm_up=actions.warm_up,
+        replay=actions.replay,
+        sleeper=actions.sleep,
+    )
+    greater = asyncio.create_task(
+        lifecycle.recover("qwen3.5", RecoveryRequest(61, "greater pending"))
+    )
+    await refresh_started.wait()
+    lower = asyncio.create_task(
+        lifecycle.recover("qwen3.5", RecoveryRequest(60, "lower caller"))
+    )
+    await asyncio.sleep(0)
+
+    release_refresh.set()
+    greater_result, lower_result = await asyncio.gather(greater, lower)
+
+    assert greater_result is instance
+    assert lower_result is instance
+    assert registry.calls == 1
+    assert actions.cancel_calls == 1
+    assert [request for _, request in actions.replayed] == [
+        RecoveryRequest(61, "greater pending")
+    ]
+
+
 async def test_newer_concurrent_caller_before_replay_joins_covering_wave() -> None:
     warm_started = asyncio.Event()
     release_warm = asyncio.Event()
