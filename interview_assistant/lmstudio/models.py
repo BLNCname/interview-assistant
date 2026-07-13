@@ -9,6 +9,17 @@ class LMStudioContract(BaseModel):
     model_config = ConfigDict(extra="allow", populate_by_name=True, strict=True)
 
 
+class ChatEvent(LMStudioContract):
+    type: str
+    content: str = ""
+    progress: float | None = None
+    model_instance_id: str | None = None
+    tool: str | None = None
+    arguments: dict[str, object] | None = None
+    output: str | None = None
+    result: dict[str, object] | None = None
+
+
 class ModelSummary(LMStudioContract):
     key: str = Field(alias="id")
     object: str | None = None
