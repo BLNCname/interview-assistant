@@ -16,6 +16,7 @@ from PyQt6.QtGui import (
     QPainter,
     QPainterPath,
     QPen,
+    QResizeEvent,
     QTextCharFormat,
     QTextCursor,
 )
@@ -37,6 +38,116 @@ from interview_assistant.config import OverlayConfig
 from interview_assistant.events import EventBus
 
 _MARKDOWN_TOKEN = re.compile(r"\*\*([^*\n]+)\*\*|`([^`\n]+)`")
+_LONG_UNBROKEN_TOKEN = re.compile(r"\S{65,}")
+
+_RGB = tuple[int, int, int]
+_SURFACE_TOP_RGB: _RGB = (30, 41, 59)
+_SURFACE_BOTTOM_RGB: _RGB = (15, 23, 42)
+_STATUS_CHIP_RGB: _RGB = (255, 255, 255)
+_STATUS_CHIP_ALPHA = 14
+_MODEL_CHIP_RGB: _RGB = (125, 211, 252)
+_MODEL_CHIP_ALPHA = 31
+_ANSWER_BACKGROUND_RGB: _RGB = (2, 6, 23)
+_ANSWER_BACKGROUND_ALPHA = 35
+_WHITE_RGB: _RGB = (255, 255, 255)
+_WCAG_AA_CONTRAST = 4.5
+
+
+def _composite_rgb(
+    foreground: _RGB,
+    alpha: int,
+    background: tuple[float, float, float],
+) -> tuple[float, float, float]:
+    proportion = alpha / 255
+    return (
+        (foreground[0] * proportion) + (background[0] * (1 - proportion)),
+        (foreground[1] * proportion) + (background[1] * (1 - proportion)),
+        (foreground[2] * proportion) + (background[2] * (1 - proportion)),
+    )
+
+
+def _relative_luminance(rgb: tuple[float, float, float]) -> float:
+    def linearize(component: float) -> float:
+        normalized = component / 255
+        if normalized <= 0.04045:
+            return normalized / 12.92
+        return ((normalized + 0.055) / 1.055) ** 2.4
+
+    red, green, blue = (linearize(component) for component in rgb)
+    return (0.2126 * red) + (0.7152 * green) + (0.0722 * blue)
+
+
+def _contrast_ratio(
+    foreground: tuple[float, float, float],
+    background: tuple[float, float, float],
+) -> float:
+    lighter, darker = sorted(
+        (_relative_luminance(foreground), _relative_luminance(background)),
+        reverse=True,
+    )
+    return (lighter + 0.05) / (darker + 0.05)
+
+
+def _accessible_text_rgb(
+    preferred: _RGB,
+    backgrounds: Iterable[tuple[float, float, float]],
+) -> _RGB:
+    candidates = tuple(backgrounds)
+    for white_mix in range(256):
+        color: _RGB = (
+            round(preferred[0] + ((255 - preferred[0]) * white_mix / 255)),
+            round(preferred[1] + ((255 - preferred[1]) * white_mix / 255)),
+            round(preferred[2] + ((255 - preferred[2]) * white_mix / 255)),
+        )
+        if all(
+            _contrast_ratio(color, background) >= _WCAG_AA_CONTRAST
+            for background in candidates
+        ):
+            return color
+    return _WHITE_RGB
+
+
+def _hex_color(rgb: _RGB) -> str:
+    return "#{:02x}{:02x}{:02x}".format(*rgb)
+
+
+def _rgba_css(rgb: _RGB, alpha: int) -> str:
+    return f"rgba({rgb[0]}, {rgb[1]}, {rgb[2]}, {alpha})"
+
+
+class _ElidingLabel(QLabel):
+    """A plain-text label that bounds pathological tokens without losing raw state."""
+
+    def __init__(self, text: str, parent: QWidget | None = None) -> None:
+        super().__init__("", parent)
+        self.full_text = ""
+        self.set_full_text(text)
+
+    def set_full_text(self, text: str) -> None:
+        self.full_text = text
+        self._refresh_display_text()
+
+    def resizeEvent(self, event: QResizeEvent | None) -> None:
+        super().resizeEvent(event)
+        self._refresh_display_text()
+
+    def _refresh_display_text(self) -> None:
+        available_width = max(80, self.contentsRect().width())
+        metrics = self.fontMetrics()
+
+        def elide(match: re.Match[str]) -> str:
+            token = match.group(0)
+            if metrics.horizontalAdvance(token) <= available_width:
+                return token
+            return metrics.elidedText(
+                token,
+                Qt.TextElideMode.ElideMiddle,
+                available_width,
+            )
+
+        display_text = _LONG_UNBROKEN_TOKEN.sub(elide, self.full_text)
+        if self.text() != display_text:
+            super().setText(display_text)
 
 
 class _RibbonSurface(QWidget):
@@ -47,6 +158,9 @@ class _RibbonSurface(QWidget):
         # The glass remains dark enough to back high-contrast text even at the
         # lowest user setting; opacity still controls the strength of the tint.
         self.background_alpha = max(180, round(166 + (76 * opacity)))
+        self.background_bottom_alpha = max(180, self.background_alpha - 22)
+        self.gradient_top_rgb = _SURFACE_TOP_RGB
+        self.gradient_bottom_rgb = _SURFACE_BOTTOM_RGB
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
 
     def paintEvent(self, event: QPaintEvent | None) -> None:
@@ -58,8 +172,14 @@ class _RibbonSurface(QWidget):
         path.addRoundedRect(rect, self.corner_radius, self.corner_radius)
 
         background = QLinearGradient(rect.topLeft(), rect.bottomRight())
-        background.setColorAt(0.0, QColor(30, 41, 59, self.background_alpha))
-        background.setColorAt(1.0, QColor(15, 23, 42, max(180, self.background_alpha - 22)))
+        background.setColorAt(
+            0.0,
+            QColor(*self.gradient_top_rgb, self.background_alpha),
+        )
+        background.setColorAt(
+            1.0,
+            QColor(*self.gradient_bottom_rgb, self.background_bottom_alpha),
+        )
         painter.fillPath(path, background)
 
         painter.setPen(QPen(QColor(255, 255, 255, 56), 1.0))
@@ -130,6 +250,8 @@ class LiquidRibbon(QMainWindow):
         self._minimum_expanded_height = min(120, self._config.max_height)
         self.is_collapsed = False
         self.answer_text = ""
+        self.question_text = "Ожидание вопроса…"
+        self.source_texts: tuple[str, ...] = ()
         self._fallback_action: str | None = None
         self._fallback_press_global: QPoint | None = None
         self._fallback_press_geometry: QRect | None = None
@@ -151,6 +273,54 @@ class LiquidRibbon(QMainWindow):
     def _build_content(self) -> None:
         self.surface = _RibbonSurface(self._config.opacity, self)
         self.setCentralWidget(self.surface)
+        white_background = (
+            float(_WHITE_RGB[0]),
+            float(_WHITE_RGB[1]),
+            float(_WHITE_RGB[2]),
+        )
+        surface_backgrounds = (
+            _composite_rgb(
+                self.surface.gradient_top_rgb,
+                self.surface.background_alpha,
+                white_background,
+            ),
+            _composite_rgb(
+                self.surface.gradient_bottom_rgb,
+                self.surface.background_bottom_alpha,
+                white_background,
+            ),
+        )
+        status_backgrounds = tuple(
+            _composite_rgb(_STATUS_CHIP_RGB, _STATUS_CHIP_ALPHA, background)
+            for background in surface_backgrounds
+        )
+        model_backgrounds = tuple(
+            _composite_rgb(_MODEL_CHIP_RGB, _MODEL_CHIP_ALPHA, background)
+            for background in surface_backgrounds
+        )
+        answer_backgrounds = tuple(
+            _composite_rgb(
+                _ANSWER_BACKGROUND_RGB,
+                _ANSWER_BACKGROUND_ALPHA,
+                background,
+            )
+            for background in surface_backgrounds
+        )
+        secondary_text = _hex_color(
+            _accessible_text_rgb((148, 163, 184), surface_backgrounds)
+        )
+        status_text = _hex_color(
+            _accessible_text_rgb((203, 213, 225), status_backgrounds)
+        )
+        model_text = _hex_color(
+            _accessible_text_rgb((186, 230, 253), model_backgrounds)
+        )
+        answer_text = _hex_color(
+            _accessible_text_rgb((219, 234, 254), answer_backgrounds)
+        )
+        control_text = _hex_color(
+            _accessible_text_rgb((219, 234, 254), surface_backgrounds)
+        )
         self.content_layout = QVBoxLayout(self.surface)
         self.content_layout.setContentsMargins(14, 12, 14, 12)
         self.content_layout.setSpacing(8)
@@ -170,7 +340,8 @@ class LiquidRibbon(QMainWindow):
         self.status_label = QLabel("Starting", self.header_widget)
         self.status_label.setTextFormat(Qt.TextFormat.PlainText)
         self.status_label.setStyleSheet(
-            "QLabel { color: #cbd5e1; background: rgba(255, 255, 255, 14); "
+            f"QLabel {{ color: {status_text}; "
+            f"background: {_rgba_css(_STATUS_CHIP_RGB, _STATUS_CHIP_ALPHA)}; "
             "border: 1px solid rgba(255, 255, 255, 22); border-radius: 9px; "
             "padding: 2px 7px; font-size: 12px; }"
         )
@@ -179,7 +350,8 @@ class LiquidRibbon(QMainWindow):
         self.model_chip = QLabel("Local model", self.header_widget)
         self.model_chip.setTextFormat(Qt.TextFormat.PlainText)
         self.model_chip.setStyleSheet(
-            "QLabel { color: #bae6fd; background: rgba(125, 211, 252, 31); "
+            f"QLabel {{ color: {model_text}; "
+            f"background: {_rgba_css(_MODEL_CHIP_RGB, _MODEL_CHIP_ALPHA)}; "
             "border: 1px solid rgba(125, 211, 252, 46); border-radius: 9px; "
             "padding: 2px 7px; }"
         )
@@ -192,7 +364,7 @@ class LiquidRibbon(QMainWindow):
         self.collapse_button.setAutoRaise(True)
         self.collapse_button.setIcon(self._standard_icon(QStyle.StandardPixmap.SP_ArrowUp))
         self.collapse_button.setStyleSheet(
-            "QToolButton { color: #dbeafe; border: 0; padding: 3px; } "
+            f"QToolButton {{ color: {control_text}; border: 0; padding: 3px; }} "
             "QToolButton:hover { background: rgba(255, 255, 255, 18); border-radius: 5px; }"
         )
         self.collapse_button.clicked.connect(self.toggle_collapsed)
@@ -210,11 +382,16 @@ class LiquidRibbon(QMainWindow):
         question_layout.setSpacing(4)
         question_eyebrow = QLabel("ВОПРОС", self.question_panel)
         question_eyebrow.setTextFormat(Qt.TextFormat.PlainText)
-        question_eyebrow.setStyleSheet("color: #94a3b8; font-size: 11px;")
+        question_eyebrow.setStyleSheet(f"color: {secondary_text}; font-size: 11px;")
         question_layout.addWidget(question_eyebrow)
-        self.question_label = QLabel("Ожидание вопроса…", self.question_panel)
+        self.question_label = _ElidingLabel(self.question_text, self.question_panel)
         self.question_label.setTextFormat(Qt.TextFormat.PlainText)
         self.question_label.setWordWrap(True)
+        self.question_label.setMinimumWidth(0)
+        self.question_label.setSizePolicy(
+            QSizePolicy.Policy.Ignored,
+            QSizePolicy.Policy.Expanding,
+        )
         self.question_label.setAlignment(
             Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft
         )
@@ -249,7 +426,8 @@ class LiquidRibbon(QMainWindow):
             QSizePolicy.Policy.Expanding,
         )
         self.answer_browser.setStyleSheet(
-            "QTextBrowser { color: #dbeafe; background: rgba(2, 6, 23, 35); "
+            f"QTextBrowser {{ color: {answer_text}; "
+            f"background: {_rgba_css(_ANSWER_BACKGROUND_RGB, _ANSWER_BACKGROUND_ALPHA)}; "
             "border: 0; border-radius: 8px; padding: 2px 5px; font-size: 13px; }"
             "QScrollBar:vertical { width: 7px; background: transparent; }"
             "QScrollBar::handle:vertical { background: rgba(148, 163, 184, 90); "
@@ -257,9 +435,15 @@ class LiquidRibbon(QMainWindow):
         )
         self.answer_layout.addWidget(self.answer_browser, 1)
 
-        self.sources_label = QLabel("Sources: —", answer_panel)
+        self.sources_label = _ElidingLabel("Sources: —", answer_panel)
         self.sources_label.setTextFormat(Qt.TextFormat.PlainText)
-        self.sources_label.setStyleSheet("color: #94a3b8; font-size: 11px;")
+        self.sources_label.setWordWrap(True)
+        self.sources_label.setMinimumWidth(0)
+        self.sources_label.setSizePolicy(
+            QSizePolicy.Policy.Ignored,
+            QSizePolicy.Policy.Preferred,
+        )
+        self.sources_label.setStyleSheet(f"color: {secondary_text}; font-size: 11px;")
         self.sources_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         self.answer_layout.addWidget(self.sources_label)
         self.body_layout.addWidget(answer_panel)
@@ -320,13 +504,14 @@ class LiquidRibbon(QMainWindow):
         self.status_dot.set_state(state)
 
     def set_question(self, question: str) -> None:
-        self.question_label.setText(question)
+        self.question_text = str(question)
+        self.question_label.set_full_text(self.question_text)
         self._adjust_height()
 
     def set_sources(self, sources: Iterable[str]) -> None:
-        safe_sources = [str(source) for source in sources]
-        value = " · ".join(safe_sources) if safe_sources else "—"
-        self.sources_label.setText(f"Sources: {value}")
+        self.source_texts = tuple(str(source) for source in sources)
+        value = " · ".join(self.source_texts) if self.source_texts else "—"
+        self.sources_label.set_full_text(f"Sources: {value}")
         self._adjust_height()
 
     def _reset_answer(self, request_id: int) -> None:

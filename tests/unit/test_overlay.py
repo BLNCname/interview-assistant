@@ -1,12 +1,20 @@
 import pytest
 from PyQt6.QtCore import QEvent, QPointF, QSettings, Qt
-from PyQt6.QtGui import QFont, QMouseEvent, QTextCursor
-from PyQt6.QtWidgets import QApplication, QLabel, QStyle
+from PyQt6.QtGui import QFont, QMouseEvent, QPalette, QTextCursor
+from PyQt6.QtWidgets import QApplication, QLabel, QStyle, QWidget
 
 from interview_assistant.config import OverlayConfig
 from interview_assistant.events import EventBus
 from interview_assistant.state import ApplicationState
-from interview_assistant.ui.overlay import LiquidRibbon
+from interview_assistant.ui.overlay import (
+    _ANSWER_BACKGROUND_ALPHA,
+    _ANSWER_BACKGROUND_RGB,
+    _MODEL_CHIP_ALPHA,
+    _MODEL_CHIP_RGB,
+    _STATUS_CHIP_ALPHA,
+    _STATUS_CHIP_RGB,
+    LiquidRibbon,
+)
 
 
 def test_streaming_delta_appends_without_replacing(qtbot) -> None:
@@ -235,6 +243,152 @@ def test_short_answer_keeps_compact_ribbon_footprint(qtbot) -> None:
     qtbot.waitExposed(ribbon)
 
     assert ribbon._minimum_expanded_height <= ribbon.height() <= 200
+
+
+def test_unbroken_question_and_sources_cannot_expand_ribbon_past_screen(qtbot) -> None:
+    screen = QApplication.primaryScreen()
+    assert screen is not None
+    available = screen.availableGeometry()
+    target_width = min(800, available.width())
+    ribbon = LiquidRibbon(EventBus(), settings=None)
+    qtbot.addWidget(ribbon)
+    ribbon.setGeometry(available.x(), available.y(), target_width, 180)
+
+    long_question = "q" * 2_000
+    long_sources = tuple(
+        "https://example.invalid/" + (character * 300)
+        for character in ("a", "b")
+    )
+    ribbon.set_question(long_question)
+    ribbon.set_sources(long_sources)
+
+    assert "…" in ribbon.question_label.text()
+    assert "…" in ribbon.sources_label.text()
+    assert ribbon.question_text == long_question
+    assert ribbon.source_texts == long_sources
+    assert ribbon.minimumSizeHint().width() <= target_width
+    assert ribbon.width() == target_width
+    ribbon.show()
+    qtbot.waitExposed(ribbon)
+    assert ribbon.width() <= target_width
+
+    ribbon.toggle_collapsed()
+    QApplication.processEvents()
+    assert ribbon.width() <= target_width
+    assert ribbon.collapse_button.isVisible()
+    assert ribbon.collapse_button.geometry().right() < ribbon.header_widget.width()
+
+    ribbon.toggle_collapsed()
+    QApplication.processEvents()
+    assert ribbon.width() <= target_width
+    assert ribbon.collapse_button.isVisible()
+    assert ribbon.collapse_button.geometry().right() < ribbon.header_widget.width()
+
+
+def _composite_rgb(
+    foreground: tuple[int, int, int],
+    alpha: int,
+    background: tuple[float, float, float],
+) -> tuple[float, float, float]:
+    proportion = alpha / 255
+    return (
+        (foreground[0] * proportion) + (background[0] * (1 - proportion)),
+        (foreground[1] * proportion) + (background[1] * (1 - proportion)),
+        (foreground[2] * proportion) + (background[2] * (1 - proportion)),
+    )
+
+
+def _relative_luminance(rgb: tuple[float, float, float]) -> float:
+    def linearize(component: float) -> float:
+        normalized = component / 255
+        if normalized <= 0.04045:
+            return normalized / 12.92
+        return ((normalized + 0.055) / 1.055) ** 2.4
+
+    red, green, blue = (linearize(component) for component in rgb)
+    return (0.2126 * red) + (0.7152 * green) + (0.0722 * blue)
+
+
+def _contrast_ratio(
+    foreground: tuple[float, float, float],
+    background: tuple[float, float, float],
+) -> float:
+    lighter, darker = sorted(
+        (_relative_luminance(foreground), _relative_luminance(background)),
+        reverse=True,
+    )
+    return (lighter + 0.05) / (darker + 0.05)
+
+
+def _widget_text_rgb(widget: QWidget) -> tuple[float, float, float]:
+    role = (
+        QPalette.ColorRole.Text
+        if widget.inherits("QTextBrowser")
+        else QPalette.ColorRole.WindowText
+    )
+    color = widget.palette().color(role)
+    return float(color.red()), float(color.green()), float(color.blue())
+
+
+def test_minimum_opacity_secondary_text_meets_wcag_aa_over_white(qtbot) -> None:
+    ribbon = LiquidRibbon(
+        EventBus(),
+        config=OverlayConfig(opacity=0.2),
+        settings=None,
+    )
+    qtbot.addWidget(ribbon)
+    ribbon.show()
+    qtbot.waitExposed(ribbon)
+
+    white = (255.0, 255.0, 255.0)
+    alpha = ribbon.surface.background_alpha
+    surface_backgrounds = (
+        _composite_rgb(ribbon.surface.gradient_top_rgb, alpha, white),
+        _composite_rgb(
+            ribbon.surface.gradient_bottom_rgb,
+            ribbon.surface.background_bottom_alpha,
+            white,
+        ),
+    )
+    question_eyebrow = next(
+        label for label in ribbon.findChildren(QLabel) if label.text() == "ВОПРОС"
+    )
+    text_backgrounds = {
+        "question eyebrow": (question_eyebrow, surface_backgrounds),
+        "sources": (ribbon.sources_label, surface_backgrounds),
+        "status": (
+            ribbon.status_label,
+            tuple(
+                _composite_rgb(_STATUS_CHIP_RGB, _STATUS_CHIP_ALPHA, bg)
+                for bg in surface_backgrounds
+            ),
+        ),
+        "model": (
+            ribbon.model_chip,
+            tuple(
+                _composite_rgb(_MODEL_CHIP_RGB, _MODEL_CHIP_ALPHA, bg)
+                for bg in surface_backgrounds
+            ),
+        ),
+        "answer": (
+            ribbon.answer_browser,
+            tuple(
+                _composite_rgb(_ANSWER_BACKGROUND_RGB, _ANSWER_BACKGROUND_ALPHA, bg)
+                for bg in surface_backgrounds
+            ),
+        ),
+    }
+
+    failures: list[str] = []
+    for name, (widget, backgrounds) in text_backgrounds.items():
+        foreground = _widget_text_rgb(widget)
+        worst_case = min(
+            _contrast_ratio(foreground, background) for background in backgrounds
+        )
+        if worst_case < 4.5:
+            failures.append(f"{name}={worst_case:.2f}:1")
+
+    assert failures == [], "WCAG AA contrast failures: " + ", ".join(failures)
 
 
 def test_geometry_round_trips_through_injected_settings(qtbot, tmp_path) -> None:
