@@ -67,8 +67,8 @@ _PERSON_ATTRIBUTION = re.compile(
     r"(?u)\b(?:[Ff]or|[Ff]rom|"
     r"(?:[Rr]equested\s+|[Aa]sked\s+)?[Bb]y|[Дд]ля|[Оо]т)\s+"
     r"(?P<name>[A-ZА-ЯЁ][A-Za-zА-Яа-яЁё'’\-]+"
-    r"(?:\s+[A-ZА-ЯЁ][A-Za-zА-Яа-яЁё'’\-]+){1,3})"
-    r"(?=\s*[,.;:!?]|\s*$)"
+    r"(?:\s+[A-ZА-ЯЁ][A-Za-zА-Яа-яЁё'’\-]+){0,3})"
+    r"(?=\s+[a-zа-яё]|\s*[,.;:!?]|\s*$)"
 )
 _LEADING_VOCATIVE = re.compile(
     r"^(?P<name>"
@@ -137,6 +137,7 @@ _LEADING_CONTEXT_METADATA = re.compile(
     r"(?:метаданн\w*|описани\w*)\s+ваканси\w*)\s*:\s*"
 )
 _SENTENCE_BOUNDARY = re.compile(r"(?<=[.!?])\s+|[\r\n]+")
+_MAX_PREFIX_UNWRAP_PASSES = 16
 
 _SENSITIVE_QUERY_KEYS = {
     "accesskey",
@@ -208,7 +209,7 @@ _NON_PERSON_VOCATIVES = {
     "typescript",
     "vue",
 }
-_NON_PERSON_ATTRIBUTIONS = {"visual studio code"}
+_NON_PERSON_ATTRIBUTIONS = {"api", "sdk", "visual studio code"}
 
 
 class SearchPolicy:
@@ -299,15 +300,9 @@ def _requires_current_information(query: str) -> bool:
 
 def _sanitize_question(question: str) -> str:
     text = unicodedata.normalize("NFKC", question)
-    text = _SOURCE_LINE.sub(" ", text)
-    text = _TIMESTAMP_PREFIX.sub("", text)
-    text = _CANDIDATE_NAME_LINE.sub(" ", text)
-    text = _INLINE_CANDIDATE_NAME.sub(" ", text)
-    text = _SPEAKER_PREFIX.sub("", text)
-    question_labels = list(_CURRENT_QUESTION_LABEL.finditer(text))
-    if question_labels:
-        text = text[question_labels[-1].end() :]
-    text = _strip_leading_context_metadata(text)
+    text = _normalize_question_prefixes(text)
+    if not text:
+        return ""
     text = _NAME_INTRODUCTION.sub(" ", text)
     text = _FIRST_PERSON_NAME.sub(" ", text)
     text = _NAME_METADATA.sub(" ", text)
@@ -321,6 +316,31 @@ def _sanitize_question(question: str) -> str:
     text = re.sub(r"\s+([,.;!?])", r"\1", text)
     text = re.sub(r"^[\s,.;:!?—-]+", "", text)
     return text.strip()
+
+
+def _normalize_question_prefixes(text: str) -> str:
+    current = text
+    for _ in range(_MAX_PREFIX_UNWRAP_PASSES):
+        updated = _strip_question_prefixes_once(current)
+        if updated == current:
+            return current
+        current = updated
+
+    if _strip_question_prefixes_once(current) != current:
+        return ""
+    return current
+
+
+def _strip_question_prefixes_once(text: str) -> str:
+    text = _SOURCE_LINE.sub(" ", text)
+    text = _TIMESTAMP_PREFIX.sub("", text)
+    text = _CANDIDATE_NAME_LINE.sub(" ", text)
+    text = _INLINE_CANDIDATE_NAME.sub(" ", text)
+    text = _SPEAKER_PREFIX.sub("", text)
+    question_labels = list(_CURRENT_QUESTION_LABEL.finditer(text))
+    if question_labels:
+        text = text[question_labels[-1].end() :]
+    return _strip_leading_context_metadata(text)
 
 
 def _strip_leading_context_metadata(text: str) -> str:
@@ -411,7 +431,11 @@ def _redact_vocative(match: re.Match[str]) -> str:
 
 
 def _redact_person_attribution(match: re.Match[str]) -> str:
-    if match.group("name").casefold() in _NON_PERSON_ATTRIBUTIONS:
+    candidate = match.group("name").casefold()
+    if (
+        candidate in _NON_PERSON_ATTRIBUTIONS
+        or candidate in _NON_PERSON_VOCATIVES
+    ):
         return match.group(0)
     return " "
 
@@ -440,12 +464,21 @@ def _path_contains_sensitive_data(path: str) -> bool:
 
 
 def _is_labeled_sensitive_name(segment: str) -> bool:
-    return re.match(
+    if re.match(
         r"(?i)^(?:access[_-]?token|token|api[_-]?key|auth|signature|sig|"
         r"secret|session(?:[_-]?(?:id|state))?|code|nonce|state|credential|"
         r"jwt|bearer)[=_.-].+",
         segment,
-    ) is not None
+    ) is not None:
+        return True
+
+    folded = segment.casefold()
+    return any(
+        folded.startswith(prefix)
+        and len(segment) > len(prefix)
+        and segment[len(prefix)].isupper()
+        for prefix in _SENSITIVE_KEY_SUFFIXES
+    )
 
 
 def _query_pair_is_safe(key: str, value: str) -> bool:

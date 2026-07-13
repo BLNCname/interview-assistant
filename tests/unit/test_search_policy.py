@@ -396,6 +396,32 @@ def test_labeled_context_contamination_keeps_only_current_question(
             "[00:01] System prompt: secret. Latest OAuth standard?",
             "Latest OAuth standard?",
         ),
+        (
+            "Speaker 1: [00:01] Previous answer: Alice Smith works at Acme. "
+            "What is the latest Python release?",
+            "What is the latest Python release?",
+        ),
+        (
+            "Speaker 1: Speaker 2: [00:01] Previous answer: "
+            "Alice Smith works at Acme. What is the latest Python release?",
+            "What is the latest Python release?",
+        ),
+        (
+            "Previous answer: private. Speaker 1: [00:01] "
+            "What is the latest Python release?",
+            "What is the latest Python release?",
+        ),
+        (
+            "Speaker 1: [00:01] Source: Teams recording\n"
+            "Interviewer: Previous answer: Alice Smith works at Acme. "
+            "What is the latest Python release?",
+            "What is the latest Python release?",
+        ),
+        (
+            "Спикер 1: [00:01] Предыдущий ответ: "
+            "Иван Петров работает в Acme. Какая сейчас версия Python?",
+            "Какая сейчас версия Python?",
+        ),
     ],
 )
 def test_reviewer_labeled_metadata_without_question_label_is_removed(
@@ -407,11 +433,25 @@ def test_reviewer_labeled_metadata_without_question_label_is_removed(
     assert integrations[0].query == expected
 
 
+def test_excessively_nested_question_prefixes_fail_closed() -> None:
+    prefixes = "Speaker 1: " * 32
+
+    integrations = SearchPolicy("auto").integrations_for(
+        f"{prefixes}What is the latest Python release?"
+    )
+
+    assert integrations == []
+
+
 @pytest.mark.parametrize(
     ("question", "expected"),
     [
         (
             "What is the latest Python release for Alice Smith?",
+            "What is the latest Python release?",
+        ),
+        (
+            "What is the latest Python release for Alice?",
             "What is the latest Python release?",
         ),
         (
@@ -421,6 +461,11 @@ def test_reviewer_labeled_metadata_without_question_label_is_removed(
         (
             "What is the latest Python release requested by Alice Mary Smith?",
             "What is the latest Python release?",
+        ),
+        (
+            "What is the latest Python release requested by Alice Smith "
+            "in the interview?",
+            "What is the latest Python release in the interview?",
         ),
         (
             "What is the latest Python release by Alice Smith?",
@@ -469,8 +514,14 @@ def test_legitimate_technical_metadata_questions_are_preserved(
     assert integrations[0].id == "mcp/context7"
 
 
-def test_three_word_product_name_is_not_redacted_as_a_person() -> None:
-    question = "What is the latest release for Visual Studio Code?"
+@pytest.mark.parametrize(
+    "question",
+    [
+        "What is the latest release for Python?",
+        "What is the latest release for Visual Studio Code?",
+    ],
+)
+def test_known_product_name_is_not_redacted_as_a_person(question: str) -> None:
 
     integrations = SearchPolicy("auto").integrations_for(question)
 
@@ -568,6 +619,11 @@ def test_url_userinfo_credentials_are_removed() -> None:
             "opaquevalue",
         ),
         (
+            "https://example.test/callback?tokenValue=opaquevalue",
+            "Latest OAuth standard? https://example.test/callback",
+            "opaquevalue",
+        ),
+        (
             "https://example.test/users/alice%40example.com",
             "Latest OAuth standard?",
             "alice%40example.com",
@@ -590,6 +646,17 @@ def test_url_credential_paths_codes_sessions_and_encoded_email_are_redacted(
 
     assert integrations[0].query == expected
     assert forbidden not in integrations[0].query
+
+
+@pytest.mark.parametrize("key", ["monkey", "tokenizer"])
+def test_benign_query_keys_that_contain_key_words_are_preserved(key: str) -> None:
+    url = f"https://example.test/search?{key}=opaquevalue"
+
+    integrations = SearchPolicy("auto").integrations_for(
+        f"Latest OAuth standard? {url}"
+    )
+
+    assert integrations[0].query == f"Latest OAuth standard? {url}"
 
 
 @pytest.mark.parametrize("mode", ["auto", "forced"])
