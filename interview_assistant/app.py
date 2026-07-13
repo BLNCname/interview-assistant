@@ -60,12 +60,15 @@ class InterviewApplication:
         affinity_result = self.ribbon.affinity_result
         if affinity_result is None:
             self.ribbon.mark_capture_exclusion_unavailable()
-        target = (
-            ApplicationState.READY
-            if affinity_result is not None and affinity_result.ok
-            else ApplicationState.OFFLINE
-        )
         current_state = self.states.state
+        if affinity_result is not None and affinity_result.ok:
+            target = (
+                ApplicationState.READY
+                if current_state is ApplicationState.STARTING
+                else current_state
+            )
+        else:
+            target = ApplicationState.OFFLINE
         if target is ApplicationState.OFFLINE and current_state is not ApplicationState.OFFLINE:
             self._affinity_restore_state = (
                 ApplicationState.READY

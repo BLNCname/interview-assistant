@@ -708,6 +708,43 @@ def test_application_owns_ribbon_and_shows_it_only_when_started(qtbot) -> None:
     app.shutdown()
 
 
+@pytest.mark.parametrize(
+    "preexisting_state",
+    [ApplicationState.OFFLINE, ApplicationState.PAUSED],
+    ids=["external-offline", "unrelated-paused"],
+)
+def test_startup_verified_affinity_preserves_preexisting_external_state(
+    qtbot,
+    preexisting_state: ApplicationState,
+) -> None:
+    from interview_assistant.app import InterviewApplication
+
+    qt_app = QApplication.instance()
+    assert isinstance(qt_app, QApplication)
+    verified = AffinityResult(True, WDA_EXCLUDEFROMCAPTURE, None)
+    states = StateMachine()
+    states.transition(preexisting_state)
+    app = InterviewApplication(
+        qt_app,
+        EventBus(),
+        states,
+        overlay_settings=None,
+        affinity_applier=Mock(return_value=verified),
+    )
+    qtbot.addWidget(app.ribbon)
+    announced_states: list[str] = []
+    app.events.state_changed.connect(announced_states.append)
+
+    app.start()
+    qtbot.waitExposed(app.ribbon)
+
+    assert app.ribbon.affinity_result is verified
+    assert app.states.state is preexisting_state
+    assert announced_states == [preexisting_state.value]
+    assert app.ribbon.status_label.text() == preexisting_state.value
+    app.shutdown()
+
+
 def test_application_stays_offline_when_capture_exclusion_is_not_verified(qtbot) -> None:
     from interview_assistant.app import InterviewApplication
 
