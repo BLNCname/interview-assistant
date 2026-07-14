@@ -1,8 +1,9 @@
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Literal
 
 import keyring
-import yaml
+import yaml  # type: ignore[import-untyped]
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
@@ -54,8 +55,12 @@ class AppConfig(BaseModel):
     @model_validator(mode="before")
     @classmethod
     def reject_plaintext_secrets(cls, value: object) -> object:
-        if isinstance(value, dict) and "api_token" in value.get("lmstudio", {}):
-            raise ValueError("lmstudio.api_token must be stored in Windows Credential Manager")
+        if isinstance(value, Mapping):
+            lmstudio = value.get("lmstudio", {})
+            if isinstance(lmstudio, Mapping) and "api_token" in lmstudio:
+                raise ValueError(
+                    "lmstudio.api_token must be stored in Windows Credential Manager"
+                )
         return value
 
     @classmethod
@@ -69,6 +74,9 @@ class SecretStore:
 
     def get_lm_token(self) -> str | None:
         return keyring.get_password(self.SERVICE, "lmstudio_api_token")
+
+    def has_lm_token(self) -> bool:
+        return self.get_lm_token() is not None
 
     def set_lm_token(self, value: str) -> None:
         keyring.set_password(self.SERVICE, "lmstudio_api_token", value)

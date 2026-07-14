@@ -4,6 +4,7 @@ from PyQt6.QtCore import QSettings
 from PyQt6.QtWidgets import QApplication
 
 from .config import OverlayConfig
+from .diagnostics.readiness import ReadinessReport
 from .events import EventBus
 from .state import ApplicationState, StateMachine
 from .ui.overlay import LiquidRibbon
@@ -22,6 +23,7 @@ class InterviewApplication:
     overlay_config: OverlayConfig = field(default_factory=OverlayConfig)
     overlay_settings: QSettings | None = field(default_factory=_overlay_settings)
     affinity_applier: AffinityApplier | None = None
+    readiness_report: ReadinessReport | None = None
     ribbon: LiquidRibbon = field(init=False)
     is_shutdown: bool = False
     _affinity_signal_connected: bool = field(default=False, init=False, repr=False)
@@ -56,6 +58,13 @@ class InterviewApplication:
     def start(self) -> None:
         if self.is_shutdown:
             return
+        if not self.can_start_session:
+            self.ribbon.hide()
+            if self.states.state is not ApplicationState.OFFLINE:
+                self.states.transition(ApplicationState.OFFLINE)
+            self.events.state_changed.emit(self.states.state.value)
+            self.events.notification.emit("Readiness checks must pass before starting")
+            return
         self.ribbon.show()
         affinity_result = self.ribbon.affinity_result
         if affinity_result is None:
@@ -82,6 +91,13 @@ class InterviewApplication:
             self.ribbon.affinity_changed.connect(self._on_affinity_changed)
             self._affinity_signal_connected = True
         self.events.state_changed.emit(self.states.state.value)
+
+    @property
+    def can_start_session(self) -> bool:
+        return self.readiness_report is None or self.readiness_report.can_start
+
+    def set_readiness_report(self, report: ReadinessReport) -> None:
+        self.readiness_report = report
 
     def _on_affinity_changed(self, result: AffinityResult) -> None:
         if self.is_shutdown:

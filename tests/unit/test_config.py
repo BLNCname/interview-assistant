@@ -1,5 +1,8 @@
 from pathlib import Path
 
+import pytest
+from pydantic import ValidationError
+
 from interview_assistant.config import AppConfig
 
 
@@ -22,3 +25,13 @@ def test_secret_is_rejected_in_yaml(tmp_path: Path) -> None:
         assert "api_token" in str(exc)
     else:
         raise AssertionError("plaintext token must be rejected")
+
+
+def test_null_lmstudio_section_produces_validation_error_not_raw_type_error(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "config.yaml"
+    path.write_text("lmstudio: null\n", encoding="utf-8")
+
+    with pytest.raises(ValidationError):
+        AppConfig.load(path)
