@@ -14,3 +14,5 @@ class EventBus(QObject):
     overlay_visibility_toggled = pyqtSignal()
     forced_search_requested = pyqtSignal()
     answer_clear_requested = pyqtSignal()
+    settings_requested = pyqtSignal()
+    quit_requested = pyqtSignal()

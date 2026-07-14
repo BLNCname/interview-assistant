@@ -92,3 +92,24 @@ def test_store_prunes_entries_older_than_fixed_max_age_using_injected_clock() ->
 def test_store_rejects_non_positive_max_age() -> None:
     with pytest.raises(ValueError, match="max_age_seconds"):
         TranscriptStore(max_age_seconds=0.0)
+
+
+def test_clear_can_remove_one_source_or_the_entire_history() -> None:
+    store = TranscriptStore(clock=lambda: 10.0)
+    system = hypothesis(AudioSource.SYSTEM, "system", started_at=8.0, ended_at=9.0)
+    microphone = hypothesis(
+        AudioSource.MICROPHONE,
+        "microphone",
+        started_at=8.5,
+        ended_at=9.5,
+    )
+    store.add(system)
+    store.add(microphone)
+
+    store.clear(AudioSource.MICROPHONE)
+
+    assert store.snapshot() == (system,)
+
+    store.clear()
+
+    assert store.snapshot() == ()

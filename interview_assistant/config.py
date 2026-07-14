@@ -1,5 +1,7 @@
+import os
 from collections.abc import Mapping
 from pathlib import Path
+from tempfile import NamedTemporaryFile
 from typing import Literal
 
 import keyring
@@ -67,6 +69,35 @@ class AppConfig(BaseModel):
     def load(cls, path: Path) -> "AppConfig":
         raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
         return cls.model_validate(raw)
+
+    def save(self, path: Path) -> None:
+        """Atomically persist non-secret configuration beside the destination."""
+
+        path.parent.mkdir(parents=True, exist_ok=True)
+        serialized = yaml.safe_dump(
+            self.model_dump(mode="json"),
+            allow_unicode=True,
+            sort_keys=False,
+        )
+        temporary_path: Path | None = None
+        try:
+            with NamedTemporaryFile(
+                "w",
+                encoding="utf-8",
+                newline="\n",
+                prefix=f".{path.name}.",
+                suffix=".tmp",
+                dir=path.parent,
+                delete=False,
+            ) as temporary:
+                temporary.write(serialized)
+                temporary.flush()
+                os.fsync(temporary.fileno())
+                temporary_path = Path(temporary.name)
+            os.replace(temporary_path, path)
+        finally:
+            if temporary_path is not None:
+                temporary_path.unlink(missing_ok=True)
 
 
 class SecretStore:

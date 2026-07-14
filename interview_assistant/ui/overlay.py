@@ -162,13 +162,19 @@ class _RibbonSurface(QWidget):
 
     def __init__(self, opacity: float, parent: QWidget | None = None) -> None:
         super().__init__(parent)
+        self.background_alpha = 0
+        self.background_bottom_alpha = 0
+        self.set_opacity(opacity)
+        self.gradient_top_rgb = _SURFACE_TOP_RGB
+        self.gradient_bottom_rgb = _SURFACE_BOTTOM_RGB
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+
+    def set_opacity(self, opacity: float) -> None:
         # The glass remains dark enough to back high-contrast text even at the
         # lowest user setting; opacity still controls the strength of the tint.
         self.background_alpha = max(180, round(166 + (76 * opacity)))
         self.background_bottom_alpha = max(180, self.background_alpha - 22)
-        self.gradient_top_rgb = _SURFACE_TOP_RGB
-        self.gradient_bottom_rgb = _SURFACE_BOTTOM_RGB
-        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.update()
 
     def paintEvent(self, event: QPaintEvent | None) -> None:
         del event
@@ -291,11 +297,48 @@ class LiquidRibbon(QMainWindow):
         events.state_changed.connect(self.show_state)
         events.answer_reset.connect(self._reset_answer)
         events.answer_delta.connect(self.append_delta)
+        events.notification.connect(self.show_notification)
         self._affinity_events_enabled = True
 
     @property
     def affinity_result(self) -> AffinityResult | None:
         return self._affinity_result
+
+    def verify_capture_exclusion(self) -> AffinityResult:
+        """Create the native handle and verify affinity without showing the overlay."""
+
+        self._apply_capture_exclusion_to_current_hwnd()
+        result = self._affinity_result
+        if result is None:
+            result = affinity_failure_from_exception(
+                RuntimeError("Qt did not provide a native overlay handle")
+            )
+            self._affinity_result = result
+            self._capture_exclusion_unavailable = True
+            self._refresh_status()
+        return result
+
+    def apply_config(self, config: OverlayConfig) -> None:
+        """Apply saved visual settings to the existing native overlay window."""
+
+        self._config = config
+        self.surface.set_opacity(config.opacity)
+        self._minimum_expanded_height = min(120, config.max_height)
+        self._expanded_height = min(
+            config.max_height,
+            max(self._minimum_expanded_height, self._expanded_height),
+        )
+        if self.is_collapsed:
+            self.setMinimumHeight(self.collapsed_height)
+            self.setMaximumHeight(self.collapsed_height)
+            return
+        self.setMinimumHeight(self._minimum_expanded_height)
+        self.setMaximumHeight(config.max_height)
+        self.resize(
+            self.width(),
+            min(config.max_height, max(self._minimum_expanded_height, self.height())),
+        )
+        self._adjust_height(shrink=True)
 
     def showEvent(self, event: QShowEvent | None) -> None:
         super().showEvent(event)
@@ -420,6 +463,20 @@ class LiquidRibbon(QMainWindow):
         header_layout.addWidget(self.model_chip)
         header_layout.addStretch(1)
 
+        self.settings_button = QToolButton(self.header_widget)
+        self.settings_button.setText("Settings")
+        self.settings_button.setToolTip("Open Settings")
+        self.settings_button.setAutoRaise(True)
+        self.settings_button.clicked.connect(self._events.settings_requested.emit)
+        header_layout.addWidget(self.settings_button)
+
+        self.quit_button = QToolButton(self.header_widget)
+        self.quit_button.setText("Quit")
+        self.quit_button.setToolTip("Quit Interview Assistant")
+        self.quit_button.setAutoRaise(True)
+        self.quit_button.clicked.connect(self._events.quit_requested.emit)
+        header_layout.addWidget(self.quit_button)
+
         self.collapse_button = QToolButton(self.header_widget)
         self.collapse_button.setText("")
         self.collapse_button.setToolTip("Collapse")
@@ -432,6 +489,17 @@ class LiquidRibbon(QMainWindow):
         self.collapse_button.clicked.connect(self.toggle_collapsed)
         header_layout.addWidget(self.collapse_button)
         self.content_layout.addWidget(self.header_widget)
+
+        self.notification_label = QLabel("", self.surface)
+        self.notification_label.setTextFormat(Qt.TextFormat.PlainText)
+        self.notification_label.setWordWrap(True)
+        self.notification_label.setStyleSheet(
+            f"color: {status_text}; background: rgba(251, 113, 133, 28); "
+            "border: 1px solid rgba(251, 113, 133, 64); border-radius: 6px; "
+            "padding: 3px 6px; font-size: 11px;"
+        )
+        self.notification_label.hide()
+        self.content_layout.addWidget(self.notification_label)
 
         self.body_widget = QWidget(self.surface)
         self.body_layout = QHBoxLayout(self.body_widget)
@@ -565,6 +633,11 @@ class LiquidRibbon(QMainWindow):
         self._state_text = state
         self._refresh_status()
 
+    def show_notification(self, message: str) -> None:
+        self.notification_label.setText(str(message))
+        self.notification_label.show()
+        self._adjust_height()
+
     def _refresh_status(self) -> None:
         status = (
             self.CAPTURE_EXCLUSION_UNAVAILABLE
@@ -584,6 +657,11 @@ class LiquidRibbon(QMainWindow):
         value = " · ".join(self.source_texts) if self.source_texts else "—"
         self.sources_label.set_full_text(f"Sources: {value}")
         self._adjust_height()
+
+    def clear_answer(self) -> None:
+        self.answer_text = ""
+        self.answer_browser.clear()
+        self._adjust_height(shrink=True)
 
     def _reset_answer(self, request_id: int) -> None:
         if self._active_request_id is not None and request_id < self._active_request_id:

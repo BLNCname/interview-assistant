@@ -1,5 +1,6 @@
 import json
 from collections.abc import AsyncIterator, Mapping
+from ipaddress import ip_address
 
 import httpx
 from pydantic import ValidationError
@@ -65,8 +66,9 @@ def _validate_chat_event(payload: dict[str, object]) -> ChatEvent:
 class LMStudioClient:
     def __init__(self, host: str, port: int, token: str | None) -> None:
         headers = {"Authorization": f"Bearer {token}"} if token else {}
+        url_host = f"[{host}]" if ":" in host and not host.startswith("[") else host
         self._http = httpx.AsyncClient(
-            base_url=f"http://{host}:{port}",
+            base_url=f"http://{url_host}:{port}",
             headers=headers,
             timeout=REQUEST_TIMEOUT_SECONDS,
         )
@@ -75,6 +77,11 @@ class LMStudioClient:
         return self
 
     async def __aexit__(self, *_: object) -> None:
+        await self.aclose()
+
+    async def aclose(self) -> None:
+        """Release the shared HTTP transport; safe to call during repeated shutdown."""
+
         await self._http.aclose()
 
     async def list_models(self) -> list[ModelSummary]:
@@ -160,3 +167,13 @@ class LMStudioClient:
                 parsed_name, payload = _parse_event_payload(event_name, data_lines)
                 if _should_yield_event(parsed_name):
                     yield _validate_chat_event(payload)
+
+
+def is_loopback_host(host: str) -> bool:
+    normalized = host.strip().strip("[]").rstrip(".").casefold()
+    if normalized == "localhost":
+        return True
+    try:
+        return ip_address(normalized).is_loopback
+    except ValueError:
+        return False

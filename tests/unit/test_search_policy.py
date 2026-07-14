@@ -9,6 +9,30 @@ from interview_assistant.retrieval.models import SearchIntegration
 from interview_assistant.retrieval.policy import SearchPolicy
 
 
+def test_force_next_is_one_shot_even_when_base_mode_is_auto() -> None:
+    policy = SearchPolicy("auto")
+    static_question = "Explain a binary search tree"
+
+    assert policy.integrations_for(static_question) == []
+
+    policy.force_next()
+
+    forced = policy.integrations_for(static_question)
+    assert [integration.id for integration in forced] == ["mcp/duckduckgo"]
+    assert policy.integrations_for(static_question) == []
+
+
+def test_force_next_is_retained_when_sanitization_removes_an_unusable_utterance() -> None:
+    policy = SearchPolicy("off")
+    policy.force_next()
+
+    assert policy.integrations_for("My name is Alice Smith.") == []
+
+    forced = policy.integrations_for("Explain a binary search tree")
+    assert [integration.id for integration in forced] == ["mcp/duckduckgo"]
+    assert policy.integrations_for("Explain a binary search tree") == []
+
+
 def test_library_question_uses_context7_only() -> None:
     question = "Как сейчас настраивается lifespan в FastAPI?"
 

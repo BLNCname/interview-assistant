@@ -127,6 +127,19 @@ def test_capture_exclusion_runs_only_after_native_hwnd_exists(qtbot) -> None:
         setattr(ribbon, "affinity_result", expected)
 
 
+def test_hidden_ribbon_can_verify_affinity_before_readiness_allows_show(qtbot) -> None:
+    expected = AffinityResult(True, WDA_EXCLUDEFROMCAPTURE, None)
+    applier = Mock(return_value=expected)
+    ribbon = LiquidRibbon(EventBus(), settings=None, affinity_applier=applier)
+    qtbot.addWidget(ribbon)
+
+    result = ribbon.verify_capture_exclusion()
+
+    assert not ribbon.isVisible()
+    assert result is expected
+    applier.assert_called_once_with(int(ribbon.winId()))
+
+
 def test_capture_exclusion_reapplies_only_when_qt_creates_a_new_hwnd(
     qtbot,
     monkeypatch: pytest.MonkeyPatch,
@@ -211,6 +224,35 @@ def test_older_reset_cannot_clear_a_newer_stream(qtbot) -> None:
 
     assert ribbon.answer_text == "current"
     assert ribbon.answer_browser.toPlainText() == "current"
+
+
+def test_header_exposes_honest_settings_and_quit_actions(qtbot) -> None:
+    events = EventBus()
+    ribbon = LiquidRibbon(events, settings=None)
+    qtbot.addWidget(ribbon)
+    settings: list[bool] = []
+    quits: list[bool] = []
+    events.settings_requested.connect(lambda: settings.append(True))
+    events.quit_requested.connect(lambda: quits.append(True))
+
+    ribbon.settings_button.click()
+    ribbon.quit_button.click()
+
+    assert settings == [True]
+    assert quits == [True]
+
+
+def test_notifications_are_visible_plain_text_in_the_ribbon(qtbot) -> None:
+    events = EventBus()
+    ribbon = LiquidRibbon(events, settings=None)
+    qtbot.addWidget(ribbon)
+    message = "Protected content <b>must not become markup</b>"
+
+    events.notification.emit(message)
+
+    assert ribbon.notification_label.isVisibleTo(ribbon)
+    assert ribbon.notification_label.text() == message
+    assert ribbon.notification_label.textFormat() is Qt.TextFormat.PlainText
 
 
 def test_delta_uses_incremental_cursor_insertion(

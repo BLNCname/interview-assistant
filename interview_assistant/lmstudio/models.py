@@ -9,6 +9,22 @@ class LMStudioContract(BaseModel):
     model_config = ConfigDict(extra="allow", populate_by_name=True, strict=True)
 
 
+class ChatError(LMStudioContract):
+    type: Literal[
+        "invalid_request",
+        "unknown",
+        "mcp_connection_error",
+        "plugin_connection_error",
+        "not_implemented",
+        "model_not_found",
+        "job_not_found",
+        "internal_error",
+    ]
+    message: str
+    code: str | None = None
+    param: str | None = None
+
+
 class ChatEvent(LMStudioContract):
     type: str
     content: str = ""
@@ -18,6 +34,7 @@ class ChatEvent(LMStudioContract):
     arguments: dict[str, object] | None = None
     output: str | None = None
     result: dict[str, object] | None = None
+    error: ChatError | None = None
 
 
 class ModelSummary(LMStudioContract):

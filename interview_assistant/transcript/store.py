@@ -80,6 +80,16 @@ class TranscriptStore:
         entries = self.snapshot(source)
         return entries[-1] if entries else None
 
+    def clear(self, source: AudioSource | None = None) -> None:
+        """Clear one source or the complete in-memory transcript history."""
+
+        with self._lock:
+            if source is None:
+                for entries in self._entries.values():
+                    entries.clear()
+                return
+            self._entries[source].clear()
+
     def __len__(self) -> int:
         return len(self.snapshot())
 

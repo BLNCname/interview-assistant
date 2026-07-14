@@ -4,7 +4,7 @@ from collections.abc import AsyncIterator, Mapping
 
 import pytest
 
-from interview_assistant.lmstudio.models import ChatEvent
+from interview_assistant.lmstudio.models import ChatError, ChatEvent
 
 
 class RecordingSignal:
@@ -43,7 +43,8 @@ class ImmediateClient:
         try:
             yield ChatEvent(type="chat.start")
             yield ChatEvent(type="tool_call.start", tool="lookup")
-            yield ChatEvent(type="message.delta", content=str(payload["question"]))
+            text = payload.get("question", payload.get("input", ""))
+            yield ChatEvent(type="message.delta", content=str(text))
             yield ChatEvent(type="chat.end")
         finally:
             self.finished.put_nowait(None)
@@ -73,6 +74,7 @@ class CancellationSuppressingClient:
 
         try:
             yield ChatEvent(type="message.delta", content="current")
+            yield ChatEvent(type="chat.end", result={})
         finally:
             self.new_finished.set()
 
@@ -140,6 +142,7 @@ class StaleExplodingClient:
 
         try:
             yield ChatEvent(type="message.delta", content="current")
+            yield ChatEvent(type="chat.end", result={})
         finally:
             self.new_finished.set()
 
@@ -187,6 +190,42 @@ class CancellationSuppressingDeltaClient:
         finally:
             await asyncio.sleep(0)
             self.closed.set()
+
+
+class EndGatedClient:
+    def __init__(self) -> None:
+        self.delta_sent = asyncio.Event()
+        self.release_end = asyncio.Event()
+
+    async def stream_chat(
+        self,
+        _payload: Mapping[str, object],
+    ) -> AsyncIterator[ChatEvent]:
+        yield ChatEvent(type="chat.start")
+        yield ChatEvent(type="message.delta", content="partial")
+        self.delta_sent.set()
+        await self.release_end.wait()
+        yield ChatEvent(type="chat.end", result={})
+
+
+class ModelMissingClient:
+    def __init__(self) -> None:
+        self.after_error = asyncio.Event()
+
+    async def stream_chat(
+        self,
+        _payload: Mapping[str, object],
+    ) -> AsyncIterator[ChatEvent]:
+        yield ChatEvent(type="chat.start")
+        yield ChatEvent(
+            type="error",
+            error=ChatError(
+                type="model_not_found",
+                message="missing model with private instance details",
+            ),
+        )
+        self.after_error.set()
+        yield ChatEvent(type="chat.end", result={})
 
 
 async def test_submit_returns_monotonic_ids_resets_and_emits_current_deltas() -> None:
@@ -404,3 +443,76 @@ async def test_done_callback_consumes_background_exception() -> None:
         assert reports == []
     finally:
         loop.set_exception_handler(previous_handler)
+
+
+async def test_wait_returns_text_only_after_chat_end() -> None:
+    from interview_assistant.orchestration.coordinator import RequestCoordinator
+
+    client = EndGatedClient()
+    coordinator = RequestCoordinator(RecordingEvents(), client)
+    request_id = coordinator.submit({"question": "finish contract"})
+    waiter = asyncio.create_task(coordinator.wait(request_id))
+
+    await client.delta_sent.wait()
+    await asyncio.sleep(0)
+    assert not waiter.done()
+
+    client.release_end.set()
+    outcome = await waiter
+
+    assert outcome.request_id == request_id
+    assert outcome.status == "completed"
+    assert outcome.text == "partial"
+    assert outcome.error_type is None
+
+
+async def test_documented_model_missing_error_is_typed_and_message_is_not_exposed() -> None:
+    from interview_assistant.orchestration.coordinator import RequestCoordinator
+
+    events = RecordingEvents()
+    client = ModelMissingClient()
+    coordinator = RequestCoordinator(events, client)
+    request_id = coordinator.submit({"model": "instance-id", "input": "question"})
+
+    outcome = await coordinator.wait(request_id)
+
+    assert outcome.status == "failed"
+    assert outcome.error_type == "model_not_found"
+    assert outcome.text == ""
+    assert events.notification.calls == [("Answer generation failed.",)]
+
+
+async def test_cancelled_request_has_an_awaitable_completion_outcome() -> None:
+    from interview_assistant.orchestration.coordinator import RequestCoordinator
+
+    client = CancellableClient()
+    coordinator = RequestCoordinator(RecordingEvents(), client)
+    request_id = coordinator.submit({"question": "cancel"})
+    await client.started.wait()
+
+    await coordinator.cancel_active()
+    outcome = await coordinator.wait(request_id)
+
+    assert outcome.status == "cancelled"
+    assert outcome.text == ""
+    assert outcome.error_type is None
+
+
+async def test_retrieval_completion_collects_text_without_resetting_or_streaming_answer() -> None:
+    from interview_assistant.orchestration.coordinator import RequestCoordinator
+    from interview_assistant.retrieval.policy import SearchPolicy
+
+    events = RecordingEvents()
+    client = ImmediateClient()
+    coordinator = RequestCoordinator(events, client)
+    integrations = SearchPolicy("forced").integrations_for("latest Python release?")
+
+    request_id = coordinator.submit_retrieval("instance:qwen", integrations)
+    outcome = await coordinator.wait(request_id)
+
+    assert outcome.status == "completed"
+    assert outcome.text == "latest Python release?"
+    assert client.payloads[0]["store"] is False
+    assert events.answer_reset.calls == []
+    assert events.answer_delta.calls == []
+    assert events.notification.calls == []

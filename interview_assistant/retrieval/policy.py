@@ -232,6 +232,12 @@ class SearchPolicy:
         self._forced_lock = Lock()
         self._forced_available = mode == "forced"
 
+    def force_next(self) -> None:
+        """Permit exactly one DuckDuckGo search for the next usable question."""
+
+        with self._forced_lock:
+            self._forced_available = True
+
     def integrations_for(
         self,
         question: str,
@@ -240,20 +246,27 @@ class SearchPolicy:
         # Accepted for compatibility and deliberately never inspected or copied.
         del full_transcript
 
-        if self._mode == "off":
-            return []
+        with self._forced_lock:
+            forced_pending = self._forced_available
 
-        if self._mode == "forced":
-            with self._forced_lock:
-                if not self._forced_available:
-                    return []
-                self._forced_available = False
+        if not forced_pending and self._mode in {"off", "forced"}:
+            return []
 
         query = _sanitize_question(question)
         if not query:
             return []
 
-        if self._mode == "forced":
+        forced = False
+        if forced_pending:
+            with self._forced_lock:
+                if self._forced_available:
+                    self._forced_available = False
+                    forced = True
+
+        if not forced and self._mode in {"off", "forced"}:
+            return []
+
+        if forced:
             return [_duckduckgo(query)]
         if _INTERNAL_TERMS.search(query):
             return []

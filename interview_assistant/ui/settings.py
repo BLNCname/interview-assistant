@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from collections.abc import Callable
 from typing import Literal, Protocol, cast
 
-from PyQt6.QtCore import QByteArray, QSettings, pyqtSignal
+from PyQt6.QtCore import QByteArray, QSettings, Qt, pyqtSignal
 from PyQt6.QtGui import QCloseEvent
 from PyQt6.QtWidgets import (
     QComboBox,
@@ -52,9 +53,16 @@ class SettingsChoice:
 class SettingsBinding:
     """Typed boundary between widgets, AppConfig, and the secret store."""
 
-    def __init__(self, config: AppConfig, secret_store: SecretStoreProtocol) -> None:
+    def __init__(
+        self,
+        config: AppConfig,
+        secret_store: SecretStoreProtocol,
+        *,
+        persist: Callable[[AppConfig], None] | None = None,
+    ) -> None:
         self.config = config
         self._secret_store = secret_store
+        self._persist = persist
 
     @property
     def unique_model_keys(self) -> tuple[str, ...]:
@@ -112,16 +120,25 @@ class SettingsBinding:
             }
         )
 
+        candidate = self.config.model_copy(deep=True)
+        candidate.audio = audio
+        candidate.lmstudio = lmstudio
+        candidate.search = search
+        candidate.overlay = overlay
         if token.strip():
             self._secret_store.set_lm_token(token)
-        self.config.audio = audio
-        self.config.lmstudio = lmstudio
-        self.config.search = search
-        self.config.overlay = overlay
+        if self._persist is not None:
+            self._persist(candidate)
+        self.config.audio = candidate.audio
+        self.config.lmstudio = candidate.lmstudio
+        self.config.search = candidate.search
+        self.config.overlay = candidate.overlay
 
 
 class SettingsWindow(QMainWindow):
     start_requested = pyqtSignal()
+    settings_saved = pyqtSignal()
+    readiness_requested = pyqtSignal()
     GEOMETRY_KEY = "settings/geometry"
 
     def __init__(
@@ -228,6 +245,11 @@ class SettingsWindow(QMainWindow):
         readiness = QGroupBox("Readiness", central)
         readiness_layout = QVBoxLayout(readiness)
         self.readiness_status_label = QLabel("Run readiness checks before starting", readiness)
+        self.readiness_status_label.setTextFormat(Qt.TextFormat.PlainText)
+        self.notification_label = QLabel("", readiness)
+        self.notification_label.setTextFormat(Qt.TextFormat.PlainText)
+        self.notification_label.setWordWrap(True)
+        self.notification_label.hide()
         self.readiness_table = QTableWidget(0, 5, readiness)
         self.readiness_table.setHorizontalHeaderLabels(
             ("Check", "Status", "Message", "Remediation", "Duration")
@@ -238,19 +260,23 @@ class SettingsWindow(QMainWindow):
         header.setStretchLastSection(True)
         self.readiness_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         readiness_layout.addWidget(self.readiness_status_label)
+        readiness_layout.addWidget(self.notification_label)
         readiness_layout.addWidget(self.readiness_table)
         root.addWidget(readiness, 1)
 
         actions = QHBoxLayout()
         actions.addStretch(1)
         self.save_button = QPushButton("Save", central)
+        self.readiness_button = QPushButton("Run checks", central)
         self.start_button = QPushButton("Start", central)
         self.start_button.setEnabled(False)
         actions.addWidget(self.save_button)
+        actions.addWidget(self.readiness_button)
         actions.addWidget(self.start_button)
         root.addLayout(actions)
 
         self.save_button.clicked.connect(self.save)
+        self.readiness_button.clicked.connect(self.save)
         self.start_button.clicked.connect(self._request_start)
 
     @staticmethod
@@ -319,6 +345,25 @@ class SettingsWindow(QMainWindow):
         self._update_shared_instance_annotation()
         self._invalidate_readiness()
 
+    def set_audio_choices(self, devices: tuple[SettingsChoice, ...]) -> None:
+        system_key = cast(str | None, self.system_device_combo.currentData())
+        microphone_key = cast(str | None, self.microphone_device_combo.currentData())
+        self._populate_choice_combo(
+            self.system_device_combo,
+            devices,
+            current=system_key,
+            empty_label="Not selected",
+            empty_data=None,
+        )
+        self._populate_choice_combo(
+            self.microphone_device_combo,
+            devices,
+            current=microphone_key,
+            empty_label="Not selected",
+            empty_data=None,
+        )
+        self._invalidate_readiness()
+
     @staticmethod
     def _select_data(combo: QComboBox, value: object) -> None:
         index = combo.findData(value)
@@ -358,9 +403,13 @@ class SettingsWindow(QMainWindow):
     def _invalidate_readiness(self, _value: object = None) -> None:
         if self._readiness_report is None:
             return
+        self.clear_readiness("Run readiness checks again after settings changes")
+
+    def clear_readiness(self, message: str = "Running readiness checks...") -> None:
         self._readiness_report = None
+        self.readiness_table.setRowCount(0)
         self.start_button.setEnabled(False)
-        self.readiness_status_label.setText("Run readiness checks again after settings changes")
+        self.readiness_status_label.setText(message)
 
     def set_readiness_report(self, report: ReadinessReport) -> None:
         self._readiness_report = report
@@ -379,6 +428,10 @@ class SettingsWindow(QMainWindow):
                 self.readiness_table.setItem(row, column, item)
         self.readiness_status_label.setText(f"Readiness: {report.status}")
         self.start_button.setEnabled(report.can_start)
+
+    def show_notification(self, message: str) -> None:
+        self.notification_label.setText(str(message))
+        self.notification_label.show()
 
     def save(self) -> bool:
         token = self.token_edit.text()
@@ -408,6 +461,9 @@ class SettingsWindow(QMainWindow):
                 self.token_edit.clear()
                 self._refresh_token_placeholder()
         self._update_shared_instance_annotation()
+        self.clear_readiness()
+        self.settings_saved.emit()
+        self.readiness_requested.emit()
         return True
 
     def _refresh_token_placeholder(self) -> None:

@@ -256,3 +256,79 @@ def test_corrupt_settings_geometry_falls_back_to_default(
     qtbot.addWidget(window)
 
     assert window.size() == QSize(820, 620)
+
+
+def test_successful_save_persists_config_then_requests_fresh_readiness(
+    qtbot,
+    tmp_path: Path,
+) -> None:
+    config = AppConfig()
+    persisted: list[AppConfig] = []
+    binding = SettingsBinding(
+        config,
+        FakeSecretStore(),
+        persist=lambda candidate: persisted.append(candidate.model_copy(deep=True)),
+    )
+    window = SettingsWindow(
+        binding,
+        audio_devices=(SettingsChoice("system-1", "Loopback"),),
+        models=(SettingsChoice("qwen-vl", "Qwen VL"),),
+        settings=QSettings(str(tmp_path / "signals.ini"), QSettings.Format.IniFormat),
+    )
+    qtbot.addWidget(window)
+    saved: list[bool] = []
+    reruns: list[bool] = []
+    window.settings_saved.connect(lambda: saved.append(True))
+    window.readiness_requested.connect(lambda: reruns.append(True))
+    window.system_device_combo.setCurrentIndex(
+        window.system_device_combo.findData("system-1")
+    )
+    window.text_model_combo.setCurrentIndex(window.text_model_combo.findData("qwen-vl"))
+
+    window.save_button.click()
+
+    assert persisted == [config]
+    assert persisted[0] is not config
+    assert saved == [True]
+    assert reruns == [True]
+    assert not window.start_button.isEnabled()
+    assert "running" in window.readiness_status_label.text().casefold()
+
+
+def test_persistence_failure_keeps_live_config_and_does_not_request_readiness(
+    qtbot,
+    tmp_path: Path,
+) -> None:
+    config = AppConfig()
+
+    def fail(_candidate: AppConfig) -> None:
+        raise OSError("private destination")
+
+    binding = SettingsBinding(config, FakeSecretStore(), persist=fail)
+    window = SettingsWindow(
+        binding,
+        audio_devices=(),
+        models=(SettingsChoice("qwen-vl", "Qwen VL"),),
+        settings=QSettings(str(tmp_path / "failure.ini"), QSettings.Format.IniFormat),
+    )
+    qtbot.addWidget(window)
+    reruns: list[bool] = []
+    window.readiness_requested.connect(lambda: reruns.append(True))
+    window.text_model_combo.setCurrentIndex(window.text_model_combo.findData("qwen-vl"))
+
+    window.save_button.click()
+
+    assert config.lmstudio.text_model == ""
+    assert reruns == []
+    assert "could not be saved" in window.readiness_status_label.text().casefold()
+
+
+def test_settings_notification_surface_is_visible_plain_text(qtbot, tmp_path: Path) -> None:
+    window, _, _, _ = _window(qtbot, tmp_path)
+    message = "Start failed <b>not markup</b>"
+
+    window.show_notification(message)
+
+    assert window.notification_label.isVisibleTo(window)
+    assert window.notification_label.text() == message
+    assert window.notification_label.textFormat() is Qt.TextFormat.PlainText

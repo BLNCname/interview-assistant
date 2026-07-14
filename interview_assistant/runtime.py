@@ -1,0 +1,781 @@
+from __future__ import annotations
+
+import asyncio
+from collections import OrderedDict, deque
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
+from pathlib import Path
+from threading import Lock
+from typing import Literal, Protocol
+
+from PyQt6.QtCore import QObject, pyqtSlot
+
+from interview_assistant.app import InterviewApplication
+from interview_assistant.audio.models import AudioSource
+from interview_assistant.capture.worker import CaptureResult
+from interview_assistant.config import AppConfig
+from interview_assistant.context.builder import ContextBuilder
+from interview_assistant.lmstudio.lifecycle import ModelLifecycle, RecoveryRequest
+from interview_assistant.lmstudio.models import ModelInstance
+from interview_assistant.lmstudio.payload import build_chat_payload
+from interview_assistant.orchestration.coordinator import (
+    RequestCoordinator,
+    RequestOutcome,
+)
+from interview_assistant.retrieval.models import SearchIntegration
+from interview_assistant.retrieval.policy import SearchPolicy
+from interview_assistant.state import ApplicationState
+from interview_assistant.stt.engine import TranscriptHypothesis
+from interview_assistant.transcript.detector import (
+    DetectedQuestion,
+    QuestionDetector,
+    QuestionKind,
+)
+from interview_assistant.transcript.store import TranscriptStore
+
+
+class AudioService(Protocol):
+    def start(self) -> None: ...
+
+    def stop(self) -> None: ...
+
+    def pause(self) -> None: ...
+
+    def resume(self) -> None: ...
+
+
+class STTService(Protocol):
+    def start(self) -> None: ...
+
+    def stop(self, timeout: float = 5.0) -> bool: ...
+
+
+class HotkeyService(Protocol):
+    def start(self) -> None: ...
+
+    def stop(self) -> None: ...
+
+
+class CaptureService(Protocol):
+    async def capture_for_event(
+        self,
+        kind: QuestionKind,
+        *,
+        manual: bool = False,
+    ) -> CaptureResult: ...
+
+    async def shutdown(self) -> None: ...
+
+
+class RegistryService(Protocol):
+    async def ensure_ready(
+        self,
+        key: str,
+        refresh: bool = False,
+    ) -> ModelInstance: ...
+
+    async def refresh(self, key: str) -> ModelInstance: ...
+
+
+class ClientService(Protocol):
+    async def aclose(self) -> None: ...
+
+
+WarmUp = Callable[[ModelInstance], Awaitable[None]]
+Sleeper = Callable[[float], Awaitable[None]]
+HypothesisConsumer = Callable[[TranscriptHypothesis], object]
+
+
+class ThreadsafeScheduler(Protocol):
+    def call_soon_threadsafe(self, callback: Callable[[], None]) -> object: ...
+
+
+async def _noop_warm_up(_instance: ModelInstance) -> None:
+    return None
+
+
+class RuntimeHypothesisIngress:
+    """Coalesce worker-thread hypotheses before handing them to the event loop."""
+
+    def __init__(
+        self,
+        loop: ThreadsafeScheduler,
+        *,
+        capacity: int = 32,
+    ) -> None:
+        if capacity <= 0:
+            raise ValueError("Hypothesis ingress capacity must be positive")
+        self._loop = loop
+        self._capacity = capacity
+        self._lock = Lock()
+        self._consumer: HypothesisConsumer | None = None
+        self._finals: deque[TranscriptHypothesis] = deque()
+        self._partials: OrderedDict[AudioSource, TranscriptHypothesis] = OrderedDict()
+        self._scheduled = False
+        self._closed = False
+        self._partial_drop_count = 0
+        self._final_overflow_count = 0
+
+    @property
+    def partial_drop_count(self) -> int:
+        with self._lock:
+            return self._partial_drop_count
+
+    @property
+    def final_overflow_count(self) -> int:
+        with self._lock:
+            return self._final_overflow_count
+
+    def bind(self, consumer: HypothesisConsumer) -> None:
+        with self._lock:
+            if self._closed:
+                raise RuntimeError("Hypothesis ingress is closed")
+            if self._consumer is not None:
+                raise RuntimeError("Hypothesis ingress is already bound")
+            self._consumer = consumer
+
+    def publish(self, hypothesis: TranscriptHypothesis) -> None:
+        with self._lock:
+            if self._closed:
+                return
+            if hypothesis.is_final:
+                if self._partials.pop(hypothesis.source, None) is not None:
+                    self._partial_drop_count += 1
+                while self._pending_count() >= self._capacity and self._partials:
+                    self._partials.popitem(last=False)
+                    self._partial_drop_count += 1
+                if self._pending_count() >= self._capacity:
+                    self._final_overflow_count += 1
+                    return
+                self._finals.append(hypothesis)
+            elif hypothesis.source in self._partials:
+                self._partials[hypothesis.source] = hypothesis
+            elif self._pending_count() >= self._capacity:
+                self._partial_drop_count += 1
+                return
+            else:
+                self._partials[hypothesis.source] = hypothesis
+            if self._scheduled:
+                return
+            self._scheduled = True
+        self._loop.call_soon_threadsafe(self._drain)
+
+    def close(self) -> None:
+        with self._lock:
+            self._closed = True
+            self._finals.clear()
+            self._partials.clear()
+
+    def _pending_count(self) -> int:
+        return len(self._finals) + len(self._partials)
+
+    def _drain(self) -> None:
+        with self._lock:
+            pending = tuple(self._finals) + tuple(self._partials.values())
+            self._finals.clear()
+            self._partials.clear()
+            self._scheduled = False
+            consumer = self._consumer
+            closed = self._closed
+        if closed or consumer is None:
+            return
+        for hypothesis in pending:
+            try:
+                consumer(hypothesis)
+            except RuntimeError:
+                # A shutdown may close the runtime after this drain was queued.
+                return
+
+
+@dataclass(slots=True)
+class RuntimeServices:
+    audio: AudioService
+    stt: STTService
+    hotkeys: HotkeyService
+    capture: CaptureService
+    registry: RegistryService
+    client: ClientService
+    coordinator: RequestCoordinator
+    transcript_store: TranscriptStore
+    question_detector: QuestionDetector
+    search_policy: SearchPolicy
+    warm_up: WarmUp = _noop_warm_up
+    recovery_sleeper: Sleeper = asyncio.sleep
+    hypothesis_ingress: RuntimeHypothesisIngress | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class _PreparedRequest:
+    question: DetectedQuestion
+    image_path: Path | None
+    stage: Literal["answer", "retrieval"] = "answer"
+    integration: SearchIntegration | None = None
+
+
+class ApplicationRuntime(QObject):
+    """Main-thread orchestration for one configured interview session."""
+
+    def __init__(
+        self,
+        application: InterviewApplication,
+        config: AppConfig,
+        services: RuntimeServices,
+    ) -> None:
+        super().__init__()
+        self.application = application
+        self.config = config
+        self.services = services
+        self._instances: dict[str, ModelInstance] = {}
+        self._started = False
+        self._closing = False
+        self._question_task: asyncio.Task[None] | None = None
+        self._shutdown_task: asyncio.Task[None] | None = None
+        self._shutdown_completed: set[str] = set()
+        self._action_tasks: set[asyncio.Task[None]] = set()
+        self._manual_image_path: Path | None = None
+        self._paused = False
+        self._desired_state = ApplicationState.STARTING
+        self._recovered_search_results: dict[int, str] = {}
+        self._model_lifecycle: ModelLifecycle[_PreparedRequest] = ModelLifecycle(
+            services.registry,
+            cancel_active=services.coordinator.cancel_active,
+            warm_up=services.warm_up,
+            replay=self._replay_recovered,
+            sleeper=services.recovery_sleeper,
+            on_state=self._on_recovery_state,
+        )
+        self._connect_actions()
+
+    @property
+    def is_closing(self) -> bool:
+        return self._closing
+
+    @property
+    def is_started(self) -> bool:
+        return self._started
+
+    @property
+    def prepared_instances(self) -> dict[str, ModelInstance]:
+        return dict(self._instances)
+
+    @property
+    def manual_image_path(self) -> Path | None:
+        return self._manual_image_path
+
+    def _connect_actions(self) -> None:
+        events = self.application.events
+        events.force_request.connect(self._on_force_request)
+        events.screenshot_requested.connect(self._on_screenshot_requested)
+        events.pause_toggled.connect(self._on_pause_toggled)
+        events.overlay_visibility_toggled.connect(self._on_overlay_visibility_toggled)
+        events.forced_search_requested.connect(self._on_forced_search_requested)
+        events.answer_clear_requested.connect(self._on_answer_clear_requested)
+
+    async def start(self) -> None:
+        if self._closing or self._started:
+            return
+        if self.application.is_shutdown:
+            raise RuntimeError("Application is already shut down")
+        if not self.application.can_start_session:
+            raise RuntimeError("Readiness checks must pass before session start")
+        keys = tuple(
+            dict.fromkeys(
+                key
+                for key in (
+                    self.config.lmstudio.text_model,
+                    self.config.lmstudio.vision_model,
+                )
+                if key
+            )
+        )
+        if not keys:
+            raise RuntimeError("At least one LM Studio model must be selected")
+        self.application.start()
+        if not self.application.can_start_session:
+            raise RuntimeError("Readiness checks must pass before session start")
+        affinity = self.application.ribbon.affinity_result
+        if (
+            self.application.states.state is ApplicationState.OFFLINE
+            or affinity is None
+            or not affinity.ok
+        ):
+            raise RuntimeError("Overlay capture exclusion must remain verified")
+        for key in keys:
+            self._instances[key] = await self.services.registry.ensure_ready(key)
+        started: list[Callable[[], object]] = []
+        try:
+            self.services.stt.start()
+            started.append(self.services.stt.stop)
+            self.services.audio.start()
+            started.append(self.services.audio.stop)
+            self.services.hotkeys.start()
+            started.append(self.services.hotkeys.stop)
+        except BaseException:
+            for stop in reversed(started):
+                try:
+                    stop()
+                except BaseException:
+                    pass
+            raise
+        self._started = True
+        self._set_state(ApplicationState.LISTENING)
+
+    def submit_hypothesis(
+        self,
+        hypothesis: TranscriptHypothesis,
+    ) -> asyncio.Task[None]:
+        """Replace stale transcript work without blocking an STT callback."""
+
+        if self._closing:
+            raise RuntimeError("Application runtime is closing")
+        question = self._record_hypothesis(hypothesis)
+        if question is None:
+            return asyncio.create_task(self._completed_hypothesis())
+        return self._queue_question(question)
+
+    def _queue_question(self, question: DetectedQuestion) -> asyncio.Task[None]:
+        previous = self._question_task
+        if previous is not None:
+            previous.cancel()
+        task = asyncio.create_task(
+            self._replace_question(previous, question),
+            name="interview-question",
+        )
+        self._question_task = task
+        task.add_done_callback(self._question_task_done)
+        return task
+
+    @staticmethod
+    async def _completed_hypothesis() -> None:
+        return None
+
+    async def _replace_question(
+        self,
+        previous: asyncio.Task[None] | None,
+        question: DetectedQuestion,
+    ) -> None:
+        if previous is not None:
+            try:
+                await previous
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                pass
+            await self.services.coordinator.cancel_active()
+        await self._answer(question)
+
+    def _question_task_done(self, task: asyncio.Task[None]) -> None:
+        error: BaseException | None = None
+        try:
+            error = task.exception()
+        except asyncio.CancelledError:
+            pass
+        is_current = self._question_task is task
+        if is_current:
+            self._question_task = None
+        if error is not None and is_current and not self._closing:
+            self.application.events.notification.emit("Request processing failed.")
+            if self.application.states.state is not ApplicationState.OFFLINE:
+                self._set_state(ApplicationState.LISTENING)
+
+    async def handle_hypothesis(self, hypothesis: TranscriptHypothesis) -> None:
+        if self._closing or not self._started:
+            return
+        question = self._record_hypothesis(hypothesis)
+        if question is not None:
+            await self._answer(question)
+
+    def _record_hypothesis(
+        self,
+        hypothesis: TranscriptHypothesis,
+    ) -> DetectedQuestion | None:
+        if self._closing or not self._started or self._paused:
+            return None
+        source = hypothesis.source.value
+        if hypothesis.is_final:
+            self.application.events.transcript_final.emit(source, hypothesis.text)
+            self.services.transcript_store.add(hypothesis)
+        else:
+            self.application.events.transcript_partial.emit(source, hypothesis.text)
+            return None
+
+        return self.services.question_detector.detect(
+            hypothesis.source,
+            hypothesis.text,
+            is_final=True,
+        )
+
+    async def _answer(self, question: DetectedQuestion) -> None:
+        self.application.ribbon.set_question(question.text)
+        self._set_state(ApplicationState.TRANSCRIBING)
+        image_path = self._manual_image_path
+        self._manual_image_path = None
+        if image_path is None:
+            capture = await self.services.capture.capture_for_event(question.kind)
+            image_path = self._usable_image(capture)
+
+        text_model_key = self.config.lmstudio.text_model
+        if not text_model_key:
+            text_model_key = self.config.lmstudio.vision_model
+        text_instance = self._instances[text_model_key]
+        search_results: tuple[str, ...] = ()
+        integrations = self.services.search_policy.integrations_for(question.text)
+        if integrations:
+            self._set_state(ApplicationState.SEARCHING)
+            retrieval_id = self.services.coordinator.submit_retrieval(
+                text_instance.instance_id,
+                integrations,
+            )
+            retrieval = await self._wait_with_timeout(
+                retrieval_id,
+                self.config.search.timeout_seconds,
+            )
+            if (
+                retrieval.status == "failed"
+                and retrieval.error_type == "model_not_found"
+            ):
+                await self._model_lifecycle.recover(
+                    text_model_key,
+                    RecoveryRequest(
+                        question.request_id,
+                        _PreparedRequest(
+                            question,
+                            None,
+                            stage="retrieval",
+                            integration=integrations[0],
+                        ),
+                    ),
+                )
+                recovered = self._recovered_search_results.pop(
+                    question.request_id,
+                    "",
+                )
+                retrieval = RequestOutcome(
+                    retrieval.request_id,
+                    "completed" if recovered else "failed",
+                    text=recovered,
+                    error_type=None if recovered else "unknown",
+                )
+            if retrieval.status == "completed" and retrieval.text.strip():
+                search_results = (retrieval.text,)
+                self.application.ribbon.set_sources(
+                    integration.id for integration in integrations
+                )
+            else:
+                self.application.events.notification.emit(
+                    "Web retrieval unavailable; continuing without it."
+                )
+                self.application.ribbon.set_sources(())
+        else:
+            self.application.ribbon.set_sources(())
+
+        context = ContextBuilder(
+            self.services.transcript_store,
+            latest_question=question,
+            search_results=search_results,
+        ).normal()
+        model_key = (
+            self.config.lmstudio.vision_model
+            if image_path is not None
+            else self.config.lmstudio.text_model
+        )
+        if not model_key:
+            model_key = self.config.lmstudio.text_model or self.config.lmstudio.vision_model
+        instance = self._instances[model_key]
+        payload = await asyncio.to_thread(
+            build_chat_payload,
+            instance.instance_id,
+            context.prompt,
+            image_path,
+        )
+        self._set_state(ApplicationState.GENERATING)
+        request_id = self.services.coordinator.submit(payload)
+        outcome = await self.services.coordinator.wait(request_id)
+        if outcome.status == "failed" and outcome.error_type == "model_not_found":
+            await self._model_lifecycle.recover(
+                model_key,
+                RecoveryRequest(
+                    question.request_id,
+                    _PreparedRequest(question, image_path),
+                ),
+            )
+        if not self._closing:
+            self._set_state(ApplicationState.LISTENING)
+
+    async def _replay_recovered(
+        self,
+        instance: ModelInstance,
+        request: RecoveryRequest[_PreparedRequest],
+    ) -> None:
+        prepared = request.payload
+        self._instances[instance.key] = instance
+        if prepared.stage == "retrieval":
+            integration = prepared.integration
+            if integration is None:
+                raise RuntimeError("Recovery retrieval is missing its sealed integration")
+            retrieval_id = self.services.coordinator.submit_retrieval(
+                instance.instance_id,
+                (integration,),
+            )
+            outcome = await self._wait_with_timeout(
+                retrieval_id,
+                self.config.search.timeout_seconds,
+            )
+            if outcome.status != "completed":
+                raise RuntimeError("Recovered retrieval did not complete")
+            self._recovered_search_results[prepared.question.request_id] = outcome.text
+            return
+        context = ContextBuilder(
+            self.services.transcript_store,
+            latest_question=prepared.question,
+        ).recovery()
+        payload = await asyncio.to_thread(
+            build_chat_payload,
+            instance.instance_id,
+            context.prompt,
+            prepared.image_path,
+        )
+        request_id = self.services.coordinator.submit(payload)
+        outcome = await self.services.coordinator.wait(request_id)
+        if outcome.status != "completed":
+            raise RuntimeError("Recovered LM Studio request did not complete")
+
+    async def _wait_with_timeout(
+        self,
+        request_id: int,
+        timeout_seconds: float,
+    ) -> RequestOutcome:
+        try:
+            return await asyncio.wait_for(
+                self.services.coordinator.wait(request_id),
+                timeout=timeout_seconds,
+            )
+        except TimeoutError:
+            await self.services.coordinator.cancel_active()
+            await self.services.coordinator.wait(request_id)
+            return RequestOutcome(request_id, "failed", error_type="timeout")
+
+    def _on_recovery_state(self, state: str) -> None:
+        if self._closing:
+            return
+        mapped = {
+            "recovering": ApplicationState.RECOVERING,
+            "ready": ApplicationState.LISTENING,
+            "offline": ApplicationState.OFFLINE,
+        }[state]
+        self._set_state(mapped)
+
+    def _usable_image(self, result: CaptureResult) -> Path | None:
+        if result.status == "captured":
+            return result.path
+        if result.status == "protected":
+            self.application.events.notification.emit(
+                "Protected content; continuing without an image."
+            )
+        return None
+
+    def _set_state(self, state: ApplicationState) -> None:
+        self._desired_state = state
+        visible_state = (
+            ApplicationState.PAUSED
+            if self._paused and state is not ApplicationState.STOPPED
+            else state
+        )
+        self.application.states.transition(visible_state)
+        self.application.events.state_changed.emit(visible_state.value)
+
+    @pyqtSlot()
+    def _on_pause_toggled(self) -> None:
+        if self._closing or not self._started:
+            return
+        if self._paused:
+            self.services.audio.resume()
+            self._paused = False
+            self._set_state(self._desired_state)
+            return
+        self.services.audio.pause()
+        self._paused = True
+        self.application.states.transition(ApplicationState.PAUSED)
+        self.application.events.state_changed.emit(ApplicationState.PAUSED.value)
+
+    @pyqtSlot()
+    def _on_overlay_visibility_toggled(self) -> None:
+        if self._closing:
+            return
+        if self.application.ribbon.isVisible():
+            self.application.ribbon.hide()
+        else:
+            self.application.ribbon.show()
+
+    @pyqtSlot()
+    def _on_forced_search_requested(self) -> None:
+        if self._closing:
+            return
+        self.services.search_policy.force_next()
+
+    @pyqtSlot()
+    def _on_answer_clear_requested(self) -> None:
+        if self._closing:
+            return
+        self.application.ribbon.clear_answer()
+
+    @pyqtSlot()
+    def _on_force_request(self) -> None:
+        self._schedule_action(self.force_latest_request)
+
+    @pyqtSlot()
+    def _on_screenshot_requested(self) -> None:
+        self._schedule_action(self.capture_manual_screenshot)
+
+    def _schedule_action(self, operation: Callable[[], Awaitable[None]]) -> None:
+        if self._closing:
+            return
+        if len(self._action_tasks) >= 8:
+            self.application.events.notification.emit(
+                "Too many assistant actions are already running."
+            )
+            return
+        async def invoke_action() -> None:
+            await operation()
+
+        task: asyncio.Task[None] = asyncio.create_task(
+            invoke_action(),
+            name="interview-user-action",
+        )
+        self._action_tasks.add(task)
+        task.add_done_callback(self._action_task_done)
+
+    def _action_task_done(self, task: asyncio.Task[None]) -> None:
+        self._action_tasks.discard(task)
+        try:
+            error = task.exception()
+        except asyncio.CancelledError:
+            return
+        if error is not None and not self._closing:
+            self.application.events.notification.emit("Assistant action failed.")
+
+    async def force_latest_request(self) -> None:
+        if self._closing:
+            return
+        latest = self.services.transcript_store.latest(AudioSource.SYSTEM)
+        if latest is None or not latest.text.strip():
+            self.application.events.notification.emit(
+                "No final interviewer transcript is available."
+            )
+            return
+        question = self.services.question_detector.force_request(latest.text)
+        await self._queue_question(question)
+
+    async def capture_manual_screenshot(self) -> None:
+        if self._closing:
+            return
+        result = await self.services.capture.capture_for_event("manual", manual=True)
+        path = self._usable_image(result)
+        if path is not None:
+            self._manual_image_path = path
+            self.application.events.notification.emit(
+                "Screenshot is ready for the next request."
+            )
+
+    def clear_history(self) -> None:
+        self.services.transcript_store.clear()
+
+    async def shutdown(self, *, close_application: bool = True) -> None:
+        task = self._shutdown_task
+        if task is None:
+            self._closing = True
+            task = asyncio.create_task(
+                self._shutdown_once(),
+                name="interview-application-shutdown",
+            )
+            self._shutdown_task = task
+            task.add_done_callback(self._shutdown_attempt_done)
+        cleanup_error: BaseException | None = None
+        try:
+            await asyncio.shield(task)
+        except BaseException as error:
+            cleanup_error = error
+        application_error: BaseException | None = None
+        if close_application:
+            try:
+                self.application.shutdown()
+            except BaseException as error:
+                application_error = error
+        if cleanup_error is not None:
+            raise cleanup_error
+        if application_error is not None:
+            raise application_error
+
+    def _shutdown_attempt_done(self, task: asyncio.Task[None]) -> None:
+        try:
+            error = task.exception()
+        except asyncio.CancelledError:
+            error = RuntimeError("Shutdown attempt was cancelled")
+        if error is not None and self._shutdown_task is task:
+            self._shutdown_task = None
+
+    async def _shutdown_once(self) -> None:
+        errors: list[BaseException] = []
+
+        if (
+            self.services.hypothesis_ingress is not None
+            and "hypothesis_ingress" not in self._shutdown_completed
+        ):
+            try:
+                self.services.hypothesis_ingress.close()
+            except BaseException as error:
+                errors.append(error)
+            else:
+                self._shutdown_completed.add("hypothesis_ingress")
+        for name, stop in (
+            ("hotkey", self.services.hotkeys.stop),
+            ("audio", self.services.audio.stop),
+            ("stt", self.services.stt.stop),
+        ):
+            if name in self._shutdown_completed:
+                continue
+            try:
+                stopped = await asyncio.to_thread(stop)
+                if name == "stt" and stopped is False:
+                    raise RuntimeError("STT worker did not stop before timeout")
+            except BaseException as error:
+                errors.append(error)
+            else:
+                self._shutdown_completed.add(name)
+        if "question_task" not in self._shutdown_completed:
+            question_task = self._question_task
+            self._question_task = None
+            if question_task is not None and question_task is not asyncio.current_task():
+                question_task.cancel()
+                try:
+                    await question_task
+                except asyncio.CancelledError:
+                    pass
+                except BaseException as error:
+                    errors.append(error)
+            self._shutdown_completed.add("question_task")
+        if "action_tasks" not in self._shutdown_completed:
+            action_tasks = tuple(self._action_tasks)
+            for action_task in action_tasks:
+                action_task.cancel()
+            if action_tasks:
+                await asyncio.gather(*action_tasks, return_exceptions=True)
+            self._shutdown_completed.add("action_tasks")
+        for name, operation in (
+            ("coordinator", self.services.coordinator.cancel_active),
+            ("capture", self.services.capture.shutdown),
+            ("client", self.services.client.aclose),
+        ):
+            if name in self._shutdown_completed:
+                continue
+            try:
+                await operation()
+            except BaseException as error:
+                errors.append(error)
+            else:
+                self._shutdown_completed.add(name)
+        self._manual_image_path = None
+        self._started = False
+
+        if errors:
+            raise errors[0]

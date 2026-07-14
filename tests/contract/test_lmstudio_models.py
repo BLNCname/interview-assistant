@@ -292,3 +292,19 @@ async def test_context_manager_closes_the_async_client() -> None:
 
     with pytest.raises(RuntimeError, match="client has been closed"):
         await client.list_models()
+
+
+async def test_public_close_is_idempotent_and_used_by_runtime() -> None:
+    client = LMStudioClient("127.0.0.1", 1234, None)
+
+    await client.aclose()
+    await client.aclose()
+
+    with pytest.raises(RuntimeError, match="client has been closed"):
+        await client.list_models()
+
+
+@pytest.mark.parametrize("host", ["localhost", "127.0.0.1", "127.2.3.4", "::1"])
+async def test_loopback_hosts_accept_bearer_authentication(host: str) -> None:
+    client = LMStudioClient(host, 1234, "token")
+    await client.aclose()

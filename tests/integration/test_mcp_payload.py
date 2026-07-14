@@ -71,6 +71,7 @@ async def test_retrieval_submission_contains_only_model_sanitized_input_and_plug
                     "allowed_tools": ["search"],
                 }
             ],
+            "store": False,
         }
     ]
     serialized = json.dumps(client.payloads, ensure_ascii=False)
@@ -278,6 +279,7 @@ async def test_retrieval_http_payload_contains_only_sanitized_native_fields() ->
                 "allowed_tools": ["search"],
             }
         ],
+        "store": False,
         "stream": True,
     }
     serialized = request.content.decode("utf-8")

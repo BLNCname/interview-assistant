@@ -165,7 +165,17 @@ async def test_stream_yields_supported_families_and_ignores_other_official_event
                 "additive": True,
             },
         ),
-        ("error", {"type": "error", "error": {"code": "model_error"}}),
+        (
+            "error",
+            {
+                "type": "error",
+                "error": {
+                    "type": "internal_error",
+                    "message": "model failed",
+                    "code": "model_error",
+                },
+            },
+        ),
         ("chat.end", {"type": "chat.end", "result": {"stats": {"tokens": 3}}}),
     ]
     body = b"".join(
@@ -197,7 +207,8 @@ async def test_stream_yields_supported_families_and_ignores_other_official_event
     assert events[0].model_extra == {"session_id": "session-1"}
     assert events[3].progress == 0.5
     assert events[9].arguments == {"query": "answer"}
-    assert events[11].model_extra == {"error": {"code": "model_error"}}
+    assert events[11].error is not None
+    assert events[11].error.code == "model_error"
 
 
 def test_chat_event_known_fields_are_strict() -> None:
