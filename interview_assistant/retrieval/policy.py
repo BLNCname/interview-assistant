@@ -63,11 +63,14 @@ _NAME_METADATA = re.compile(
     r"(?iu)(?:^|(?<=[.!?])\s+)"
     r"(?:full\s+name|name|имя|фио)\s*:\s*[^\r\n.!?]{1,100}[.!?]?"
 )
+_PERSON_ATTRIBUTION_TOKEN = (
+    r"(?:[A-ZА-ЯЁ][A-Za-zА-Яа-яЁё'’\-]+|[A-ZА-ЯЁ]\.)"
+)
 _PERSON_ATTRIBUTION = re.compile(
     r"(?u)\b(?:[Ff]or|[Ff]rom|"
     r"(?:[Rr]equested\s+|[Aa]sked\s+)?[Bb]y|[Дд]ля|[Оо]т)\s+"
-    r"(?P<name>[A-ZА-ЯЁ][A-Za-zА-Яа-яЁё'’\-]+"
-    r"(?:\s+[A-ZА-ЯЁ][A-Za-zА-Яа-яЁё'’\-]+){0,3})"
+    rf"(?P<name>{_PERSON_ATTRIBUTION_TOKEN}"
+    rf"(?:\s+{_PERSON_ATTRIBUTION_TOKEN}){{0,3}})"
     r"(?=\s+[a-zа-яё]|\s*[,.;:!?]|\s*$)"
 )
 _LEADING_VOCATIVE = re.compile(
@@ -182,6 +185,13 @@ _SENSITIVE_KEY_SUFFIXES = (
     "signature",
     "token",
 )
+_IDENTITY_QUERY_KEYS = {
+    "candidate",
+    "fullname",
+    "name",
+    "person",
+    "user",
+}
 
 _NON_PERSON_VOCATIVES = {
     "angular",
@@ -417,10 +427,19 @@ def _contains_sensitive_key(value: str) -> bool:
 
 
 def _is_sensitive_key(key: str) -> bool:
-    normalized = re.sub(r"[^a-z0-9]", "", key.casefold())
+    normalized = _normalize_query_key(key)
     return normalized in _SENSITIVE_QUERY_KEYS or normalized.endswith(
         _SENSITIVE_KEY_SUFFIXES
     )
+
+
+def _is_identity_key(key: str) -> bool:
+    return _normalize_query_key(key) in _IDENTITY_QUERY_KEYS
+
+
+def _normalize_query_key(key: str) -> str:
+    decoded = unicodedata.normalize("NFKC", _fully_unquote(key)).casefold()
+    return re.sub(r"[^a-z0-9]", "", decoded)
 
 
 def _redact_vocative(match: re.Match[str]) -> str:
@@ -442,12 +461,11 @@ def _redact_person_attribution(match: re.Match[str]) -> str:
 
 def _fully_unquote(value: str) -> str:
     decoded = value
-    for _ in range(2):
+    while True:
         next_value = unquote(decoded)
         if next_value == decoded:
-            break
+            return decoded
         decoded = next_value
-    return decoded
 
 
 def _path_contains_sensitive_data(path: str) -> bool:
@@ -482,10 +500,12 @@ def _is_labeled_sensitive_name(segment: str) -> bool:
 
 
 def _query_pair_is_safe(key: str, value: str) -> bool:
+    decoded_key = _fully_unquote(key)
     decoded_value = _fully_unquote(value)
     return not (
-        _is_sensitive_key(key)
-        or _is_labeled_sensitive_name(key)
+        _is_sensitive_key(decoded_key)
+        or _is_identity_key(decoded_key)
+        or _is_labeled_sensitive_name(decoded_key)
         or _EMAIL.search(decoded_value)
         or _contains_sensitive_key(decoded_value)
         or _looks_like_secret(decoded_value)

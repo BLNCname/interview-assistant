@@ -528,6 +528,36 @@ def test_known_product_name_is_not_redacted_as_a_person(question: str) -> None:
     assert integrations[0].query == question
 
 
+@pytest.mark.parametrize(
+    ("question", "expected"),
+    [
+        (
+            "What is the latest Python release for Alice B. Smith?",
+            "What is the latest Python release?",
+        ),
+        (
+            "What is the latest Python release requested by A. B. Smith?",
+            "What is the latest Python release?",
+        ),
+        (
+            "Какая сейчас версия Python для Ивана П. Петрова?",
+            "Какая сейчас версия Python?",
+        ),
+        (
+            "Какая сейчас версия Python от И. П. Петрова?",
+            "Какая сейчас версия Python?",
+        ),
+    ],
+)
+def test_dotted_initials_in_person_attribution_are_removed(
+    question: str,
+    expected: str,
+) -> None:
+    integrations = SearchPolicy("auto").integrations_for(question)
+
+    assert integrations[0].query == expected
+
+
 def test_source_metadata_and_sensitive_url_parameters_are_removed() -> None:
     question = (
         "Source: Teams recording\n"
@@ -646,6 +676,91 @@ def test_url_credential_paths_codes_sessions_and_encoded_email_are_redacted(
 
     assert integrations[0].query == expected
     assert forbidden not in integrations[0].query
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        "%74oken",
+        "%2574oken",
+        "%74oken%5Fvalue",
+        "%2574oken%255Fvalue",
+        "%74oken%2Dvalue",
+        "%2574oken%252Dvalue",
+        "%74oken%2Evalue",
+        "%2574oken%252Evalue",
+        "%74okenValue",
+        "%2574okenValue",
+    ],
+)
+def test_encoded_sensitive_query_keys_are_fully_decoded_before_filtering(
+    key: str,
+) -> None:
+    url = f"https://example.test/callback?{key}=opaquevalue&lang=en"
+
+    integrations = SearchPolicy("auto").integrations_for(
+        f"Latest OAuth standard? {url}"
+    )
+
+    assert integrations[0].query == (
+        "Latest OAuth standard? https://example.test/callback?lang=en"
+    )
+    assert "opaquevalue" not in integrations[0].query
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        "candidate",
+        "full_name",
+        "name",
+        "person",
+        "user",
+        "%2563andidate",
+        "full%255Fname",
+    ],
+)
+def test_identity_query_keys_are_removed_after_full_decoding(key: str) -> None:
+    url = f"https://example.test/search?{key}=Alice%20Smith&lang=en"
+
+    integrations = SearchPolicy("auto").integrations_for(
+        f"Latest OAuth standard? {url}"
+    )
+
+    assert integrations[0].query == (
+        "Latest OAuth standard? https://example.test/search?lang=en"
+    )
+    assert "Alice" not in integrations[0].query
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        "%256CibraryName",
+        "%2566ilename",
+        "%2574okenizer",
+    ],
+)
+def test_benign_encoded_query_keys_are_preserved(key: str) -> None:
+    url = f"https://example.test/search?{key}=FastAPI"
+
+    integrations = SearchPolicy("auto").integrations_for(
+        f"Latest OAuth standard? {url}"
+    )
+
+    assert integrations[0].query == f"Latest OAuth standard? {url}"
+
+
+@pytest.mark.parametrize("key", ["libraryName", "filename"])
+def test_benign_name_suffix_query_keys_are_preserved(key: str) -> None:
+    value = "FastAPI" if key == "libraryName" else "guide.pdf"
+    url = f"https://example.test/search?{key}={value}"
+
+    integrations = SearchPolicy("auto").integrations_for(
+        f"Latest OAuth standard? {url}"
+    )
+
+    assert integrations[0].query == f"Latest OAuth standard? {url}"
 
 
 @pytest.mark.parametrize("key", ["monkey", "tokenizer"])
