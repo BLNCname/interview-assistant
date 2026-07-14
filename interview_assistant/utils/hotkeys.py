@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 from threading import Condition, Lock, RLock, get_ident
 from types import MappingProxyType
-from typing import Protocol
+from typing import Literal, Protocol
 
 from interview_assistant.events import EventBus
 
@@ -175,6 +175,8 @@ _SIGNAL_BY_ACTION = {
     HotkeyAction.CLEAR_ANSWER: "answer_clear_requested",
 }
 
+_LifecycleState = Literal["stopped", "starting", "running", "stopping"]
+
 
 class HotkeyManager:
     """Thread-safe hotkey state machine whose callbacks only emit Qt signals."""
@@ -190,7 +192,9 @@ class HotkeyManager:
         self._listener_factory = listener_factory or _pynput_listener_factory
         self._lock = RLock()
         self._emission_condition = Condition(self._lock)
-        self._lifecycle_lock = Lock()
+        self._lifecycle_condition = Condition(Lock())
+        self._lifecycle_state: _LifecycleState = "stopped"
+        self._stop_teardown_complete = False
         self._bindings: dict[HotkeyAction, HotkeyChord] = {}
         self._pressed_modifier_keys: dict[str, set[str]] = {}
         self._latched_final_keys: set[str] = set()
@@ -236,44 +240,71 @@ class HotkeyManager:
             self._latched_final_keys.clear()
 
     def start(self) -> None:
-        with self._lifecycle_lock:
-            with self._lock:
-                if self._listener is not None:
+        caller = get_ident()
+        with self._lifecycle_condition:
+            while self._lifecycle_state in {"starting", "stopping"}:
+                if self._thread_has_inflight_emission(caller):
                     return
+                self._lifecycle_condition.wait()
+            if self._lifecycle_state == "running":
+                return
+            self._lifecycle_state = "starting"
+            with self._lock:
                 self._generation += 1
                 generation = self._generation
+
+        try:
             listener = self._listener_factory(
                 on_press=lambda key: self._on_press(generation, key),
                 on_release=lambda key: self._on_release(generation, key),
             )
+        except BaseException:
+            self._finish_start_attempt("stopped")
+            raise
+
+        with self._lock:
+            self._listener = listener
+            self._active_generation = generation
+        try:
+            listener.start()
+        except BaseException:
             with self._lock:
-                self._listener = listener
-                self._active_generation = generation
-            try:
-                listener.start()
-            except BaseException:
-                with self._lock:
-                    if self._listener is listener:
-                        self._listener = None
-                        self._active_generation = None
-                        self._pressed_modifier_keys.clear()
-                        self._latched_final_keys.clear()
-                self._best_effort_stop_and_join(listener)
-                self._wait_for_inflight_emissions()
-                raise
+                if self._listener is listener:
+                    self._listener = None
+                    self._active_generation = None
+                    self._pressed_modifier_keys.clear()
+                    self._latched_final_keys.clear()
+            self._best_effort_stop_and_join(listener)
+            self._wait_for_inflight_emissions()
+            self._finish_start_attempt("stopped")
+            raise
+        self._finish_start_attempt("running")
 
     def stop(self) -> None:
-        with self._lifecycle_lock:
-            with self._lock:
-                listener = self._listener
-                if listener is None:
+        caller = get_ident()
+        with self._lifecycle_condition:
+            while True:
+                if self._lifecycle_state == "stopped":
                     return
-                self._listener = None
-                self._active_generation = None
-                self._pressed_modifier_keys.clear()
-                self._latched_final_keys.clear()
-            stop_error: BaseException | None = None
-            join_error: BaseException | None = None
+                if self._lifecycle_state in {"starting", "stopping"}:
+                    if self._thread_has_inflight_emission(caller):
+                        return
+                    self._lifecycle_condition.wait()
+                    continue
+
+                self._lifecycle_state = "stopping"
+                self._stop_teardown_complete = False
+                with self._lock:
+                    listener = self._listener
+                    self._listener = None
+                    self._active_generation = None
+                    self._pressed_modifier_keys.clear()
+                    self._latched_final_keys.clear()
+                break
+
+        stop_error: BaseException | None = None
+        join_error: BaseException | None = None
+        if listener is not None:
             try:
                 listener.stop()
             except BaseException as error:
@@ -282,11 +313,37 @@ class HotkeyManager:
                 listener.join(timeout=1.0)
             except BaseException as error:
                 join_error = error
-            self._wait_for_inflight_emissions()
-            if stop_error is not None:
-                raise stop_error
-            if join_error is not None:
-                raise join_error
+
+        with self._lifecycle_condition:
+            self._stop_teardown_complete = True
+            self._lifecycle_condition.notify_all()
+        self._wait_for_inflight_emissions()
+        self._finalize_stop_if_ready()
+        if stop_error is not None:
+            raise stop_error
+        if join_error is not None:
+            raise join_error
+
+    def _finish_start_attempt(self, state: Literal["stopped", "running"]) -> None:
+        with self._lifecycle_condition:
+            self._lifecycle_state = state
+            self._lifecycle_condition.notify_all()
+
+    def _thread_has_inflight_emission(self, thread_id: int) -> bool:
+        with self._lock:
+            return self._inflight_emissions.get(thread_id, 0) > 0
+
+    def _finalize_stop_if_ready(self) -> None:
+        with self._lock:
+            emissions_drained = not self._inflight_emissions
+        if not emissions_drained:
+            return
+        with self._lifecycle_condition:
+            if self._lifecycle_state != "stopping" or not self._stop_teardown_complete:
+                return
+            self._lifecycle_state = "stopped"
+            self._stop_teardown_complete = False
+            self._lifecycle_condition.notify_all()
 
     @staticmethod
     def _best_effort_stop_and_join(listener: Listener) -> None:
@@ -317,6 +374,7 @@ class HotkeyManager:
             else:
                 self._inflight_emissions.pop(thread_id, None)
             self._emission_condition.notify_all()
+        self._finalize_stop_if_ready()
 
     def _on_press(self, generation: int, key: object) -> None:
         name = _event_key_name(key)

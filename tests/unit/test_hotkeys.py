@@ -348,3 +348,227 @@ def test_stop_waits_for_inflight_signal_emission_to_finish() -> None:
     assert not returned_before_emit_finished
     assert timeline == ["emitted", "stopped"]
     assert not manager.is_running
+
+
+def test_external_stop_and_reentrant_emitter_stop_do_not_deadlock() -> None:
+    emit_entered = Event()
+    release_reentrant_stop = Event()
+    listener_stopped = Event()
+    reentrant_stop_returned = Event()
+    manager: HotkeyManager
+
+    class ReentrantSignal:
+        def emit(self) -> None:
+            emit_entered.set()
+            assert release_reentrant_stop.wait(1.0)
+            manager.stop()
+            reentrant_stop_returned.set()
+
+    class ReentrantEvents:
+        pause_toggled = ReentrantSignal()
+
+    class ObservableStopListener(FakeListener):
+        def stop(self) -> None:
+            super().stop()
+            listener_stopped.set()
+
+    def factory(*, on_press, on_release) -> ObservableStopListener:
+        return ObservableStopListener(on_press, on_release)
+
+    manager = HotkeyManager(  # type: ignore[arg-type]
+        ReentrantEvents(),
+        {HotkeyAction.PAUSE: "ctrl+p"},
+        listener_factory=factory,
+    )
+    manager.start()
+    listener = manager._listener
+    assert isinstance(listener, ObservableStopListener)
+    listener.on_press("Key.ctrl_l")
+    callback_thread = Thread(target=listener.on_press, args=("p",), daemon=True)
+    callback_thread.start()
+    assert emit_entered.wait(1.0)
+
+    stop_thread = Thread(target=manager.stop, daemon=True)
+    stop_thread.start()
+    assert listener_stopped.wait(1.0)
+    release_reentrant_stop.set()
+    callback_thread.join(0.5)
+    stop_thread.join(0.5)
+
+    assert reentrant_stop_returned.is_set()
+    assert not callback_thread.is_alive()
+    assert not stop_thread.is_alive()
+    assert not manager.is_running
+
+
+def test_reentrant_emitter_stop_keeps_barrier_visible_to_external_stop() -> None:
+    reentrant_stop_returned = Event()
+    release_emit = Event()
+    external_stop_started = Event()
+    external_stop_returned = Event()
+    manager: HotkeyManager
+
+    class ReentrantBlockingSignal:
+        def emit(self) -> None:
+            manager.stop()
+            reentrant_stop_returned.set()
+            assert release_emit.wait(1.0)
+
+    class ReentrantEvents:
+        pause_toggled = ReentrantBlockingSignal()
+
+    factory = ListenerFactory()
+    manager = HotkeyManager(  # type: ignore[arg-type]
+        ReentrantEvents(),
+        {HotkeyAction.PAUSE: "ctrl+p"},
+        listener_factory=factory,
+    )
+    manager.start()
+    listener = factory.listeners[0]
+    listener.on_press("Key.ctrl_l")
+    callback_thread = Thread(target=listener.on_press, args=("p",), daemon=True)
+    callback_thread.start()
+    assert reentrant_stop_returned.wait(1.0)
+
+    def stop_externally() -> None:
+        external_stop_started.set()
+        manager.stop()
+        external_stop_returned.set()
+
+    external_thread = Thread(target=stop_externally, daemon=True)
+    external_thread.start()
+    assert external_stop_started.wait(1.0)
+    returned_before_emit_finished = external_stop_returned.wait(0.05)
+
+    release_emit.set()
+    callback_thread.join(0.5)
+    external_thread.join(0.5)
+
+    assert not returned_before_emit_finished
+    assert external_stop_returned.is_set()
+    assert not callback_thread.is_alive()
+    assert not external_thread.is_alive()
+    assert not manager.is_running
+
+
+def test_start_waits_until_stop_drain_is_fully_finalized() -> None:
+    emit_entered = Event()
+    release_emit = Event()
+    listener_stopped = Event()
+    second_factory_called = Event()
+
+    class BlockingSignal:
+        def emit(self) -> None:
+            emit_entered.set()
+            assert release_emit.wait(1.0)
+
+    class BlockingEvents:
+        pause_toggled = BlockingSignal()
+
+    class ObservableStopListener(FakeListener):
+        def stop(self) -> None:
+            super().stop()
+            listener_stopped.set()
+
+    listeners: list[ObservableStopListener] = []
+
+    def factory(*, on_press, on_release) -> ObservableStopListener:
+        listener = ObservableStopListener(on_press, on_release)
+        listeners.append(listener)
+        if len(listeners) == 2:
+            second_factory_called.set()
+        return listener
+
+    manager = HotkeyManager(  # type: ignore[arg-type]
+        BlockingEvents(),
+        {HotkeyAction.PAUSE: "ctrl+p"},
+        listener_factory=factory,
+    )
+    manager.start()
+    first_listener = listeners[0]
+    first_listener.on_press("Key.ctrl_l")
+    callback_thread = Thread(target=first_listener.on_press, args=("p",), daemon=True)
+    callback_thread.start()
+    assert emit_entered.wait(1.0)
+
+    stop_thread = Thread(target=manager.stop, daemon=True)
+    stop_thread.start()
+    assert listener_stopped.wait(1.0)
+    start_thread = Thread(target=manager.start, daemon=True)
+    start_thread.start()
+    restarted_before_emit_finished = second_factory_called.wait(0.05)
+
+    release_emit.set()
+    callback_thread.join(0.5)
+    stop_thread.join(0.5)
+    start_thread.join(0.5)
+
+    assert not restarted_before_emit_finished
+    assert second_factory_called.is_set()
+    assert not callback_thread.is_alive()
+    assert not stop_thread.is_alive()
+    assert not start_thread.is_alive()
+    assert manager.is_running
+    manager.stop()
+
+
+def test_start_failure_cleanup_does_not_deadlock_reentrant_emitter_stop() -> None:
+    emit_entered = Event()
+    release_reentrant_stop = Event()
+    reentrant_stop_returned = Event()
+    manager: HotkeyManager
+
+    class ReentrantSignal:
+        def emit(self) -> None:
+            emit_entered.set()
+            assert release_reentrant_stop.wait(1.0)
+            manager.stop()
+            reentrant_stop_returned.set()
+
+    class ReentrantEvents:
+        pause_toggled = ReentrantSignal()
+
+    class FailingStartListener(FakeListener):
+        callback_thread: Thread | None = None
+
+        def start(self) -> None:
+            super().start()
+
+            def emit_hotkey() -> None:
+                self.on_press("Key.ctrl_l")
+                self.on_press("p")
+
+            self.callback_thread = Thread(target=emit_hotkey, daemon=True)
+            self.callback_thread.start()
+            assert emit_entered.wait(1.0)
+            release_reentrant_stop.set()
+            raise RuntimeError("start exploded")
+
+        def join(self, timeout: float | None = None) -> None:
+            super().join(timeout)
+            assert self.callback_thread is not None
+            self.callback_thread.join(timeout)
+
+    listener: FailingStartListener | None = None
+
+    def factory(*, on_press, on_release) -> FailingStartListener:
+        nonlocal listener
+        listener = FailingStartListener(on_press, on_release)
+        return listener
+
+    manager = HotkeyManager(  # type: ignore[arg-type]
+        ReentrantEvents(),
+        {HotkeyAction.PAUSE: "ctrl+p"},
+        listener_factory=factory,
+    )
+
+    with pytest.raises(RuntimeError, match="start exploded"):
+        manager.start()
+
+    assert listener is not None
+    assert listener.callback_thread is not None
+    assert not listener.callback_thread.is_alive()
+    assert reentrant_stop_returned.is_set()
+    assert listener.stop_calls == 1
+    assert listener.join_calls == 1
+    assert not manager.is_running
