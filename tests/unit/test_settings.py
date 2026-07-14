@@ -2,7 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PyQt6.QtCore import QSettings, Qt
+import pytest
+from PyQt6.QtCore import QByteArray, QSettings, QSize, Qt
 
 from interview_assistant.config import AppConfig
 from interview_assistant.diagnostics.readiness import CheckResult, ReadinessReport
@@ -229,3 +230,29 @@ def test_model_refresh_preserves_stable_selected_keys_and_missing_key(qtbot, tmp
     assert window.text_model_combo.currentData() == "missing-model"
     assert window.vision_model_combo.currentData() == "qwen-vl"
     assert window.windowType() == Qt.WindowType.Window
+
+
+@pytest.mark.parametrize(
+    "corrupt_geometry",
+    ["not-a-qbytearray", QByteArray(b"invalid-geometry")],
+    ids=["wrong-type", "invalid-bytes"],
+)
+def test_corrupt_settings_geometry_falls_back_to_default(
+    qtbot,
+    tmp_path,
+    corrupt_geometry: object,
+) -> None:
+    settings = QSettings(str(tmp_path / "corrupt.ini"), QSettings.Format.IniFormat)
+    settings.setValue(SettingsWindow.GEOMETRY_KEY, corrupt_geometry)
+    settings.sync()
+    binding = SettingsBinding(AppConfig(), FakeSecretStore())
+
+    window = SettingsWindow(
+        binding,
+        audio_devices=(),
+        models=(),
+        settings=settings,
+    )
+    qtbot.addWidget(window)
+
+    assert window.size() == QSize(820, 620)

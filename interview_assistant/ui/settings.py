@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Literal, Protocol, cast
 
-from PyQt6.QtCore import QSettings, pyqtSignal
+from PyQt6.QtCore import QByteArray, QSettings, pyqtSignal
 from PyQt6.QtGui import QCloseEvent
 from PyQt6.QtWidgets import (
     QComboBox,
@@ -428,8 +428,12 @@ class SettingsWindow(QMainWindow):
 
     def _restore_geometry(self) -> None:
         geometry = self._settings.value(self.GEOMETRY_KEY)
-        if geometry is not None:
+        if not isinstance(geometry, (QByteArray, bytes, bytearray, memoryview)):
+            return
+        try:
             self.restoreGeometry(geometry)
+        except (TypeError, ValueError, RuntimeError):
+            return
 
     def closeEvent(self, event: QCloseEvent | None) -> None:
         self._settings.setValue(self.GEOMETRY_KEY, self.saveGeometry())

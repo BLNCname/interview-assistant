@@ -730,6 +730,7 @@ def test_startup_verified_affinity_preserves_preexisting_external_state(
         states,
         overlay_settings=None,
         affinity_applier=Mock(return_value=verified),
+        allow_unchecked_start=True,
     )
     qtbot.addWidget(app.ribbon)
     announced_states: list[str] = []
@@ -757,6 +758,7 @@ def test_application_stays_offline_when_capture_exclusion_is_not_verified(qtbot)
         StateMachine(),
         overlay_settings=None,
         affinity_applier=Mock(return_value=failure),
+        allow_unchecked_start=True,
     )
     qtbot.addWidget(app.ribbon)
     announced_states: list[str] = []
@@ -794,6 +796,7 @@ def test_startup_reentrant_handle_failure_wins_over_initial_ready(
         StateMachine(),
         overlay_settings=None,
         affinity_applier=applier,
+        allow_unchecked_start=True,
     )
     qtbot.addWidget(app.ribbon)
     announced_states: list[str] = []
@@ -839,6 +842,7 @@ def test_new_hwnd_affinity_failure_revokes_application_readiness(
         StateMachine(),
         overlay_settings=None,
         affinity_applier=applier,
+        allow_unchecked_start=True,
     )
     qtbot.addWidget(app.ribbon)
     announced_states: list[str] = []
@@ -890,6 +894,7 @@ def test_new_hwnd_applier_exception_fails_closed_without_retry(
         StateMachine(),
         overlay_settings=None,
         affinity_applier=applier,
+        allow_unchecked_start=True,
     )
     qtbot.addWidget(app.ribbon)
     app.start()
@@ -934,6 +939,7 @@ def test_new_hwnd_verified_affinity_restores_application_readiness(
         StateMachine(),
         overlay_settings=None,
         affinity_applier=applier,
+        allow_unchecked_start=True,
     )
     qtbot.addWidget(app.ribbon)
     announced_states: list[str] = []
@@ -979,6 +985,7 @@ def test_startup_affinity_failure_does_not_own_external_offline_state(
         states,
         overlay_settings=None,
         affinity_applier=applier,
+        allow_unchecked_start=True,
     )
     qtbot.addWidget(app.ribbon)
     announced_states: list[str] = []
@@ -1018,6 +1025,7 @@ def test_external_offline_does_not_transfer_ownership_to_affinity(
         StateMachine(),
         overlay_settings=None,
         affinity_applier=applier,
+        allow_unchecked_start=True,
     )
     qtbot.addWidget(app.ribbon)
     announced_states: list[str] = []
@@ -1062,6 +1070,7 @@ def test_external_state_after_affinity_offline_is_not_overwritten_on_success(
         StateMachine(),
         overlay_settings=None,
         affinity_applier=applier,
+        allow_unchecked_start=True,
     )
     qtbot.addWidget(app.ribbon)
     announced_states: list[str] = []
@@ -1108,6 +1117,7 @@ def test_affinity_recovery_restores_previous_non_offline_state(
         StateMachine(),
         overlay_settings=None,
         affinity_applier=applier,
+        allow_unchecked_start=True,
     )
     qtbot.addWidget(app.ribbon)
     announced_states: list[str] = []

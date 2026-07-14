@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from threading import Event, Thread
 
 import pytest
 
@@ -287,4 +288,63 @@ def test_stop_joins_even_when_listener_stop_raises() -> None:
 
     assert listener is not None
     assert listener.join_calls == 1
+    assert not manager.is_running
+
+
+def test_stop_waits_for_inflight_signal_emission_to_finish() -> None:
+    emit_entered = Event()
+    release_emit = Event()
+    listener_stopped = Event()
+    stop_returned = Event()
+    timeline: list[str] = []
+
+    class BlockingSignal:
+        def emit(self) -> None:
+            emit_entered.set()
+            assert release_emit.wait(1.0)
+            timeline.append("emitted")
+
+    class BlockingEvents:
+        pause_toggled = BlockingSignal()
+
+    class ObservableStopListener(FakeListener):
+        def stop(self) -> None:
+            super().stop()
+            listener_stopped.set()
+
+    def factory(*, on_press, on_release) -> ObservableStopListener:
+        return ObservableStopListener(on_press, on_release)
+
+    manager = HotkeyManager(  # type: ignore[arg-type]
+        BlockingEvents(),
+        {HotkeyAction.PAUSE: "ctrl+p"},
+        listener_factory=factory,
+    )
+    manager.start()
+    listener = manager._listener
+    assert isinstance(listener, ObservableStopListener)
+    listener.on_press("Key.ctrl_l")
+
+    callback_thread = Thread(target=listener.on_press, args=("p",))
+    callback_thread.start()
+    assert emit_entered.wait(1.0)
+
+    def stop_manager() -> None:
+        manager.stop()
+        timeline.append("stopped")
+        stop_returned.set()
+
+    stop_thread = Thread(target=stop_manager)
+    stop_thread.start()
+    assert listener_stopped.wait(1.0)
+    returned_before_emit_finished = stop_returned.is_set()
+
+    release_emit.set()
+    callback_thread.join(1.0)
+    stop_thread.join(1.0)
+
+    assert not callback_thread.is_alive()
+    assert not stop_thread.is_alive()
+    assert not returned_before_emit_finished
+    assert timeline == ["emitted", "stopped"]
     assert not manager.is_running

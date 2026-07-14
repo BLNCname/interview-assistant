@@ -4,7 +4,7 @@ import re
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from enum import StrEnum
-from threading import Lock, RLock
+from threading import Condition, Lock, RLock, get_ident
 from types import MappingProxyType
 from typing import Protocol
 
@@ -189,6 +189,7 @@ class HotkeyManager:
         self._events = events
         self._listener_factory = listener_factory or _pynput_listener_factory
         self._lock = RLock()
+        self._emission_condition = Condition(self._lock)
         self._lifecycle_lock = Lock()
         self._bindings: dict[HotkeyAction, HotkeyChord] = {}
         self._pressed_modifier_keys: dict[str, set[str]] = {}
@@ -196,6 +197,7 @@ class HotkeyManager:
         self._listener: Listener | None = None
         self._generation = 0
         self._active_generation: int | None = None
+        self._inflight_emissions: dict[int, int] = {}
         self.update_bindings(bindings)
 
     @property
@@ -257,6 +259,7 @@ class HotkeyManager:
                         self._pressed_modifier_keys.clear()
                         self._latched_final_keys.clear()
                 self._best_effort_stop_and_join(listener)
+                self._wait_for_inflight_emissions()
                 raise
 
     def stop(self) -> None:
@@ -270,17 +273,20 @@ class HotkeyManager:
                 self._pressed_modifier_keys.clear()
                 self._latched_final_keys.clear()
             stop_error: BaseException | None = None
+            join_error: BaseException | None = None
             try:
                 listener.stop()
             except BaseException as error:
                 stop_error = error
             try:
                 listener.join(timeout=1.0)
-            except BaseException:
-                if stop_error is None:
-                    raise
+            except BaseException as error:
+                join_error = error
+            self._wait_for_inflight_emissions()
             if stop_error is not None:
                 raise stop_error
+            if join_error is not None:
+                raise join_error
 
     @staticmethod
     def _best_effort_stop_and_join(listener: Listener) -> None:
@@ -293,10 +299,30 @@ class HotkeyManager:
         except BaseException:
             pass
 
+    def _wait_for_inflight_emissions(self) -> None:
+        caller = get_ident()
+        with self._emission_condition:
+            while any(
+                count > 0
+                for thread_id, count in self._inflight_emissions.items()
+                if thread_id != caller
+            ):
+                self._emission_condition.wait()
+
+    def _finish_emission(self, thread_id: int) -> None:
+        with self._emission_condition:
+            remaining = self._inflight_emissions.get(thread_id, 0) - 1
+            if remaining > 0:
+                self._inflight_emissions[thread_id] = remaining
+            else:
+                self._inflight_emissions.pop(thread_id, None)
+            self._emission_condition.notify_all()
+
     def _on_press(self, generation: int, key: object) -> None:
         name = _event_key_name(key)
         modifier = _normalize_modifier(name)
         action: HotkeyAction | None = None
+        emission_thread: int | None = None
         with self._lock:
             if generation != self._active_generation:
                 return
@@ -322,9 +348,17 @@ class HotkeyManager:
             )
             if action is not None:
                 self._latched_final_keys.add(final_key)
+                emission_thread = get_ident()
+                self._inflight_emissions[emission_thread] = (
+                    self._inflight_emissions.get(emission_thread, 0) + 1
+                )
         if action is not None:
-            signal_name = _SIGNAL_BY_ACTION[action]
-            getattr(self._events, signal_name).emit()
+            assert emission_thread is not None
+            try:
+                signal_name = _SIGNAL_BY_ACTION[action]
+                getattr(self._events, signal_name).emit()
+            finally:
+                self._finish_emission(emission_thread)
 
     def _on_release(self, generation: int, key: object) -> None:
         name = _event_key_name(key)

@@ -20,7 +20,7 @@ def _report(status: str) -> ReadinessReport:
     )
 
 
-def test_failed_readiness_report_defensively_blocks_application_start(qtbot) -> None:
+def test_failed_readiness_then_ready_report_starts_without_poisoning_state(qtbot) -> None:
     app = InterviewApplication.for_test()
     qtbot.addWidget(app.ribbon)
     notifications: list[str] = []
@@ -31,8 +31,16 @@ def test_failed_readiness_report_defensively_blocks_application_start(qtbot) -> 
 
     assert not app.can_start_session
     assert not app.ribbon.isVisible()
-    assert app.states.state is ApplicationState.OFFLINE
+    assert app.states.state is ApplicationState.STARTING
     assert notifications == ["Readiness checks must pass before starting"]
+
+    app.set_readiness_report(_report("ready"))
+    app.start()
+    qtbot.waitExposed(app.ribbon)
+
+    assert app.can_start_session
+    assert app.ribbon.isVisible()
+    assert app.states.state is ApplicationState.READY
     app.shutdown()
 
 
@@ -56,4 +64,37 @@ def test_legacy_application_without_report_remains_backward_compatible(qtbot) ->
 
     assert app.readiness_report is None
     assert app.can_start_session
+    app.shutdown()
+
+
+def test_application_without_report_is_fail_closed_by_default(qtbot) -> None:
+    from PyQt6.QtWidgets import QApplication
+
+    from interview_assistant.events import EventBus
+    from interview_assistant.state import StateMachine
+    from interview_assistant.ui.windows_affinity import (
+        AffinityResult,
+        WDA_EXCLUDEFROMCAPTURE,
+    )
+
+    qt_app = QApplication.instance()
+    assert isinstance(qt_app, QApplication)
+    app = InterviewApplication(
+        qt_app,
+        EventBus(),
+        StateMachine(),
+        overlay_settings=None,
+        affinity_applier=lambda _hwnd: AffinityResult(
+            True,
+            WDA_EXCLUDEFROMCAPTURE,
+            None,
+        ),
+    )
+    qtbot.addWidget(app.ribbon)
+
+    app.start()
+
+    assert not app.can_start_session
+    assert app.states.state is ApplicationState.STARTING
+    assert not app.ribbon.isVisible()
     app.shutdown()

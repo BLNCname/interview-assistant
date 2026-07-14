@@ -24,6 +24,7 @@ class InterviewApplication:
     overlay_settings: QSettings | None = field(default_factory=_overlay_settings)
     affinity_applier: AffinityApplier | None = None
     readiness_report: ReadinessReport | None = None
+    allow_unchecked_start: bool = False
     ribbon: LiquidRibbon = field(init=False)
     is_shutdown: bool = False
     _affinity_signal_connected: bool = field(default=False, init=False, repr=False)
@@ -53,6 +54,7 @@ class InterviewApplication:
                 WDA_EXCLUDEFROMCAPTURE,
                 None,
             ),
+            allow_unchecked_start=True,
         )
 
     def start(self) -> None:
@@ -60,9 +62,6 @@ class InterviewApplication:
             return
         if not self.can_start_session:
             self.ribbon.hide()
-            if self.states.state is not ApplicationState.OFFLINE:
-                self.states.transition(ApplicationState.OFFLINE)
-            self.events.state_changed.emit(self.states.state.value)
             self.events.notification.emit("Readiness checks must pass before starting")
             return
         self.ribbon.show()
@@ -94,7 +93,9 @@ class InterviewApplication:
 
     @property
     def can_start_session(self) -> bool:
-        return self.readiness_report is None or self.readiness_report.can_start
+        if self.readiness_report is None:
+            return self.allow_unchecked_start
+        return self.readiness_report.can_start
 
     def set_readiness_report(self, report: ReadinessReport) -> None:
         self.readiness_report = report
