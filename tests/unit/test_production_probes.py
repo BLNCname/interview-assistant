@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Awaitable, Callable
 from pathlib import Path
+from threading import Event
+
+import pytest
 
 from interview_assistant.audio.devices import AudioDevice
 from interview_assistant.capture.worker import CaptureResult
@@ -79,6 +83,28 @@ class _Hotkeys:
         self.stopped += 1
 
 
+class _BlockingHotkeys(_Hotkeys):
+    def __init__(self) -> None:
+        super().__init__()
+        self.start_entered = Event()
+        self.release_start = Event()
+        self.running = False
+        self.stop_before_start_completed = False
+
+    def start(self) -> None:
+        self.start_entered.set()
+        if not self.release_start.wait(timeout=2.0):
+            raise RuntimeError("test hotkey start was not released")
+        self.started += 1
+        self.running = True
+
+    def stop(self) -> None:
+        if not self.running:
+            self.stop_before_start_completed = True
+        self.stopped += 1
+        self.running = False
+
+
 class _Capture:
     async def capture_for_event(self, kind: str, *, manual: bool = False) -> CaptureResult:
         assert kind == "screen_analysis"
@@ -110,11 +136,17 @@ def _config() -> AppConfig:
 def _probes(
     *,
     client: _Client | None = None,
+    audio_devices: _AudioDevices | None = None,
     devices: list[AudioDevice] | None = None,
+    hotkeys: _Hotkeys | None = None,
     stt_fixture: Callable[[str], Awaitable[bool]] | None = None,
+    stt_warm_up: Callable[[], Awaitable[None]] | None = None,
     mcp_probe: Callable[[str], Awaitable[bool]] | None = None,
+    windows_composition: Callable[[], bool] = lambda: True,
+    cuda_device_count: Callable[[], int] = lambda: 1,
+    lmlink_status: Callable[[], str] = lambda: '{"device":"Strix Halo"}',
 ) -> tuple[ProductionReadinessProbes, _Hotkeys]:
-    hotkeys = _Hotkeys()
+    active_hotkeys = hotkeys if hotkeys is not None else _Hotkeys()
 
     async def fixture(_language: str) -> bool:
         return True
@@ -125,10 +157,15 @@ def _probes(
     async def warm(_instance: ModelInstance) -> float:
         return 240.0
 
+    async def warm_stt() -> None:
+        return None
+
     return (
         ProductionReadinessProbes(
             _config(),
-            audio_devices=_AudioDevices(
+            audio_devices=audio_devices
+            if audio_devices is not None
+            else _AudioDevices(
                 devices
                 or [
                     AudioDevice("loopback", "Speakers", True, 2),
@@ -137,17 +174,18 @@ def _probes(
             ),
             client=client or _Client(),
             registry=_Registry(),
-            hotkeys=hotkeys,
+            hotkeys=active_hotkeys,
             capture=_Capture(),
             ribbon=_Ribbon(),
             warm_up=warm,
-            windows_composition=lambda: True,
-            cuda_device_count=lambda: 1,
-            lmlink_status=lambda: '{"device":"Strix Halo"}',
+            windows_composition=windows_composition,
+            cuda_device_count=cuda_device_count,
+            stt_warm_up=stt_warm_up or warm_stt,
+            lmlink_status=lmlink_status,
             stt_fixture=stt_fixture or fixture,
             mcp_probe=mcp_probe or mcp,
         ),
-        hotkeys,
+        active_hotkeys,
     )
 
 
@@ -187,6 +225,175 @@ async def test_missing_selected_audio_device_is_blocking() -> None:
 
     assert report.by_name("system_audio").status == "failed"
     assert not report.can_start
+
+
+async def test_distinct_loopback_device_is_not_accepted_as_microphone() -> None:
+    probes, _ = _probes(
+        devices=[
+            AudioDevice("loopback", "Speakers", True, 2),
+            AudioDevice("other-loopback", "Monitor", True, 2),
+        ]
+    )
+    probes.config.audio.microphone_device_id = "other-loopback"
+
+    report = await ReadinessRunner(build_readiness_checks(probes.as_mapping())).run()
+
+    assert report.by_name("microphone").status == "failed"
+    assert not report.can_start
+
+
+async def test_cuda_stt_shared_inference_is_single_flight_and_required() -> None:
+    calls = 0
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def warm_stt() -> None:
+        nonlocal calls
+        calls += 1
+        started.set()
+        await release.wait()
+
+    probes, _ = _probes(stt_warm_up=warm_stt)
+    cuda_stt = probes.as_mapping()["cuda_stt"]
+    first = asyncio.create_task(cuda_stt())
+    second = asyncio.create_task(cuda_stt())
+    await started.wait()
+
+    assert calls == 1
+    assert not first.done()
+    assert not second.done()
+    release.set()
+    first_outcome, second_outcome = await asyncio.gather(first, second)
+
+    assert first_outcome.status == second_outcome.status == "ready"
+    assert "inference" in first_outcome.message.casefold()
+    await probes.aclose()
+
+
+async def test_cuda_stt_warm_up_failure_blocks_readiness() -> None:
+    async def failed_warm_up() -> None:
+        raise RuntimeError("synthetic STT inference failed")
+
+    probes, _ = _probes(stt_warm_up=failed_warm_up)
+
+    report = await ReadinessRunner(build_readiness_checks(probes.as_mapping())).run()
+
+    assert report.by_name("cuda_stt").status == "failed"
+    assert not report.can_start
+    await probes.aclose()
+
+
+async def test_aclose_does_not_mistake_internal_task_cancellation_for_its_own() -> None:
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    class _BlockingClient(_Client):
+        async def list_models(self) -> list[ModelSummary]:
+            started.set()
+            await release.wait()
+            return await super().list_models()
+
+    probes, _ = _probes(client=_BlockingClient())
+    discovery = asyncio.create_task(probes.discovered_models())
+    await started.wait()
+
+    async def close_after_suppressed_cancellation() -> None:
+        current = asyncio.current_task()
+        assert current is not None
+        current.cancel()
+        try:
+            await asyncio.sleep(0)
+        except asyncio.CancelledError:
+            pass
+        assert current.cancelling() == 1
+        await probes.aclose()
+
+    await asyncio.create_task(close_after_suppressed_cancellation())
+
+    assert discovery.cancelled()
+
+
+async def test_cancelled_hotkey_probe_is_stopped_after_physical_start_completes() -> None:
+    hotkeys = _BlockingHotkeys()
+    probes, _ = _probes(hotkeys=hotkeys)
+    probe = asyncio.create_task(probes.as_mapping()["hotkeys"]())
+    close: asyncio.Task[None] | None = None
+    close_waited_for_start = False
+    try:
+        assert await asyncio.to_thread(hotkeys.start_entered.wait, 1.0)
+        probe.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await probe
+
+        close = asyncio.create_task(probes.aclose())
+        await asyncio.sleep(0.05)
+        close_waited_for_start = not close.done()
+    finally:
+        hotkeys.release_start.set()
+    if close is not None:
+        await close
+
+    assert close_waited_for_start
+    assert hotkeys.started == hotkeys.stopped == 1
+    assert not hotkeys.stop_before_start_completed
+    assert not hotkeys.running
+
+
+@pytest.mark.parametrize("probe_name", ["system_audio", "lmlink_status"])
+async def test_aclose_drains_cancelled_thread_backed_probe(probe_name: str) -> None:
+    started = Event()
+    release = Event()
+    finished = Event()
+
+    def blocking_value(value):
+        started.set()
+        try:
+            if not release.wait(timeout=2.0):
+                raise RuntimeError("test readiness call was not released")
+            return value
+        finally:
+            finished.set()
+
+    devices = [
+        AudioDevice("loopback", "Speakers", True, 2),
+        AudioDevice("microphone", "Microphone", False, 1),
+    ]
+    audio_devices = _AudioDevices(devices)
+
+    def default_lmlink_status() -> str:
+        return '{"device":"Strix Halo"}'
+
+    lmlink_status: Callable[[], str] = default_lmlink_status
+    if probe_name == "system_audio":
+        audio_devices.list_devices = lambda: blocking_value(devices)  # type: ignore[method-assign]
+    else:
+        def blocked_lmlink_status() -> str:
+            return blocking_value('{"device":"Strix Halo"}')
+
+        lmlink_status = blocked_lmlink_status
+    probes, _ = _probes(
+        audio_devices=audio_devices,
+        lmlink_status=lmlink_status,
+    )
+    probe = asyncio.create_task(probes.as_mapping()[probe_name]())
+    close: asyncio.Task[None] | None = None
+    close_waited_for_thread = False
+    try:
+        assert await asyncio.to_thread(started.wait, 1.0)
+        probe.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await probe
+
+        close = asyncio.create_task(probes.aclose())
+        await asyncio.sleep(0.05)
+        close_waited_for_thread = not close.done()
+    finally:
+        release.set()
+    assert await asyncio.to_thread(finished.wait, 1.0)
+    if close is not None:
+        await close
+
+    assert close_waited_for_thread
 
 
 async def test_duplicate_loaded_model_instances_are_blocking() -> None:

@@ -54,6 +54,7 @@ class ReadinessRibbon(Protocol):
 
 
 WarmUpProbe = Callable[[ModelInstance], Awaitable[float | None]]
+STTWarmUpProbe = Callable[[], Awaitable[None]]
 BooleanAsyncProbe = Callable[[str], Awaitable[bool]]
 
 
@@ -73,6 +74,7 @@ class ProductionReadinessProbes:
         warm_up: WarmUpProbe,
         windows_composition: Callable[[], bool],
         cuda_device_count: Callable[[], int],
+        stt_warm_up: STTWarmUpProbe,
         lmlink_status: Callable[[], str],
         stt_fixture: BooleanAsyncProbe | None = None,
         mcp_probe: BooleanAsyncProbe | None = None,
@@ -88,6 +90,7 @@ class ProductionReadinessProbes:
         self.warm_up = warm_up
         self.windows_composition = windows_composition
         self.cuda_device_count = cuda_device_count
+        self.stt_warm_up = stt_warm_up
         self.lmlink_status = lmlink_status
         self.stt_fixture = stt_fixture
         self.mcp_probe = mcp_probe
@@ -97,6 +100,10 @@ class ProductionReadinessProbes:
         self._details_task: asyncio.Task[list[ModelDetails]] | None = None
         self._lmlink_task: asyncio.Task[str] | None = None
         self._warm_task: asyncio.Task[dict[str, float | None]] | None = None
+        self._dwm_task: asyncio.Task[bool] | None = None
+        self._cuda_count_task: asyncio.Task[int] | None = None
+        self._stt_warm_task: asyncio.Task[None] | None = None
+        self._hotkey_task: asyncio.Task[ProbeOutcome] | None = None
         self._fixture_lock = asyncio.Lock()
 
     def as_mapping(self) -> Mapping[str, ReadinessProbe]:
@@ -126,24 +133,78 @@ class ProductionReadinessProbes:
     async def aclose(self) -> None:
         """Cancel and drain cached single-flight work before a settings rebuild."""
 
-        tasks = tuple(
+        cancellable_tasks = tuple(
             task
             for task in (
-                self._devices_task,
                 self._models_task,
                 self._details_task,
-                self._lmlink_task,
                 self._warm_task,
             )
-            if task is not None and not task.done()
+            if task is not None
         )
-        for task in tasks:
-            task.cancel()
-        if tasks:
-            await asyncio.gather(*tasks, return_exceptions=True)
+        for cancellable_task in cancellable_tasks:
+            if not cancellable_task.done():
+                cancellable_task.cancel()
+        tracked_tasks = tuple(
+            task
+            for task in (
+                self._dwm_task,
+                self._devices_task,
+                self._cuda_count_task,
+                self._lmlink_task,
+                self._stt_warm_task,
+                self._hotkey_task,
+            )
+            if task is not None
+        )
+        cancellation: asyncio.CancelledError | None = None
+        for cancellable_task in cancellable_tasks:
+            task_cancellation = await self._drain_task(cancellable_task)
+            if cancellation is None:
+                cancellation = task_cancellation
+        for tracked_task in tracked_tasks:
+            task_cancellation = await self._drain_task(tracked_task)
+            if cancellation is None:
+                cancellation = task_cancellation
+        if cancellation is not None:
+            raise cancellation
+
+    @staticmethod
+    async def _drain_task(
+        task: asyncio.Task[object] | asyncio.Task[None],
+    ) -> asyncio.CancelledError | None:
+        cancellation: asyncio.CancelledError | None = None
+        current_task = asyncio.current_task()
+        while not task.done():
+            cancellation_count = (
+                current_task.cancelling() if current_task is not None else 0
+            )
+            try:
+                await asyncio.shield(task)
+            except asyncio.CancelledError as error:
+                caller_cancelled_during_await = (
+                    current_task is not None
+                    and current_task.cancelling() > cancellation_count
+                )
+                if cancellation is None and (
+                    caller_cancelled_during_await or not task.cancelled()
+                ):
+                    cancellation = error
+            except BaseException:
+                break
+        if task.done():
+            try:
+                task.exception()
+            except asyncio.CancelledError:
+                pass
+        return cancellation
 
     async def _windows_dwm(self) -> ProbeOutcome:
-        enabled = await asyncio.to_thread(self.windows_composition)
+        if self._dwm_task is None:
+            self._dwm_task = asyncio.create_task(
+                asyncio.to_thread(self.windows_composition)
+            )
+        enabled = await asyncio.shield(self._dwm_task)
         if not enabled:
             return ProbeOutcome("failed", "Windows DWM composition is unavailable")
         return ProbeOutcome("ready", "Windows DWM composition is enabled")
@@ -174,15 +235,31 @@ class ProductionReadinessProbes:
         if selected == self.config.audio.system_device_id:
             return ProbeOutcome("failed", "Microphone and system audio must be distinct")
         device = next((item for item in await self._devices() if item.id == selected), None)
-        if device is None or device.max_input_channels <= 0:
+        if device is None or device.is_loopback or device.max_input_channels <= 0:
             return ProbeOutcome("failed", "Selected microphone is unavailable")
         return ProbeOutcome("ready", "Selected microphone is available")
 
     async def _cuda_stt(self) -> ProbeOutcome:
-        count = await asyncio.to_thread(self.cuda_device_count)
+        if self._cuda_count_task is None:
+            self._cuda_count_task = asyncio.create_task(
+                asyncio.to_thread(self.cuda_device_count)
+            )
+        count = await asyncio.shield(self._cuda_count_task)
         if count <= 0:
             return ProbeOutcome("failed", "No CUDA device is available for streaming STT")
-        return ProbeOutcome("ready", f"CUDA exposes {count} device(s) for STT")
+        await self._warm_stt()
+        return ProbeOutcome(
+            "ready",
+            f"CUDA exposes {count} device(s); shared STT model inference completed",
+        )
+
+    async def _warm_stt(self) -> None:
+        if self._stt_warm_task is None:
+            self._stt_warm_task = asyncio.create_task(self._run_stt_warm_up())
+        await asyncio.shield(self._stt_warm_task)
+
+    async def _run_stt_warm_up(self) -> None:
+        await self.stt_warm_up()
 
     async def _stt_language(self, language: str) -> ProbeOutcome:
         fixture = self.stt_fixture
@@ -344,11 +421,21 @@ class ProductionReadinessProbes:
         return ProbeOutcome("ready", f"{integration} connectivity check passed")
 
     async def _hotkeys(self) -> ProbeOutcome:
-        await asyncio.to_thread(self.hotkeys.start)
+        if self._hotkey_task is None:
+            self._hotkey_task = asyncio.create_task(
+                asyncio.to_thread(self._run_hotkey_probe)
+            )
+        return await asyncio.shield(self._hotkey_task)
+
+    def _run_hotkey_probe(self) -> ProbeOutcome:
+        started = False
         try:
+            self.hotkeys.start()
+            started = True
             return ProbeOutcome("ready", "Global hotkey listener started successfully")
         finally:
-            await asyncio.to_thread(self.hotkeys.stop)
+            if started:
+                self.hotkeys.stop()
 
     async def _display_affinity(self) -> ProbeOutcome:
         result = self.ribbon.verify_capture_exclusion()

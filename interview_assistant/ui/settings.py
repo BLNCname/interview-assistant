@@ -139,6 +139,7 @@ class SettingsWindow(QMainWindow):
     start_requested = pyqtSignal()
     settings_saved = pyqtSignal()
     readiness_requested = pyqtSignal()
+    close_requested = pyqtSignal()
     GEOMETRY_KEY = "settings/geometry"
 
     def __init__(
@@ -157,6 +158,7 @@ class SettingsWindow(QMainWindow):
             else QSettings("InterviewAssistant", "InterviewAssistant")
         )
         self._readiness_report: ReadinessReport | None = None
+        self._controller_close = False
         self.setWindowTitle("Interview Assistant Settings")
         self.resize(820, 620)
         self._build_ui(audio_devices, models)
@@ -491,7 +493,16 @@ class SettingsWindow(QMainWindow):
         except (TypeError, ValueError, RuntimeError):
             return
 
+    def close_from_controller(self) -> None:
+        self._controller_close = True
+        try:
+            self.close()
+        finally:
+            self._controller_close = False
+
     def closeEvent(self, event: QCloseEvent | None) -> None:
         self._settings.setValue(self.GEOMETRY_KEY, self.saveGeometry())
         self._settings.sync()
+        if not self._controller_close:
+            self.close_requested.emit()
         super().closeEvent(event)

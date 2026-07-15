@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import gc
 from collections.abc import AsyncIterator, Mapping
 from pathlib import Path
 from threading import Thread
 from time import monotonic
+from weakref import ref
 
 import pytest
 from PyQt6.QtWidgets import QApplication
@@ -55,6 +57,16 @@ class _UnstoppableSTT(_Service):
         del timeout
         self.stop_count += 1
         return False
+
+
+class _WarmEngine:
+    pass
+
+
+class _EngineBackedSTT(_Service):
+    def __init__(self, engine: _WarmEngine) -> None:
+        super().__init__()
+        self.engine = engine
 
 
 class _Registry:
@@ -574,9 +586,6 @@ async def test_hotkey_actions_cover_pause_overlay_capture_search_clear_and_histo
     app.events.answer_reset.emit(99)
     app.events.answer_delta.emit(99, "temporary answer")
     assert app.ribbon.answer_text == "temporary answer"
-    app.events.answer_clear_requested.emit()
-    qtbot.waitUntil(lambda: app.ribbon.answer_text == "")
-
     await runtime.handle_hypothesis(
         TranscriptHypothesis(
             AudioSource.MICROPHONE,
@@ -588,8 +597,11 @@ async def test_hotkey_actions_cover_pause_overlay_capture_search_clear_and_histo
         )
     )
     assert len(services.transcript_store) == 1
-    runtime.clear_history()
-    assert len(services.transcript_store) == 0
+    app.events.answer_clear_requested.emit()
+    qtbot.waitUntil(
+        lambda: app.ribbon.answer_text == ""
+        and len(services.transcript_store) == 0
+    )
 
     await runtime.shutdown()
     app.events.screenshot_requested.emit()
@@ -764,6 +776,61 @@ async def test_resource_only_shutdown_preserves_ui_for_settings_rebuild(
     assert app.states.state.value != "stopped"
     assert not runtime.is_started
     app.shutdown()
+
+
+async def test_resource_only_shutdown_disconnects_actions_before_runtime_rebuild(
+    qtbot,
+    tmp_path: Path,
+) -> None:
+    app = InterviewApplication.for_test()
+    qtbot.addWidget(app.ribbon)
+    from interview_assistant.runtime import RuntimeHypothesisIngress
+
+    engine = _WarmEngine()
+    old_stt = _EngineBackedSTT(engine)
+    old_runtime, old_services, old_client = _runtime(
+        app,
+        stt=old_stt,
+        capture=_ParityCapture(tmp_path / "old.jpg"),
+    )
+    ingress = RuntimeHypothesisIngress(asyncio.get_running_loop())
+    old_services.hypothesis_ingress = ingress
+    ingress.bind(old_runtime.submit_hypothesis)
+    lifecycle = old_runtime._model_lifecycle
+    action_signals = (
+        app.events.force_request,
+        app.events.screenshot_requested,
+        app.events.pause_toggled,
+        app.events.overlay_visibility_toggled,
+        app.events.forced_search_requested,
+        app.events.answer_clear_requested,
+    )
+    assert all(app.events.receivers(signal) == 1 for signal in action_signals)
+    await old_runtime.start()
+    await old_runtime.shutdown(close_application=False)
+    assert all(app.events.receivers(signal) == 0 for signal in action_signals)
+
+    replacement, replacement_services, _ = _runtime(
+        app,
+        capture=_ParityCapture(tmp_path / "replacement.jpg"),
+    )
+    await replacement.start()
+    app.events.pause_toggled.emit()
+    await _wait_until(lambda: replacement_services.audio.pause_count == 1)
+
+    assert old_services.audio.pause_count == 0
+
+    runtime_ref = ref(old_runtime)
+    engine_ref = ref(engine)
+    del old_runtime, old_services, old_client, old_stt, engine
+    gc.collect()
+    QApplication.processEvents()
+    gc.collect()
+
+    assert runtime_ref() is None
+    assert engine_ref() is None
+    del lifecycle
+    await replacement.shutdown()
 
 
 async def test_stt_stop_timeout_is_reported_after_remaining_cleanup(

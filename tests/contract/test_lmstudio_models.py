@@ -15,6 +15,27 @@ from interview_assistant.lmstudio.models import (
 )
 
 
+def test_client_ignores_environment_proxy_configuration(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    class FakeAsyncClient:
+        def __init__(self, **kwargs: object) -> None:
+            captured.update(kwargs)
+
+    monkeypatch.setenv("HTTP_PROXY", "http://attacker.invalid:8080")
+    monkeypatch.setenv("NO_PROXY", "")
+    monkeypatch.setattr(
+        "interview_assistant.lmstudio.client.httpx.AsyncClient",
+        FakeAsyncClient,
+    )
+
+    LMStudioClient("127.0.0.1", 1234, "secret-token")
+
+    assert captured["trust_env"] is False
+
+
 FIXTURE_PATH = Path(__file__).parents[1] / "fixtures" / "lmstudio_models.json"
 
 

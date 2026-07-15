@@ -1,7 +1,7 @@
 import asyncio
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from typing import Generic, Literal, Protocol, TypeVar
+from typing import Generic, Literal, Protocol, TypeVar, cast
 
 from .models import ModelInstance
 
@@ -61,6 +61,13 @@ def _ignore_state(_state: str) -> None:
     return None
 
 
+async def _ignore_replay(
+    _instance: ModelInstance,
+    _request: RecoveryRequest[object],
+) -> None:
+    return None
+
+
 class ModelLifecycle(Generic[T]):
     _DELAYS = (0.5, 1.0, 2.0)
 
@@ -85,8 +92,31 @@ class ModelLifecycle(Generic[T]):
         self._offline: set[str] = set()
         self._last_replayed: dict[str, _ReplayedRequest] = {}
         self._submission_sequences: dict[str, int] = {}
+        self._closed = False
+
+    def close(self) -> None:
+        """Detach owner callbacks and discard recovery state after shutdown."""
+
+        if self._closed:
+            return
+        self._closed = True
+        self._replay = cast(
+            Callable[[ModelInstance, RecoveryRequest[T]], Awaitable[None]],
+            _ignore_replay,
+        )
+        self._on_state = _ignore_state
+        self._pending.clear()
+        self._locks.clear()
+        self._offline.clear()
+        self._last_replayed.clear()
+        self._submission_sequences.clear()
+
+    def _ensure_open(self) -> None:
+        if self._closed:
+            raise RuntimeError("Model lifecycle is closed")
 
     def submit(self, key: str, request: RecoveryRequest[T]) -> None:
+        self._ensure_open()
         self._submit(key, request)
 
     def _submit(
@@ -117,6 +147,7 @@ class ModelLifecycle(Generic[T]):
         request: RecoveryRequest[T] | None = None,
         manual_retry: bool = False,
     ) -> ModelInstance:
+        self._ensure_open()
         if request is not None:
             submission = self._submit(key, request)
             target_submission_seq = submission.target_submission_seq

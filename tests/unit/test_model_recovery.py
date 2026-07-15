@@ -1,6 +1,8 @@
 import asyncio
+import gc
 from dataclasses import FrozenInstanceError
 from typing import Generic, TypeVar
+from weakref import ref
 
 import pytest
 
@@ -775,3 +777,45 @@ def test_recovery_request_is_frozen() -> None:
 
     with pytest.raises(FrozenInstanceError):
         setattr(request, "request_id", 18)
+
+
+def test_close_is_idempotent_and_detaches_owner_callbacks() -> None:
+    class Owner:
+        async def replay(
+            self,
+            _instance: ModelInstance,
+            _request: RecoveryRequest[str],
+        ) -> None:
+            return None
+
+        def on_state(self, _state: str) -> None:
+            return None
+
+    async def no_op() -> None:
+        return None
+
+    async def warm_up(_instance: ModelInstance) -> None:
+        return None
+
+    async def sleep(_delay: float) -> None:
+        return None
+
+    owner = Owner()
+    owner_ref = ref(owner)
+    lifecycle = ModelLifecycle(
+        ScriptedRegistry([]),
+        cancel_active=no_op,
+        warm_up=warm_up,
+        replay=owner.replay,
+        sleeper=sleep,
+        on_state=owner.on_state,
+    )
+
+    lifecycle.close()
+    lifecycle.close()
+    del owner
+    gc.collect()
+
+    assert owner_ref() is None
+    with pytest.raises(RuntimeError, match="closed"):
+        lifecycle.submit("qwen3.5", RecoveryRequest(1, "question"))

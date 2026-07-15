@@ -71,6 +71,7 @@ class LMStudioClient:
             base_url=f"http://{url_host}:{port}",
             headers=headers,
             timeout=REQUEST_TIMEOUT_SECONDS,
+            trust_env=False,
         )
 
     async def __aenter__(self) -> "LMStudioClient":

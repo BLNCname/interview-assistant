@@ -1,6 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+from threading import Event
+
+import numpy as np
+import pytest
 
 from interview_assistant.app import InterviewApplication
 from interview_assistant.audio.worker import AudioWorker
@@ -12,6 +16,7 @@ from interview_assistant.composition import (
 )
 from interview_assistant.config import AppConfig
 from interview_assistant.diagnostics.readiness import READINESS_CHECK_NAMES
+from interview_assistant.stt.engine import TranscriptionResult
 from interview_assistant.stt.worker import StreamingSTTWorker
 from interview_assistant.utils.hotkeys import HotkeyAction, HotkeyManager
 
@@ -63,6 +68,76 @@ async def test_real_production_factory_wires_workers_without_starting_hardware(q
 
     await components.aclose()
     assert not app.is_shutdown
+    app.shutdown()
+
+
+async def test_stt_readiness_uses_worker_engine_and_close_drains_inference_thread(
+    qtbot,
+) -> None:
+    class BlockingEngine:
+        def __init__(self) -> None:
+            self.started = Event()
+            self.release = Event()
+            self.calls = 0
+            self.audio: np.ndarray | None = None
+
+        def __bool__(self) -> bool:
+            return False
+
+        def transcribe(
+            self,
+            audio: np.ndarray,
+            *,
+            beam_size: int,
+            condition_on_previous_text: bool,
+        ) -> TranscriptionResult:
+            assert beam_size == 1
+            assert not condition_on_previous_text
+            self.calls += 1
+            self.audio = audio
+            self.started.set()
+            if not self.release.wait(timeout=2.0):
+                raise RuntimeError("test inference was not released")
+            return TranscriptionResult("", "unknown", 0.0)
+
+    app = InterviewApplication.for_test()
+    qtbot.addWidget(app.ribbon)
+    engine = BlockingEngine()
+    components = build_production_components(
+        app,
+        _config(),
+        token=None,
+        loop=asyncio.get_running_loop(),
+        windows_composition=lambda: True,
+        cuda_device_count=lambda: 1,
+        lmlink_status=lambda: "{}",
+        stt_engine=engine,
+    )
+
+    assert components.runtime.services.stt.engine is engine
+    probe = asyncio.create_task(components.probes.as_mapping()["cuda_stt"]())
+    assert await asyncio.to_thread(engine.started.wait, 1.0)
+    probe.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await probe
+
+    close = asyncio.create_task(components.probes.aclose())
+    await asyncio.sleep(0)
+    assert not close.done()
+    close.cancel()
+    await asyncio.sleep(0)
+    close.cancel()
+    await asyncio.sleep(0)
+    assert not close.done()
+    engine.release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await close
+
+    assert engine.calls == 1
+    assert engine.audio is not None
+    assert engine.audio.dtype == np.float32
+    assert not np.any(engine.audio)
+    await components.aclose()
     app.shutdown()
 
 

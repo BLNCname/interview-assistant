@@ -163,6 +163,7 @@ class RuntimeHypothesisIngress:
     def close(self) -> None:
         with self._lock:
             self._closed = True
+            self._consumer = None
             self._finals.clear()
             self._partials.clear()
 
@@ -236,6 +237,7 @@ class ApplicationRuntime(QObject):
         self._paused = False
         self._desired_state = ApplicationState.STARTING
         self._recovered_search_results: dict[int, str] = {}
+        self._actions_connected = False
         self._model_lifecycle: ModelLifecycle[_PreparedRequest] = ModelLifecycle(
             services.registry,
             cancel_active=services.coordinator.cancel_active,
@@ -270,6 +272,29 @@ class ApplicationRuntime(QObject):
         events.overlay_visibility_toggled.connect(self._on_overlay_visibility_toggled)
         events.forced_search_requested.connect(self._on_forced_search_requested)
         events.answer_clear_requested.connect(self._on_answer_clear_requested)
+        self._actions_connected = True
+
+    def _disconnect_actions(self) -> None:
+        if not self._actions_connected:
+            return
+        events = self.application.events
+        for signal, slot in (
+            (events.force_request, self._on_force_request),
+            (events.screenshot_requested, self._on_screenshot_requested),
+            (events.pause_toggled, self._on_pause_toggled),
+            (
+                events.overlay_visibility_toggled,
+                self._on_overlay_visibility_toggled,
+            ),
+            (events.forced_search_requested, self._on_forced_search_requested),
+            (events.answer_clear_requested, self._on_answer_clear_requested),
+        ):
+            try:
+                signal.disconnect(slot)
+            except TypeError:
+                # Qt reports an already-disconnected exact slot as TypeError.
+                continue
+        self._actions_connected = False
 
     async def start(self) -> None:
         if self._closing or self._started:
@@ -618,6 +643,7 @@ class ApplicationRuntime(QObject):
         if self._closing:
             return
         self.application.ribbon.clear_answer()
+        self.services.transcript_store.clear()
 
     @pyqtSlot()
     def _on_force_request(self) -> None:
@@ -717,6 +743,13 @@ class ApplicationRuntime(QObject):
     async def _shutdown_once(self) -> None:
         errors: list[BaseException] = []
 
+        if "actions" not in self._shutdown_completed:
+            try:
+                self._disconnect_actions()
+            except BaseException as error:
+                errors.append(error)
+            else:
+                self._shutdown_completed.add("actions")
         if (
             self.services.hypothesis_ingress is not None
             and "hypothesis_ingress" not in self._shutdown_completed
@@ -761,8 +794,21 @@ class ApplicationRuntime(QObject):
             if action_tasks:
                 await asyncio.gather(*action_tasks, return_exceptions=True)
             self._shutdown_completed.add("action_tasks")
+        if "coordinator" not in self._shutdown_completed:
+            try:
+                await self.services.coordinator.cancel_active()
+            except BaseException as error:
+                errors.append(error)
+            else:
+                self._shutdown_completed.add("coordinator")
+        if "model_lifecycle" not in self._shutdown_completed:
+            try:
+                self._model_lifecycle.close()
+            except BaseException as error:
+                errors.append(error)
+            else:
+                self._shutdown_completed.add("model_lifecycle")
         for name, operation in (
-            ("coordinator", self.services.coordinator.cancel_active),
             ("capture", self.services.capture.shutdown),
             ("client", self.services.client.aclose),
         ):

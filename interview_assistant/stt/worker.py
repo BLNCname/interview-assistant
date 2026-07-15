@@ -201,7 +201,7 @@ class StreamingSTTWorker:
             )
             for source in AudioSource
         }
-        self._engine = engine or WhisperEngine()
+        self._engine = engine if engine is not None else WhisperEngine()
         self._on_hypothesis = on_hypothesis
         self._hypothesis_queue = output
         self._partial_interval_seconds = partial_interval_seconds
@@ -237,6 +237,10 @@ class StreamingSTTWorker:
     @property
     def hypothesis_queue(self) -> Queue[TranscriptHypothesis]:
         return self._hypothesis_queue
+
+    @property
+    def engine(self) -> TranscriptionEngine:
+        return self._engine
 
     @property
     def is_running(self) -> bool:

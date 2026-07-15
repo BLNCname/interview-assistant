@@ -11,6 +11,7 @@ from pathlib import Path
 from time import perf_counter
 from typing import Protocol, cast
 
+import numpy as np
 from platformdirs import user_config_path
 from PyQt6.QtCore import QObject, QSettings, pyqtSlot
 from PyQt6.QtWidgets import QApplication
@@ -40,7 +41,7 @@ from interview_assistant.runtime import (
     RuntimeServices,
 )
 from interview_assistant.state import ApplicationState, StateMachine
-from interview_assistant.stt.engine import WhisperEngine
+from interview_assistant.stt.engine import TranscriptionEngine, WhisperEngine
 from interview_assistant.stt.worker import StreamingSTTWorker
 from interview_assistant.transcript.detector import QuestionDetector
 from interview_assistant.transcript.store import TranscriptStore
@@ -137,6 +138,16 @@ async def _warm_model(client: LMStudioClient, instance: ModelInstance) -> float 
     if not saw_end:
         raise RuntimeError("LM Studio warm-up ended without chat.end")
     return first_delta_ms
+
+
+async def _warm_stt_engine(engine: TranscriptionEngine) -> None:
+    samples = np.zeros(1_600, dtype=np.float32)
+    await asyncio.to_thread(
+        engine.transcribe,
+        samples,
+        beam_size=1,
+        condition_on_previous_text=False,
+    )
 
 
 def _windows_composition_enabled() -> bool:
@@ -265,6 +276,7 @@ def build_production_components(
     windows_composition: Callable[[], bool] = _windows_composition_enabled,
     cuda_device_count: Callable[[], int] = _cuda_device_count,
     lmlink_status: Callable[[], str] = _lmlink_status_json,
+    stt_engine: TranscriptionEngine | None = None,
 ) -> ProductionComponents:
     """Build the real dependency graph without opening hardware or network resources."""
 
@@ -287,10 +299,12 @@ def build_production_components(
         system_queue = None
         microphone_queue = None
 
-    engine = WhisperEngine(
-        config.audio.stt_model,
-        device="cuda",
-        compute_type="float16",
+    engine = (
+        stt_engine
+        if stt_engine is not None
+        else WhisperEngine(
+            config.audio.stt_model, device="cuda", compute_type="float16"
+        )
     )
     stt = StreamingSTTWorker(
         system_queue,
@@ -343,6 +357,9 @@ def build_production_components(
     async def warm_for_probe(instance: ModelInstance) -> float | None:
         return await _warm_model(client, instance)
 
+    async def warm_stt_for_probe() -> None:
+        await _warm_stt_engine(engine)
+
     probes = ProductionReadinessProbes(
         config,
         audio_devices=AudioDeviceService(),
@@ -354,6 +371,7 @@ def build_production_components(
         warm_up=warm_for_probe,
         windows_composition=windows_composition,
         cuda_device_count=cuda_device_count,
+        stt_warm_up=warm_stt_for_probe,
         lmlink_status=lmlink_status,
     )
     readiness_runner = ReadinessRunner(build_readiness_checks(probes.as_mapping()))
@@ -394,6 +412,7 @@ class ApplicationController(QObject):
         self._closing = False
         self._shutdown_task: asyncio.Task[None] | None = None
         self._quit_task: asyncio.Task[None] | None = None
+        self.application.qt_app.setQuitOnLastWindowClosed(False)
         self._connect_signals()
 
     @property
@@ -403,6 +422,7 @@ class ApplicationController(QObject):
     def _connect_signals(self) -> None:
         self.settings.readiness_requested.connect(self._on_readiness_requested)
         self.settings.start_requested.connect(self._on_start_requested)
+        self.settings.close_requested.connect(self._on_settings_close_requested)
         self.application.events.settings_requested.connect(self._on_settings_requested)
         self.application.events.quit_requested.connect(self._on_quit_requested)
         self.application.events.notification.connect(self.settings.show_notification)
@@ -443,6 +463,7 @@ class ApplicationController(QObject):
                     return
                 self._detach_components(old)
                 self._deactivate_session_ui()
+                del old
                 if cancelled is not None:
                     raise cancelled
 
@@ -639,6 +660,12 @@ class ApplicationController(QObject):
         self.settings.activateWindow()
 
     @pyqtSlot()
+    def _on_settings_close_requested(self) -> None:
+        if self._closing or self._session_active:
+            return
+        self._on_quit_requested()
+
+    @pyqtSlot()
     def _on_quit_requested(self) -> None:
         if self._quit_task is not None:
             return
@@ -738,7 +765,7 @@ class ApplicationController(QObject):
                     errors.append(close_error)
             self._session_active = False
         try:
-            self.settings.close()
+            self.settings.close_from_controller()
         except BaseException as error:
             errors.append(error)
         try:

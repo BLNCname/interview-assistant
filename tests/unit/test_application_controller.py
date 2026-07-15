@@ -3,8 +3,10 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 from typing import Literal
+from weakref import ReferenceType, ref
 
 from PyQt6.QtCore import QSettings
+from PyQt6.QtWidgets import QApplication
 
 from interview_assistant.app import InterviewApplication
 from interview_assistant.composition import ApplicationController
@@ -120,6 +122,16 @@ class _Components:
 
     async def aclose(self) -> None:
         self.close_count += 1
+
+
+class _WarmEngine:
+    pass
+
+
+class _EngineComponents(_Components):
+    def __init__(self, report: ReadinessReport) -> None:
+        super().__init__(report)
+        self.engine = _WarmEngine()
 
 
 class _FailOnceCloseComponents(_Components):
@@ -248,6 +260,42 @@ async def test_readiness_rebuild_closes_old_components_and_uses_latest_config(
     await controller.shutdown()
     assert built[1][1].close_count == 1
     assert app.is_shutdown
+
+
+async def test_readiness_rebuild_releases_old_engine_before_new_factory_runs(
+    qtbot,
+    tmp_path: Path,
+) -> None:
+    app = InterviewApplication.for_test()
+    qtbot.addWidget(app.ribbon)
+    config = _config()
+    secrets = _Secrets()
+    settings = _settings(qtbot, tmp_path, config, secrets)
+    engine_ref: ReferenceType[_WarmEngine] | None = None
+    released_before_rebuild: list[bool] = []
+
+    def build(_candidate: AppConfig, _token: str | None) -> _EngineComponents:
+        nonlocal engine_ref
+        if engine_ref is not None:
+            released_before_rebuild.append(engine_ref() is None)
+        component = _EngineComponents(_report())
+        engine_ref = ref(component.engine)
+        return component
+
+    controller = ApplicationController(
+        app,
+        settings,
+        config,
+        secrets,
+        component_factory=build,
+        loop=asyncio.get_running_loop(),
+    )
+    await controller.initialize()
+
+    await controller.rerun_readiness()
+
+    assert released_before_rebuild == [True]
+    await controller.shutdown()
 
 
 async def test_failed_readiness_never_starts_runtime(qtbot, tmp_path: Path) -> None:
@@ -756,3 +804,128 @@ async def test_quit_request_awaits_cleanup_before_qapplication_quit(
     assert components.close_count == 1
     await controller.shutdown()
     assert components.close_count == 1
+
+
+async def test_settings_x_during_active_session_only_hides_settings(
+    qtbot,
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    app = InterviewApplication.for_test()
+    app.qt_app.setQuitOnLastWindowClosed(True)
+    qtbot.addWidget(app.ribbon)
+    config = _config()
+    secrets = _Secrets()
+    settings = _settings(qtbot, tmp_path, config, secrets)
+    components = _Components(_report())
+    controller = ApplicationController(
+        app,
+        settings,
+        config,
+        secrets,
+        component_factory=lambda _config, _token: components,
+        loop=asyncio.get_running_loop(),
+    )
+    quit_calls: list[bool] = []
+    monkeypatch.setattr(app.qt_app, "quit", lambda: quit_calls.append(True))
+    await controller.initialize()
+    await controller.start_session()
+    app.start()
+    app.states.transition(ApplicationState.LISTENING)
+    app.events.state_changed.emit(ApplicationState.LISTENING.value)
+    settings.show()
+    QApplication.processEvents()
+
+    assert not app.qt_app.quitOnLastWindowClosed()
+    assert settings.close()
+    QApplication.processEvents()
+    await asyncio.sleep(0)
+
+    assert not settings.isVisible()
+    assert app.ribbon.isVisible()
+    assert app.states.state is ApplicationState.LISTENING
+    assert components.close_count == 0
+    assert quit_calls == []
+    await controller.shutdown()
+
+
+async def test_settings_x_before_session_runs_explicit_awaited_quit(
+    qtbot,
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    app = InterviewApplication.for_test()
+    app.qt_app.setQuitOnLastWindowClosed(True)
+    qtbot.addWidget(app.ribbon)
+    config = _config()
+    secrets = _Secrets()
+    settings = _settings(qtbot, tmp_path, config, secrets)
+    components = _Components(_report())
+    controller = ApplicationController(
+        app,
+        settings,
+        config,
+        secrets,
+        component_factory=lambda _config, _token: components,
+        loop=asyncio.get_running_loop(),
+    )
+    quit_after_close_counts: list[int] = []
+    monkeypatch.setattr(
+        app.qt_app,
+        "quit",
+        lambda: quit_after_close_counts.append(components.close_count),
+    )
+    await controller.initialize()
+
+    assert settings.close()
+    QApplication.processEvents()
+
+    async def wait_for_quit() -> None:
+        while not quit_after_close_counts:
+            await asyncio.sleep(0)
+
+    await asyncio.wait_for(wait_for_quit(), timeout=1.0)
+    assert quit_after_close_counts == [1]
+    assert app.is_shutdown
+    await controller.shutdown()
+
+
+async def test_settings_x_during_readiness_cancels_probe_and_controller_close_does_not_recurse(
+    qtbot,
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    app = InterviewApplication.for_test()
+    app.qt_app.setQuitOnLastWindowClosed(True)
+    qtbot.addWidget(app.ribbon)
+    config = _config()
+    secrets = _Secrets()
+    settings = _settings(qtbot, tmp_path, config, secrets)
+    components = _Components(_report())
+    blocking = _BlockingRunner()
+    components.readiness = blocking
+    controller = ApplicationController(
+        app,
+        settings,
+        config,
+        secrets,
+        component_factory=lambda _config, _token: components,
+        loop=asyncio.get_running_loop(),
+    )
+    close_requests: list[bool] = []
+    settings.close_requested.connect(lambda: close_requests.append(True))
+    quit_calls: list[bool] = []
+    monkeypatch.setattr(app.qt_app, "quit", lambda: quit_calls.append(True))
+    initialization = asyncio.create_task(controller.initialize())
+    await blocking.started.wait()
+
+    assert settings.close()
+    QApplication.processEvents()
+    await asyncio.gather(initialization, return_exceptions=True)
+    await controller.shutdown()
+    await asyncio.sleep(0)
+
+    assert blocking.cancelled.is_set()
+    assert components.close_count == 1
+    assert close_requests == [True]
+    assert quit_calls == [True]
