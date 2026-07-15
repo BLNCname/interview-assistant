@@ -1,3 +1,4 @@
+import argparse
 import asyncio
 import sys
 from collections.abc import Callable
@@ -7,7 +8,12 @@ from typing import cast
 
 from PyQt6.QtWidgets import QApplication
 
-from interview_assistant.composition import ApplicationController, create_production_controller
+from interview_assistant.composition import (
+    ApplicationController,
+    create_production_controller,
+    default_config_path,
+)
+from interview_assistant.diagnostics.cli import run_no_gui_diagnostics
 
 
 QEventLoop = cast(
@@ -26,12 +32,48 @@ async def _finalize(
     await controller.shutdown()
 
 
+def _headless_diagnostic_exit_code(
+    argv: list[str],
+    *,
+    config_path: Path | None,
+) -> int | None:
+    arguments = argv[1:]
+    diagnostic_flags = {"--diagnostics", "--no-gui", "--diagnostics-output"}
+    if not any(flag in arguments for flag in diagnostic_flags):
+        return None
+
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument("--diagnostics", action="store_true")
+    parser.add_argument("--no-gui", action="store_true")
+    parser.add_argument("--diagnostics-output", type=Path)
+    parser.add_argument("--config", type=Path)
+    try:
+        options = parser.parse_args(arguments)
+    except SystemExit:
+        return 2
+    if not options.diagnostics or not options.no_gui:
+        return 2
+    selected_config = config_path or options.config or default_config_path()
+    return run_no_gui_diagnostics(
+        config_path=selected_config,
+        output_path=options.diagnostics_output,
+    )
+
+
 def main(
     argv: list[str] | None = None,
     *,
     config_path: Path | None = None,
 ) -> int:
-    qt_app = QApplication(list(sys.argv if argv is None else argv))
+    runtime_argv = list(sys.argv if argv is None else argv)
+    diagnostic_exit_code = _headless_diagnostic_exit_code(
+        runtime_argv,
+        config_path=config_path,
+    )
+    if diagnostic_exit_code is not None:
+        return diagnostic_exit_code
+
+    qt_app = QApplication(runtime_argv)
     loop = QEventLoop(qt_app)
     asyncio.set_event_loop(loop)
     controller = create_production_controller(

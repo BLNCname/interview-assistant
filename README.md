@@ -1,291 +1,304 @@
-# 🎤 Interview Assistant — AI Помощник для Собеседований
+# Interview Assistant
 
-Интеллектуальный помощник для прохождения технических собеседований в реальном времени. Слушает диалог, делает скриншоты и предоставляет ИИ-подсказки через незаметное overlay окно.
+Interview Assistant — Windows-приложение для согласованных учебных интервью и лабораторных демонстраций. Оно захватывает системный звук и микрофон, распознаёт русскую и английскую речь локальным `faster-whisper`, обнаруживает вопросы, при необходимости добавляет временный снимок экрана и стримит ответ из LM Studio в полупрозрачную ленту Liquid Ribbon.
 
-## ✨ Возможности
+Проект не предназначен для скрытого использования. Перед записью звука, захватом экрана, сетевым поиском или записью встречи необходимо получить согласие всех участников и соблюдать правила площадки.
 
-- 🎧 **Real-time аудио захват** — записывает системный звук (голос интервьюера) через WASAPI loopback
-- 🔊 **Мгновенная транскрипция** — faster-whisper с поддержкой русского языка (~3 сек задержка)
-- 📸 **Автоматические скриншоты** — нормальный режим (20с) и быстрый (5с) при детекции кода
-- 🤖 **Мультимодальный ИИ** — Qwen2.5-VL-7B понимает текст + изображения (код на экране)
-- ⌨️ **Горячие клавиши** — управление без мыши (тумблеры, пауза, принудительный запрос)
-- 🪟 **Невидимый overlay** — PyQt6 окно скрыто от демонстрации экрана и диспетчера задач
-- 🧠 **Умная детекция** — автоматически определяет вопросы и запросы на код
+## Что реализовано
 
-## 🏗️ Архитектура
+- Два независимых аудиоисточника: WASAPI loopback для собеседующего и обычный микрофон для кандидата.
+- Потоковое RU/EN-распознавание на основном ПК через `faster-whisper`/CTranslate2 CUDA.
+- Автоматическое обнаружение вопросов и ручной запрос по hotkey.
+- Event-driven снимки: автоматический захват только для задач, где экран нужен по смыслу, и ручной резервный hotkey.
+- Отбрасывание почти чёрных, защищённых и дублирующихся кадров; защищённый кадр не отправляется модели.
+- Нативный streaming endpoint LM Studio `POST /api/v1/chat`, `store: false`, текстовые и мультимодальные запросы.
+- Выбор моделей из `GET /v1/models`. Одну мультимодальную модель можно выбрать для текста и изображений: приложение использует один загруженный instance, а не две копии.
+- Однократное восстановление выгруженной модели и повтор последнего актуального запроса с сокращённым recovery-контекстом.
+- Ограниченный MCP retrieval: Context7 только для документации и локальный DuckDuckGo MCP только для поиска.
+- Полупрозрачная верхняя Liquid Ribbon, настройка opacity/height, сворачивание, перенос и сохранение геометрии.
+- Полный readiness gate и идемпотентное завершение audio/STT/capture/network/hotkey ресурсов.
+- Windows onedir-пакет `dist\InterviewAssistant\InterviewAssistant.exe`.
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│                    Interview Assistant                       │
-├─────────────────────────────────────────────────────────────┤
-│  ┌──────────────┐  ┌──────────────┐  ┌──────────────────┐   │
-│  │ Audio Capture│→ │ Transcriber  │→ │ Question Detector│   │
-│  │ (WASAPI)     │  │ (Whisper)    │  │ (NLP + Patterns) │   │
-│  └──────────────┘  └──────────────┘  └────────┬─────────┘   │
-│                                               ↓             │
-│  ┌──────────────┐  ┌──────────────┐  ┌──────────────────┐   │
-│  │Screen Capture│→ │Context Aggr. │← │  LLM Client      │   │
-│  │ (mss + hooks)│  │              │  │ (LMStudio API)   │   │
-│  └──────────────┘  └──────────────┘  └────────┬─────────┘   │
-│                                               ↓             │
-│                    ┌──────────────────┐                      │
-│                    │  Overlay GUI     │                      │
-│                    │ (PyQt6 + Win32)  │                      │
-│                    └──────────────────┘                      │
-└─────────────────────────────────────────────────────────────┘
-```
+## Архитектура развёртывания
 
-## 📋 Требования
+Все функции приложения выполняются на основном Windows-ПК:
 
-### Системные требования
-
-- **OS**: Windows 10/11 (64-bit)
-- **RAM**: 16GB+ (рекомендуется 32GB+)
-- **GPU**: AMD ROCm (gfx1151), NVIDIA CUDA, или CPU (медленнее)
-- **VRAM**: 8GB+ для мультимодальных моделей
-
-### Программные требования
-
-- **Python**: 3.10+
-- **LMStudio**: Запущен локально на `localhost:1234`
-- **Модель**: Qwen2.5-VL-7B-Instruct-GGUF (или аналогичная мультимодальная)
-
-## 🚀 Установка
-
-### 1. Клонирование/создание проекта
-
-```bash
-cd interview-assistant
+```text
+Teams + microphone + display
+          │
+          ▼
+InterviewAssistant.exe (основной ПК)
+  WASAPI → CUDA STT → detector → context → Liquid Ribbon
+                           │
+                           ▼
+                 LM Studio API на 127.0.0.1
+                           │
+              LM Link → Strix Halo (только inference)
+                           │
+                 Context7 / DuckDuckGo MCP
 ```
 
-### 2. Создание виртуального окружения
+Strix Halo не запускает UI, аудиозахват, STT или screenshot worker. Он используется как inference-устройство через LM Link. Клиент намеренно принимает только loopback-адрес LM Studio; сетевой маршрут к inference-хосту остаётся ответственностью LM Studio/LM Link.
 
-```bash
-python -m venv .venv
-.venv\Scripts\activate  # Windows
-# source .venv/bin/activate  # Linux/Mac
+## Требования
+
+### Основной ПК
+
+- Windows 11 x64 с включённым Desktop Window Manager.
+- Python 3.11 или 3.12 для запуска из исходников и сборки.
+- NVIDIA GPU и драйвер/CUDA runtime, совместимые с установленным CTranslate2, для рабочей потоковой STT-сессии.
+- Доступные и разные устройства: WASAPI loopback системного звука и микрофон.
+- Разрешение Windows на доступ к микрофону.
+
+CPU подходит для тестов, сборки и `--diagnostics --no-gui`, но текущий production-профиль STT создаёт `WhisperEngine(device="cuda", compute_type="float16")`. Интерактивная сессия без NVIDIA CUDA readiness gate не проходит.
+
+### Inference
+
+- [LM Studio 0.4+](https://lmstudio.ai/docs/developer/rest) и CLI `lms` на основном ПК.
+- LM Link, связанный со Strix Halo; статус должен читаться командой `lms link status --json`.
+- Одна или две подходящие модели, видимые локальному серверу LM Studio. Для screenshot-вопросов vision slot должен указывать на мультимодальную модель.
+
+LM Studio не документирует в REST-ответе гарантированный физический placement конкретного instance. Readiness показывает наличие имени preferred device в LM Link status, но это предупреждение, а не доказательство маршрутизации. Проверяйте фактическое устройство в LM Studio и на Strix Halo.
+
+## Установка из исходников
+
+Установите [`uv`](https://docs.astral.sh/uv/getting-started/installation/), затем в
+PowerShell из корня репозитория выполните frozen-синхронизацию:
+
+```powershell
+uv lock --check
+uv sync --extra dev --frozen
+uv run --extra dev --frozen pytest -q
 ```
 
-### 3. Установка зависимостей
+`pyproject.toml` задаёт диапазоны зависимостей, а проверенный в репозитории `uv.lock`
+фиксирует воспроизводимое разрешение вместе с dev extra. Поведение frozen sync описано в
+[официальной документации uv](https://docs.astral.sh/uv/concepts/projects/sync/).
+`requirements.txt` оставлен только как compatibility shim (`-e .`): это не lock-файл и
+не канонический путь для воспроизводимой установки.
 
-```bash
-pip install -r requirements.txt
+Здесь воспроизводимость означает одинаковое locked-разрешение зависимостей для выбранного
+поддерживаемого Python 3.11 или 3.12. Она не обещает побайтово одинаковый EXE между разными
+версиями Python, Windows SDK, PyInstaller или другой сборочной toolchain.
+
+## LM Studio и LM Link
+
+1. Установите LM Studio 0.4+ и включите Local Server на основном ПК.
+2. Свяжите Strix Halo по официальной инструкции [LM Link](https://lmstudio.ai/docs/developer/core/lmlink).
+3. Проверьте `lms link status --json`.
+4. Оставьте endpoint приложения на `127.0.0.1:1234` (или другом локальном порту LM Studio).
+5. Загрузите нужную модель на Strix Halo и убедитесь, что она видна в `GET http://127.0.0.1:1234/v1/models`.
+6. В Settings нажмите Run checks, выберите устройства и модели, затем снова запустите проверки.
+
+### Аутентификация
+
+LM Studio поддерживает API tokens; см. [официальную документацию](https://lmstudio.ai/docs/developer/core/authentication). Введите token в Settings. Приложение сохраняет его в Windows Credential Manager под service `InterviewAssistant`, а не в YAML. Поле `lmstudio.api_token` в конфигурации намеренно отвергается.
+
+HTTP-клиент не доверяет `HTTP_PROXY`/`HTTPS_PROXY`, поэтому loopback token, transcript и image data URL не уходят в системный proxy. Не публикуйте LM Studio API в LAN напрямую: приложение рассчитано на локальный endpoint и LM Link.
+
+### Одна модель для двух ролей
+
+Settings получает ключи моделей через `GET /v1/models`. Можно выбрать один и тот же key в полях Text model и Vision model. Registry дедуплицирует ключи и повторно использует тот же LM Studio instance ID. Отдельные модели создаются только для разных ключей.
+
+## Конфигурация
+
+После первого запуска приложение использует:
+
+```text
+%LOCALAPPDATA%\InterviewAssistant\InterviewAssistant\config.yaml
 ```
 
-### 4. Настройка LMStudio
-
-1. **Скачайте модель** через Hugging Face:
-   ```
-   bartowski/Qwen2.5-VL-7B-Instruct-GGUF
-   ```
-   
-2. **Загрузите модель в LMStudio**:
-   - Откройте LMStudio
-   - Перейдите во вкладку "Local Server"
-   - Загрузите модель `Qwen2.5-VL-7B-Instruct-Q4_K_M.gguf`
-   - Нажмите "Start Server"
-
-3. **Проверьте подключение**:
-   ```bash
-   curl http://localhost:1234/v1/models
-   ```
-
-### 5. Настройка конфигурации
-
-Отредактируйте `config.yaml` под ваши нужды:
+Пример без секретов:
 
 ```yaml
-# LMStudio настройки
-lmstudio:
-  host: "localhost"
-  port: 1234
-
-# Модель (мультимодальная)
-model:
-  name: "Qwen/Qwen2.5-VL-7B-Instruct-GGUF"
-  quantization: "Q4_K_M"  # Q4_K_M, Q5_K_M, Q8_0
-  
-# Аудио (WASAPI loopback)
 audio:
-  transcription_model: "distil-large-v3"  # Быстрая транскрипция
-  
-# Скриншоты
-screen:
-  normal_interval: 20  # секунд в обычном режиме
-  fast_interval: 5     # секунд при детекции кода
-
-# Горячие клавиши
-hotkeys:
-  toggle_fast_mode: "Ctrl+Shift+S"    # Тумблер быстрого режима
-  pause_assistant: "Ctrl+Shift+A"     # Пауза/возобновление
-  force_request: "Ctrl+Shift+R"       # Принудительный запрос к ИИ
+  system_device_id: null
+  microphone_device_id: null
+  sample_rate: 16000
+  language: auto
+  stt_model: large-v3-turbo
+lmstudio:
+  host: 127.0.0.1
+  port: 1234
+  text_model: ""
+  vision_model: ""
+  preferred_device_name: "Strix Halo"
+capture:
+  mode: event
+  persistent_screenshots: false
+  black_frame_threshold: 0.92
+search:
+  mode: auto
+  provider: duckduckgo
+  timeout_seconds: 5.0
+overlay:
+  opacity: 0.88
+  max_height: 360
 ```
 
-## 🎮 Использование
+Обычно YAML не нужно редактировать вручную: выбор устройств, языка, моделей, режима поиска и overlay доступен в Settings. Повреждённый файл не перезаписывается автоматически.
 
-### Запуск приложения
+## MCP: актуальная документация и поиск
 
-```bash
-python main.py
+LM Studio владеет MCP-процессами и вызывает их в рамках native chat API; приложение передаёт только allowlisted integration IDs/tools. Полный transcript и screenshot в поисковый запрос не включаются. Текущий вопрос очищается от имён, e-mail, URL с чувствительными query-параметрами и transcript metadata.
+
+Разрешены только:
+
+- `mcp/context7`: `resolve-library-id`, `query-docs`;
+- `mcp/duckduckgo`: `search`.
+
+Нет shell, filesystem-write, form submission, произвольного browser automation или произвольного page fetch.
+
+### Установка бесплатного DuckDuckGo MCP
+
+В репозитории закреплён [nickclyde/duckduckgo-mcp-server](https://github.com/nickclyde/duckduckgo-mcp-server) `v0.5.0`/commit `8992977d65a086995c82826ceead42e890aa17c1` и hash-locked зависимости:
+
+```powershell
+py -3.11 -m venv tools\duckduckgo-mcp\.venv
+.\tools\duckduckgo-mcp\.venv\Scripts\python -m pip install --require-hashes -r tools\duckduckgo-mcp\build-requirements.lock
+.\tools\duckduckgo-mcp\.venv\Scripts\python -m pip install --no-build-isolation --require-hashes -r tools\duckduckgo-mcp\requirements.lock
 ```
 
-Приложение запустит:
-- ✅ Audio Capture (системный звук)
-- ✅ Realtime Transcriber (faster-whisper)
-- ✅ Screen Capture (скриншоты каждые 20с)
-- ✅ Hotkey Manager (горячие клавиши)
-- ✅ Overlay GUI (подсказки в углу экрана)
+Создайте bounded `mcp.json`, передав существующую директорию конфигурации LM Studio и абсолютный путь к executable:
 
-### Горячие клавиши
+```powershell
+.\.venv\Scripts\python scripts\configure_mcp.py `
+  --config-dir "C:\absolute\existing\lmstudio-config-dir" `
+  --duckduckgo-executable "$PWD\tools\duckduckgo-mcp\.venv\Scripts\duckduckgo-mcp-server.exe"
+```
+
+Helper делает резервную копию только распознанной безопасной конфигурации и отказывается объединять неизвестные серверы или secret-like поля.
+
+[Context7](https://github.com/upstash/context7) подключается к `https://mcp.context7.com/mcp`. Это удалённый сервис, а не локальный компонент; его владельцы рекомендуют API key для больших лимитов. Текущий bounded template использует endpoint без ключа и не записывает secrets в `mcp.json`. DuckDuckGo MCP запускается локально, но поисковые запросы всё равно уходят в интернет к внешнему поисковому сервису. В LM Studio разрешите вызовы только серверов из проверенного `mcp.json`; см. [LM Studio MCP](https://lmstudio.ai/docs/developer/core/mcp).
+
+## Запуск
+
+Из исходников:
+
+```powershell
+.\.venv\Scripts\python main.py
+```
+
+Из onedir-пакета:
+
+```powershell
+.\dist\InterviewAssistant\InterviewAssistant.exe
+```
+
+На старте Settings запускает readiness для DWM, двух audio devices, CUDA/STT, LM Studio auth, LM Link, model discovery/load/dedup, MCP, hotkeys, capture affinity, event capture и streaming TTFT. Start становится доступен только после обязательных проверок. Некоторые интеграционные проверки имеют статус warning, если их нельзя доказать без реального tool request или аппаратного теста.
+
+### Hotkeys
 
 | Комбинация | Действие |
-|------------|----------|
-| `Ctrl+Shift+S` | **Тумблер быстрого режима** — скриншоты каждые 5 сек |
-| `Ctrl+Shift+A` | **Пауза/возобновление** всего ассистента |
-| `Ctrl+Shift+R` | **Принудительный запрос** к ИИ с текущим скриншотом |
+|---|---|
+| `Ctrl+Shift+Space` | Отправить последний финальный вопрос вручную |
+| `Ctrl+Shift+S` | Подготовить временный снимок для следующего запроса |
+| `Ctrl+Shift+P` | Пауза/возобновление аудиозахвата |
+| `Ctrl+Shift+O` | Показать/скрыть Ribbon локально |
+| `Ctrl+Shift+W` | Принудительно включить web search для следующего запроса |
+| `Ctrl+Shift+C` | Очистить ответ и transcript history в памяти |
 
-### Автоматические триггеры
+Кнопки Ribbon также открывают Settings и выполняют явный Quit. Закрытие Settings во время активной сессии не завершает приложение.
 
-Приложение автоматически:
-1. **Детектирует вопросы** от интервьюера (NLP паттерны)
-2. **Включает быстрый режим** при запросах на код ("напишите код", "реализуйте функцию")
-3. **Делает скриншот** сразу после детекции кода
-4. **Запрашивает ответ у ИИ** с контекстом (транскрипт + скриншот)
+## Диагностика и сборка
 
-### Интерфейс Overlay
+### CPU/no-GUI smoke
 
-- **Позиция**: Правый нижний угол (настраивается в `config.yaml`)
-- **Прозрачность**: 90% (можно кликнуть и перетащить)
-- **Статус бар**: Показывает состояние ("Активен", "Приостановлен")
-- **Уведомления**: Всплывающие сообщения о событиях
+Режим не создаёт `QApplication`, не открывает audio devices, не загружает модель и не делает сетевые запросы. Он проверяет замороженные imports, metadata, config schema и доступные CTranslate2 backends. Отсутствие CUDA — warning, а не ошибка:
 
-## 🔧 Настройка под себя
-
-### Изменение позиции overlay окна
-
-```yaml
-overlay:
-  position: "bottom-right"  # top-left, top-right, bottom-left, bottom-right
-  offset_x: 20
-  offset_y: 100
-  width: 450
-  height: 300
+```powershell
+.\.venv\Scripts\python main.py --diagnostics --no-gui --diagnostics-output .\build\source-diagnostics.json
 ```
 
-### Выбор модели транскрипции
+Для `console=False` executable всегда указывайте файл отчёта:
 
-- `distil-large-v3` — **быстрее**, хорошая точность (рекомендуется)
-- `medium` — медленнее, но точнее для русского языка
-- `large-v3` — самая точная, но требует больше ресурсов
-
-### Изменение порогов детекции
-
-```yaml
-context:
-  question_detection_threshold: 0.7  # Порог уверенности (0.0-1.0)
-  conversation_window: 30            # Секунды контекста диалога
-  
-  code_detection_keywords:
-    - "напишите код"
-    - "реализуйте функцию"
-    - "решите задачу"
-    - "implement"
-    - "write code"
+```powershell
+.\dist\InterviewAssistant\InterviewAssistant.exe --diagnostics --no-gui --diagnostics-output .\build\packaged-diagnostics.json
 ```
 
-## 🐛 Устранение проблем
+JSON пишется атомарно и не содержит путей конфигурации, model keys, tokens или transcript.
 
-### LMStudio не подключается
+### CUDA smoke
 
-**Ошибка**: `LMStudio не запущен! Проверьте, что сервер работает на localhost:1234`
+CUDA verifier загружает `audio.stt_model` из указанного config с `device="cuda"`, прогоняет bundled 2.0-second synthetic PCM WAV, форсирует чтение всех segments и выводит JSON с model-load time, transcription time и real-time factor. Успешный отчёт отмечает источник модели как `configured`, но не раскрывает её идентификатор или локальный путь:
 
-**Решение**:
-1. Откройте LMStudio
-2. Перейдите во вкладку "Local Server"
-3. Нажмите "Start Server"
-4. Убедитесь, что порт 1234 свободен (`netstat -ano | findstr :1234`)
-
-### Аудио не записывается
-
-**Ошибка**: `Устройство loopback не найдено`
-
-**Решение**:
-1. Откройте "Звук" → "Запись"
-2. Включите "Stereo Mix" (если есть)
-3. Или установите конкретное устройство в `config.yaml`:
-   ```yaml
-   audio:
-     device_index: 1  # Номер устройства из списка
-   ```
-
-### Скриншоты не скрываются от демо-режима
-
-**Проблема**: Окно видно при демонстрации экрана
-
-**Решение**: Убедитесь, что запущена Windows версия (не WSL). Overlay использует `WS_EX_TOOLWINDOW` флаг, который работает только на нативном Windows.
-
-### Медленная транскрипция
-
-**Проблема**: Задержка > 5 секунд
-
-**Решение**:
-1. Используйте GPU-ускорение (ROCm для AMD / CUDA для NVIDIA)
-2. Переключитесь на `distil-large-v3` модель
-3. Уменьшите `buffer_duration` в `config.yaml` до 2.0 сек
-
-## 📂 Структура проекта
-
-```
-interview-assistant/
-├── main.py                 # Точка входа, оркестрация компонентов
-├── config.yaml             # Конфигурация приложения
-├── requirements.txt        # Зависимости Python
-├── README.md              # Эта документация
-├── prompts/
-│   └── interview_system.md # System prompt для ИИ
-├── src/
-│   ├── __init__.py
-│   ├── multimodal_client.py    # LMStudio API клиент (текст + изображения)
-│   ├── audio_capture.py        # WASAPI loopback захват звука
-│   ├── transcriber.py          # Faster-whisper real-time транскрипция
-│   ├── screen_capture.py       # Скриншоты с подавлением уведомлений
-│   ├── question_detector.py    # Детекция вопросов и кода (NLP)
-│   ├── context_aggregator.py   # Сборка контекста для ИИ
-│   └── overlay_gui.py          # PyQt6 overlay окно
-└── utils/
-    ├── __init__.py
-    └── hotkeys.py              # Менеджер горячих клавиш (pynput)
+```powershell
+.\.venv\Scripts\python scripts\verify_cuda.py --config "$env:LOCALAPPDATA\InterviewAssistant\InterviewAssistant\config.yaml"
 ```
 
-## 🔐 Конфиденциальность
+Он возвращает ненулевой код при отсутствии CUDA, модели, fixture или inference. Синтетический fixture проверяет только целостность CUDA/runtime и не измеряет точность RU/EN. Реальные языковые метрики требуют согласованного корпуса на RTX-машине. Модельные веса не входят в пакет; `faster-whisper` использует заранее доступный cache либо скачивает модель согласно собственным правилам.
 
-- **Все локально**: Никаких данных не отправляется в облако
-- **LMStudio работает офлайн**: Модель загружена на ваш компьютер
-- **Нет логирования диалогов**: По умолчанию транскрипты не сохраняются (можно включить в `config.yaml`)
-- **Открытый исходный код**: Вы можете проверить, что делает программа
+### Воспроизводимая onedir-сборка
 
-## 🚀 Будущие улучшения
+```powershell
+.\scripts\build.ps1
+```
 
-- [ ] Поддержка нескольких языков (английский + русский переключение)
-- [ ] OCR для скриншотов (tesseract/pytesseract)
-- [ ] Кэширование ответов ИИ (повторяющиеся вопросы)
-- [ ] Экспорт диалогов в Markdown после собеседования
-- [ ] Интеграция с VS Code (подсветка кода в реальном времени)
-- [ ] Поддержка Ollama вместо LMStudio
+Скрипт сначала требует `uv`, отдельно выполняет `uv lock --check`, а затем `uv sync --extra dev --frozen`; отсутствующий или устаревший `uv.lock` останавливает сборку даже с `-SkipTests`. Затем он запускает тесты, задаёт `SOURCE_DATE_EPOCH` из текущего Git commit, отключает недетерминированный hash seed, собирает `console=False`/`onedir` через PyInstaller и запускает packaged no-GUI diagnostics с гарантированно отсутствующим тестовым config. На AMD development machine этого достаточно:
 
-## 📝 Лицензия
+```powershell
+.\scripts\build.ps1 -SkipTests
+```
 
-MIT License — используйте свободно, модифицируйте, распространяйте.
+На RTX 5070 Ti добавьте обязательную CUDA-проверку:
 
-## ⚠️ Disclaimer
+```powershell
+.\scripts\build.ps1 -VerifyCuda -ConfigPath "$env:LOCALAPPDATA\InterviewAssistant\InterviewAssistant\config.yaml"
+```
 
-Этот инструмент предназначен для **помощи в обучении** и подготовке к собеседованиям. Используйте его этично:
-- Не обманывайте интервьюера
-- Используйте как "тренировочного партнёра", а не как способ списать
-- Некоторые компании могут запрещать использование таких инструментов
+Результат: `dist\InterviewAssistant\InterviewAssistant.exe`. Пакет включает Python/PyQt6/native runtime/VAD assets и synthetic fixture, но не включает скачанные Whisper/LLM weights, MCP virtual environment или пользовательские secrets.
 
-**Автор не несёт ответственности за неправильное использование этого ПО.**
+## Приватность и ограничения безопасности
 
----
+- Процесс имеет обычное имя `InterviewAssistant.exe`, видим в Task Manager и не маскируется под системный процесс.
+- Ribbon использует Windows `SetWindowDisplayAffinity(WDA_EXCLUDEFROMCAPTURE)` как best-effort. Это не security boundary и не обещание отсутствия окна в Teams, OBS, записи или снимке экрана.
+- `Qt.Tool` влияет на локальное поведение окна, но сам по себе ничего не исключает из screen sharing.
+- Приложение не отключает и не подавляет уведомления третьих программ о screenshot/recording. Сам факт захвата может быть обнаружен программой, Teams, ОС или политикой организации.
+- DRM/защищённые окна не взламываются. Почти чёрный кадр помечается как protected, удаляется из visual request, а audio/manual text path продолжает работу.
+- Event screenshots хранятся во временной директории, максимум три файла, и удаляются при штатном shutdown. `persistent_screenshots: true` не включает постоянное хранение и даёт readiness warning.
+- Transcript history находится в памяти процесса и очищается hotkey/при завершении. Это не предотвращает данные в памяти ОС, crash dump, LM Studio logs или Teams recording.
+- LM Studio/LM Link передаёт prompt и image на выбранное inference-устройство. MCP передаёт очищенный текущий вопрос внешним Context7/DuckDuckGo; полностью offline privacy при включённом search невозможна.
+- Ответ модели может быть неверным или устаревшим. Проверяйте технические и особенно security-critical утверждения.
 
-Создано с ❤️ для помощи в карьерном росте. Удачи на собеседованиях! 🚀
+## Teams: обязательная full-screen приёмка
+
+Capture exclusion зависит от версии Windows, DWM, GPU driver и механизма захвата Teams. Перед демонстрацией нельзя делать заявление о невидимости без отдельного теста:
+
+1. Получите согласие преподавателя/второго участника и при необходимости согласие на запись.
+2. Подключите второе устройство как независимого наблюдателя.
+3. В Teams поделитесь всем primary display, а не отдельным окном.
+4. Откройте, переместите, измените размер и сверните/разверните Ribbon; запустите streaming ответа и event screenshot.
+5. Проверьте live view второго участника и запись встречи.
+6. Зафиксируйте версии Windows, Teams и GPU driver, а также результат readiness `display_affinity`.
+7. Если Ribbon виден хотя бы в одном канале, приёмка провалена: не скрывайте результат и не используйте этот режим как доказательство capture exclusion.
+
+## Финальная аппаратная валидация
+
+Пошаговый протокол находится в [scripts/teams_acceptance.md](scripts/teams_acceptance.md), а заполняемый журнал — в [docs/validation/acceptance-template.md](docs/validation/acceptance-template.md). Отчёт принимает только timing/metadata/booleans: transcript, prompt, answer, audio, pixels и credentials запрещены схемой.
+
+Сначала безопасно проверьте сам recorder на любой машине:
+
+```powershell
+.\.venv\Scripts\python scripts\benchmark_session.py --mode self-test --report docs\validation\self-test.jsonl
+```
+
+Этот режим может подтвердить только `harness_self_test: PASS`; synthetic data не является аппаратным доказательством, поэтому его итог всегда `overall_acceptance: NOT_RUN`.
+
+После согласованного RTX/Strix Halo/Teams прогона преобразуйте наблюдаемые события:
+
+```powershell
+.\.venv\Scripts\python scripts\benchmark_session.py --mode event-input --events-input C:\secure-evidence\session-events.jsonl --report docs\validation\latest.jsonl --session-id rtx-teams-YYYYMMDD-NN
+```
+
+`overall_acceptance: PASS` допустим только при полном observed evidence для RU/EN STT, LM Link recovery, event capture, Teams full-screen, protected-content fallback и shutdown. Незапущенная проверка остаётся `NOT_RUN`, а наблюдаемое несоответствие — `FAIL`; self-test не повышает этот статус.
+
+## Разработка
+
+```powershell
+.\.venv\Scripts\python -m pytest -q --cov=interview_assistant --cov-report=term-missing
+.\.venv\Scripts\python -m ruff check interview_assistant tests scripts main.py
+.\.venv\Scripts\python -m mypy interview_assistant main.py
+.\.venv\Scripts\python -m compileall -q interview_assistant scripts main.py
+```
+
+Дизайн и пошаговый implementation plan находятся в `docs/superpowers/specs/2026-07-12-interview-assistant-design.md` и `docs/superpowers/plans/2026-07-12-interview-assistant-implementation.md`.

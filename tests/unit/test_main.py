@@ -57,6 +57,68 @@ class _EventLoop:
         self._loop.run_forever()
 
 
+def test_headless_diagnostics_return_before_qapplication_creation(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    diagnostic = getattr(main_module, "run_no_gui_diagnostics", None)
+    assert callable(diagnostic), "Task 16 no-GUI diagnostics are not implemented"
+    output_path = tmp_path / "diagnostics.json"
+    calls: list[tuple[Path | None, Path | None]] = []
+
+    def run_diagnostics(
+        *,
+        config_path: Path | None,
+        output_path: Path | None,
+    ) -> int:
+        calls.append((config_path, output_path))
+        return 0
+
+    monkeypatch.setattr(main_module, "run_no_gui_diagnostics", run_diagnostics)
+
+    class _ForbiddenApplication:
+        def __init__(self, _argv: list[str]) -> None:
+            raise AssertionError("QApplication must not be created in no-GUI mode")
+
+    monkeypatch.setattr(main_module, "QApplication", _ForbiddenApplication)
+
+    result = main_module.main(
+        [
+            "InterviewAssistant.exe",
+            "--diagnostics",
+            "--no-gui",
+            "--diagnostics-output",
+            str(output_path),
+        ],
+        config_path=tmp_path / "config.yaml",
+    )
+
+    assert result == 0
+    assert calls == [(tmp_path / "config.yaml", output_path)]
+
+
+def test_headless_diagnostics_use_default_config_when_no_override_is_given(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    default_path = tmp_path / "default-config.yaml"
+    calls: list[Path | None] = []
+
+    monkeypatch.setattr(main_module, "default_config_path", lambda: default_path)
+    monkeypatch.setattr(
+        main_module,
+        "run_no_gui_diagnostics",
+        lambda *, config_path, output_path: calls.append(config_path) or 0,
+    )
+
+    result = main_module.main(
+        ["InterviewAssistant.exe", "--diagnostics", "--no-gui"]
+    )
+
+    assert result == 0
+    assert calls == [default_path]
+
+
 def test_main_uses_one_qasync_loop_and_awaits_shutdown(
     monkeypatch,
     tmp_path: Path,
