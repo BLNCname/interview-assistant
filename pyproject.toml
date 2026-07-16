@@ -25,6 +25,11 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+cuda = [
+  "nvidia-cuda-runtime-cu12==12.9.79",
+  "nvidia-cublas-cu12==12.9.2.10",
+  "nvidia-cudnn-cu12==8.9.7.29",
+]
 dev = [
   "pytest>=8,<9",
   "pytest-asyncio>=0.24,<1",

@@ -150,7 +150,7 @@ uv sync --extra dev --frozen
 
 Expected: import path ends in `\interview_assistant\__init__.py`, not `\src\...`.
 
-- [ ] **Step 5: Commit package-layout repair**
+- [x] **Step 5: Commit package-layout repair**
 
 ```powershell
 git add .gitignore pyproject.toml tests/unit/test_package.py
@@ -172,7 +172,7 @@ git commit -m "build: make package discovery deterministic"
 - Produces: `configure_cuda_runtime(search_directories: Iterable[Path] | None = None, add_directory: Callable[[str], object] | None = None) -> CudaRuntimeStatus`.
 - Required DLL names: `cudart64_12.dll`, `cublas64_12.dll`, `cublasLt64_12.dll`, `cudnn64_8.dll`.
 
-- [ ] **Step 1: Write failing runtime-discovery tests**
+- [x] **Step 1: Write failing runtime-discovery tests**
 
 Create `tests/unit/test_windows_cuda.py`:
 
@@ -229,13 +229,13 @@ def test_cuda_runtime_reports_each_missing_dll(tmp_path: Path) -> None:
     )
 ```
 
-- [ ] **Step 2: Run tests and confirm RED**
+- [x] **Step 2: Run tests and confirm RED**
 
 Run: `.\.venv\Scripts\python.exe -m pytest tests\unit\test_windows_cuda.py -v`
 
 Expected: collection ERROR with `ModuleNotFoundError: interview_assistant.windows_cuda`.
 
-- [ ] **Step 3: Implement the minimal discovery module**
+- [x] **Step 3: Implement the minimal discovery module**
 
 Create `interview_assistant/windows_cuda.py` with:
 
@@ -307,13 +307,13 @@ def configure_cuda_runtime(
     return CudaRuntimeStatus(directories, missing)
 ```
 
-- [ ] **Step 4: Verify GREEN**
+- [x] **Step 4: Verify GREEN**
 
 Run: `.\.venv\Scripts\python.exe -m pytest tests\unit\test_windows_cuda.py -v`
 
 Expected: 2 passed.
 
-- [ ] **Step 5: Declare and lock official NVIDIA runtime wheels**
+- [x] **Step 5: Declare and lock official NVIDIA runtime wheels**
 
 Add to `pyproject.toml` under `[project.optional-dependencies]`:
 
