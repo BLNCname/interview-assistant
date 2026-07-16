@@ -820,7 +820,7 @@ raise SystemExit(0 if result is not None and result.ok and result.applied_value 
 
 Expected: `{'ok': True, 'value': 17, 'error_code': None}` and exit code 0.
 
-- [ ] **Step 5: Build and test the packaged application**
+- [x] **Step 5: Build and test the packaged application**
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts\build.ps1
@@ -829,7 +829,9 @@ dist\InterviewAssistant\InterviewAssistant.exe --diagnostics --no-gui --config c
 
 Expected: build exit 0, diagnostics exit 0, packaged CUDA runtime ready. Start the GUI EXE, keep it alive for 15 seconds, confirm the process remains running, then close it normally.
 
-- [ ] **Step 6: Inspect for secret leakage and final diff**
+Observed: build exit 0 in 175.1 seconds, packaged diagnostics exit 0 with one CUDA device and no missing runtime DLLs, and the packaged GUI remained alive for 15 seconds before closing normally through `WM_CLOSE`.
+
+- [x] **Step 6: Inspect for secret leakage and final diff**
 
 ```powershell
 git grep -n -I -E "sk-lm-|lmstudio_api_token[[:space:]]*[:=][[:space:]]*[^\"']" -- . ":(exclude)docs/superpowers/plans/*"
@@ -850,7 +852,7 @@ Expected: no credential value, only known pre-existing generated/stat-only files
 - Consumes: clean, verified `feature/interview-assistant` HEAD.
 - Produces: repository root checked out on `feature/interview-assistant`, no stale linked worktree, valid refs.
 
-- [ ] **Step 1: Verify repaired worktree pointers and the exact broken generated ref**
+- [x] **Step 1: Verify repaired worktree pointers and the exact broken generated ref**
 
 Before touching refs, run from the repository root:
 
@@ -868,7 +870,7 @@ C:/Users/BLNCname/Desktop/assistant/interview-assistant/.worktrees/feature-inter
 
 Run `git for-each-ref`, `git cat-file -e` for its recorded object, and confirm the only warning is the generated `refs/codex/turn-diffs/checkpoints/.../f0353d56-08d4-48f7-b2f6-a4cc58849d0f` ref. Confirm its resolved file is under the root repository `.git\refs\codex\turn-diffs\checkpoints` before deleting that single ref file. Do not delete the valid `captures/*/base` refs.
 
-- [ ] **Step 2: Validate repository objects and both worktrees**
+- [x] **Step 2: Validate repository objects and both worktrees**
 
 ```powershell
 git fsck --full
@@ -879,7 +881,7 @@ git status --short --branch
 
 Expected: no invalid objects/refs; hidden worktree is clean on `feature/interview-assistant`; root is clean on `main`.
 
-- [ ] **Step 3: Record immutable recovery points**
+- [x] **Step 3: Record immutable recovery points**
 
 Record `git rev-parse main` and `git rev-parse feature/interview-assistant`. Create a safety tag only if no equivalent local recovery ref already exists:
 
