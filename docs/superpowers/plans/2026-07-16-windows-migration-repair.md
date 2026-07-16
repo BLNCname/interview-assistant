@@ -914,6 +914,8 @@ Expected: only the root worktree exists, it is on `feature/interview-assistant`,
 
 Observed: Git lists only the root worktree on `feature/interview-assistant`; focused smoke passed 50/50. The fresh root selected supported Python 3.12, which exposed a one-tick scheduling assumption in a shutdown test. The test now waits for the observable quit callback with a timeout, and the full Python 3.12 suite passes 691/691 without changing production shutdown order.
 
-- [ ] **Step 6: Final acceptance summary**
+- [x] **Step 6: Final acceptance summary**
 
 Report exact commit SHA, CUDA/cuDNN package versions, real STT timing/result, affinity value `0x11`, full test counts, packaged EXE result, remaining limitations, and the Credential Manager location. Do not print or copy the LM Studio token.
+
+Final root acceptance: Ruff and mypy pass, the Python 3.12 suite passes 691/691, real CUDA STT succeeds, capture affinity returns `0x11`, packaged diagnostics report a ready CUDA runtime with one device, and the packaged GUI survives 15 seconds and closes normally. Git registers only the root worktree. One physical hardlink remains under the ignored former `.worktrees` directory because the external `hermes-agent` has the shared `_pydantic_core` image loaded; no Git metadata or user project files remain there.
