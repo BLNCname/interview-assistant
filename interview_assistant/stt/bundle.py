@@ -61,10 +61,37 @@ _MODEL_NAME_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 _REPOSITORY_PATTERN = re.compile(r"[^/\s]+/[^/\s]+")
 _REVISION_PATTERN = re.compile(r"[0-9a-f]{40}")
 _SHA256_PATTERN = re.compile(r"[0-9a-f]{64}")
+_WINDOWS_FORBIDDEN_FILENAME_CHARACTERS = frozenset('<>:"/\\|?*')
+_WINDOWS_RESERVED_FILENAMES = frozenset(
+    {
+        "AUX",
+        "CLOCK$",
+        "CON",
+        "CONIN$",
+        "CONOUT$",
+        "NUL",
+        "PRN",
+        *(f"COM{number}" for number in range(1, 10)),
+        *(f"LPT{number}" for number in range(1, 10)),
+    }
+)
 
 
 def _invalid_manifest() -> SttManifestError:
     return SttManifestError("STT model manifest is invalid")
+
+
+def _is_windows_safe_basename(value: object) -> bool:
+    if not isinstance(value, str) or not value or value[-1] in {" ", "."}:
+        return False
+    if any(
+        ord(character) < 32
+        or character in _WINDOWS_FORBIDDEN_FILENAME_CHARACTERS
+        for character in value
+    ):
+        return False
+    reserved_stem = value.split(".", maxsplit=1)[0].rstrip(" ").upper()
+    return reserved_stem not in _WINDOWS_RESERVED_FILENAMES
 
 
 def _parse_manifest(payload: object) -> SttModelManifest:
@@ -98,7 +125,7 @@ def _parse_manifest(payload: object) -> SttModelManifest:
         raise _invalid_manifest()
 
     files: list[SttBundleFile] = []
-    seen_paths: set[str] = set()
+    seen_path_keys: set[str] = set()
     for raw_file in raw_files:
         if not isinstance(raw_file, dict) or set(raw_file) != _FILE_KEYS:
             raise _invalid_manifest()
@@ -106,14 +133,10 @@ def _parse_manifest(payload: object) -> SttModelManifest:
         size = raw_file["size"]
         sha256 = raw_file["sha256"]
         runtime_required = raw_file["runtime_required"]
-        if (
-            not isinstance(file_path, str)
-            or not file_path
-            or "\\" in file_path
-            or PurePosixPath(file_path).name != file_path
-            or file_path in {".", ".."}
-            or file_path in seen_paths
-        ):
+        if not _is_windows_safe_basename(file_path):
+            raise _invalid_manifest()
+        path_key = file_path.casefold()
+        if path_key in seen_path_keys:
             raise _invalid_manifest()
         if not isinstance(size, int) or isinstance(size, bool) or size < 0:
             raise _invalid_manifest()
@@ -121,7 +144,7 @@ def _parse_manifest(payload: object) -> SttModelManifest:
             raise _invalid_manifest()
         if not isinstance(runtime_required, bool):
             raise _invalid_manifest()
-        seen_paths.add(file_path)
+        seen_path_keys.add(path_key)
         files.append(SttBundleFile(file_path, size, sha256, runtime_required))
     if not any(item.runtime_required for item in files):
         raise _invalid_manifest()
@@ -232,7 +255,11 @@ def resolve_stt_model(
     parts = PurePosixPath(active_manifest.bundle_subdirectory).parts
     for root in candidate_roots:
         candidate = root.joinpath(*parts)
-        if candidate.exists() or candidate.is_symlink():
+        try:
+            candidate_present = candidate.exists() or candidate.is_symlink()
+        except (OSError, ValueError):
+            raise _invalid_bundle() from None
+        if candidate_present:
             validate_stt_bundle(candidate, active_manifest)
             return str(candidate)
     return model_name

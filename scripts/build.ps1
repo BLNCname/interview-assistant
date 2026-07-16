@@ -31,6 +31,9 @@ $resolvedSttModelPath = $null
 if ($env:OS -ne "Windows_NT") {
     throw "The Interview Assistant package can only be built on Windows."
 }
+if ($VerifyCuda -and [string]::IsNullOrWhiteSpace($SttModelPath)) {
+    throw "-VerifyCuda requires -SttModelPath with the offline STT bundle."
+}
 $uv = Get-Command uv -CommandType Application -ErrorAction SilentlyContinue | `
     Select-Object -First 1
 if ($null -eq $uv) {

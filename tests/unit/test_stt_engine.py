@@ -76,6 +76,66 @@ def test_stt_manifest_validation_loads_a_valid_schema(tmp_path: Path) -> None:
     ]
 
 
+@pytest.mark.parametrize(
+    "file_name",
+    [
+        "C:model.bin",
+        "model.bin:alternate-stream",
+        "CON",
+        "nul.json",
+        "COM1.bin",
+        "LPT9.txt",
+        "trailing-dot.",
+        "trailing-space ",
+        "model?.bin",
+        "../model.bin",
+        "..\\model.bin",
+        "/model.bin",
+        "subdirectory/model.bin",
+    ],
+)
+def test_stt_manifest_rejects_windows_unsafe_or_escaping_filenames(
+    tmp_path: Path,
+    file_name: str,
+) -> None:
+    module = importlib.import_module("interview_assistant.stt.bundle")
+    manifest_path = tmp_path / "private-manifest" / "manifest.json"
+    manifest_path.parent.mkdir()
+    manifest_path.write_text(
+        json.dumps(_test_manifest_payload(file_name=file_name)),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(module.SttManifestError) as captured:
+        module.load_stt_manifest(manifest_path)
+
+    assert str(captured.value) == "STT model manifest is invalid"
+    assert file_name not in str(captured.value)
+    assert "private-manifest" not in str(captured.value)
+
+
+def test_stt_manifest_rejects_case_insensitive_filename_collisions(
+    tmp_path: Path,
+) -> None:
+    module = importlib.import_module("interview_assistant.stt.bundle")
+    payload = _test_manifest_payload()
+    files = payload["files"]
+    assert isinstance(files, list)
+    files.append(
+        {
+            "path": "MODEL.BIN",
+            "size": 10,
+            "sha256": "92cba8675b9f27a7d3c8b397227778a7b7d72851e5685e635036e919a568ec5a",
+            "runtime_required": True,
+        }
+    )
+    manifest_path = tmp_path / "manifest.json"
+    manifest_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(module.SttManifestError, match="manifest is invalid"):
+        module.load_stt_manifest(manifest_path)
+
+
 def test_complete_stt_bundle_resolves_to_explicit_directory(tmp_path: Path) -> None:
     module = importlib.import_module("interview_assistant.stt.bundle")
     manifest_path = tmp_path / "manifest.json"
@@ -134,6 +194,37 @@ def test_existing_invalid_stt_bundle_fails_closed_without_leaking_path(
 
     assert str(root) not in str(captured.value)
     assert "private-runtime-root" not in str(captured.value)
+
+
+@pytest.mark.parametrize("probe_name", ["exists", "is_symlink"])
+@pytest.mark.parametrize("probe_error", [OSError, ValueError])
+def test_candidate_probe_errors_fail_closed_without_leaking_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    probe_name: str,
+    probe_error: type[Exception],
+) -> None:
+    module = importlib.import_module("interview_assistant.stt.bundle")
+    manifest_path = tmp_path / "manifest.json"
+    manifest_path.write_text(json.dumps(_test_manifest_payload()), encoding="utf-8")
+    manifest = module.load_stt_manifest(manifest_path)
+    root = tmp_path / "private-probe-root"
+    candidate = root / "models" / "stt" / "test-model"
+    original_probe = getattr(Path, probe_name)
+
+    def failing_probe(path: Path) -> bool:
+        if path == candidate:
+            raise probe_error(f"private probe failed at {candidate}")
+        return bool(original_probe(path))
+
+    monkeypatch.setattr(Path, probe_name, failing_probe)
+
+    with pytest.raises(module.SttBundleValidationError) as captured:
+        module.resolve_stt_model("test-model", roots=(root,), manifest=manifest)
+
+    assert str(captured.value) == "Bundled STT model is incomplete or corrupt"
+    assert str(candidate) not in str(captured.value)
+    assert "private-probe-root" not in str(captured.value)
 
 
 def test_default_stt_roots_are_frozen_then_source_and_never_working_directory(
@@ -222,14 +313,22 @@ class FakeWhisperModel:
         )
 
 
-def test_whisper_engine_loads_production_model_lazily_once() -> None:
+def test_whisper_engine_loads_production_model_lazily_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     model = FakeWhisperModel()
+    resolver_calls: list[str] = []
     factory_calls: list[tuple[str, str, str]] = []
+
+    def resolver(model_name: str) -> str:
+        resolver_calls.append(model_name)
+        return model_name
 
     def factory(model_name: str, *, device: str, compute_type: str) -> FakeWhisperModel:
         factory_calls.append((model_name, device, compute_type))
         return model
 
+    monkeypatch.setattr("interview_assistant.stt.engine.resolve_stt_model", resolver)
     engine = WhisperEngine(model_factory=factory)
     assert factory_calls == []
 
@@ -244,6 +343,7 @@ def test_whisper_engine_loads_production_model_lazily_once() -> None:
         condition_on_previous_text=False,
     )
 
+    assert resolver_calls == ["large-v3-turbo"]
     assert factory_calls == [("large-v3-turbo", "cuda", "float16")]
     assert first == second == TranscriptionResult("design a cache", "en", 0.93)
     assert model.calls == [

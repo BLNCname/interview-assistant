@@ -155,6 +155,11 @@ def test_optional_stt_bundle_wiring_is_validated_scoped_and_weight_free_by_defau
     assert "-m interview_assistant.stt.bundle" in build_source
     assert "--validate-bundle $resolvedSttModelPath" in build_source
     assert "--require-all-files" in build_source
+    strict_cuda_guard = (
+        "if ($VerifyCuda -and [string]::IsNullOrWhiteSpace($SttModelPath))"
+    )
+    assert strict_cuda_guard in build_source
+    assert 'throw "-VerifyCuda requires -SttModelPath' in build_source
     assert (
         '$packagedRuntimeRoot = Join-Path $distRoot "InterviewAssistant\\_internal"'
         in build_source
@@ -166,6 +171,7 @@ def test_optional_stt_bundle_wiring_is_validated_scoped_and_weight_free_by_defau
     assert build_source.index("--validate-bundle $resolvedSttModelPath") < build_source.index(
         "-m PyInstaller"
     )
+    assert build_source.index(strict_cuda_guard) < build_source.index("-m PyInstaller")
     assert build_source.count("finally {") >= 2
 
     assert 'STT_MODEL_ENVIRONMENT = "INTERVIEW_ASSISTANT_STT_MODEL_PATH"' in spec_source
@@ -443,7 +449,7 @@ def test_cuda_verifier_passes_packaged_runtime_root_to_shared_resolver(
 
     def resolver(model_name: str, *, roots: tuple[Path, ...]) -> str:
         resolver_calls.append((model_name, roots))
-        return model_name
+        return str(packaged_runtime_root / "models" / "stt" / model_name)
 
     monkeypatch.setattr(module, "resolve_stt_model", resolver)
     ticks = iter((10.0, 11.0, 20.0, 20.5))
@@ -457,6 +463,54 @@ def test_cuda_verifier_passes_packaged_runtime_root_to_shared_resolver(
     )
 
     assert resolver_calls == [("test-model", (packaged_runtime_root,))]
+
+
+def test_cuda_verifier_bundle_root_fails_before_alias_factory_without_leaks(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    module = _load_cuda_module()
+    configured_name = "private-hub-model"
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(f"audio:\n  stt_model: {configured_name}\n", encoding="utf-8")
+    bundle_root = tmp_path / "private-release-root"
+    factory_calls: list[str] = []
+
+    def resolver(model_name: str, *, roots: tuple[Path, ...]) -> str:
+        assert roots == (bundle_root.resolve(),)
+        return model_name
+
+    def model_factory(name: str, **_kwargs: object) -> _Model:
+        factory_calls.append(name)
+        return _Model()
+
+    monkeypatch.setattr(module, "resolve_stt_model", resolver)
+    monkeypatch.setattr(module, "_create_model", model_factory)
+
+    exit_code = module.main(
+        [
+            "--config",
+            str(config_path),
+            "--fixture",
+            str(FIXTURE_PATH),
+            "--bundle-root",
+            str(bundle_root),
+        ]
+    )
+
+    payload = json.loads(capsys.readouterr().out)
+    assert exit_code == 1
+    assert payload == {
+        "status": "error",
+        "device": "cuda",
+        "error_type": "RuntimeError",
+        "message": "CUDA STT verification failed",
+    }
+    serialized = json.dumps(payload)
+    assert configured_name not in serialized
+    assert str(bundle_root) not in serialized
+    assert factory_calls == []
 
 
 def test_cuda_verifier_cli_returns_nonzero_and_sanitized_json_when_unavailable(
