@@ -18,10 +18,12 @@ def test_cuda_runtime_registers_complete_directories(tmp_path: Path) -> None:
         (cublas / name).touch()
     (cudnn / "cudnn64_8.dll").touch()
     registered: list[str] = []
+    loaded: list[str] = []
 
     status = configure_cuda_runtime(
         (cuda_runtime, cublas, cudnn),
         add_directory=lambda value: registered.append(value) or object(),
+        load_library=lambda value: loaded.append(Path(value).name) or object(),
     )
 
     assert status.ready
@@ -36,12 +38,19 @@ def test_cuda_runtime_registers_complete_directories(tmp_path: Path) -> None:
         str(cublas.resolve()),
         str(cudnn.resolve()),
     ]
+    assert loaded == [
+        "cudart64_12.dll",
+        "cublasLt64_12.dll",
+        "cublas64_12.dll",
+        "cudnn64_8.dll",
+    ]
 
 
 def test_cuda_runtime_reports_each_missing_dll(tmp_path: Path) -> None:
     status = configure_cuda_runtime(
         (tmp_path,),
         add_directory=lambda _value: object(),
+        load_library=lambda _value: object(),
     )
 
     assert not status.ready
@@ -72,7 +81,10 @@ def test_cuda_runtime_discovers_frozen_nvidia_layout(
     monkeypatch.setattr(windows_cuda.sys, "frozen", True, raising=False)
     monkeypatch.setattr(windows_cuda.sys, "_MEIPASS", str(tmp_path), raising=False)
 
-    status = configure_cuda_runtime(add_directory=lambda _value: object())
+    status = configure_cuda_runtime(
+        add_directory=lambda _value: object(),
+        load_library=lambda _value: object(),
+    )
 
     assert status.ready
     assert status.directories == tuple(path.resolve() for path in directories)

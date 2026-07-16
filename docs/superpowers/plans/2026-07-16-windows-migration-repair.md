@@ -740,7 +740,7 @@ Change the existing build sync command in `scripts/build.ps1` to:
 & $uv.Source sync --extra dev --extra cuda --frozen
 ```
 
-- [ ] **Step 4: Verify GREEN and commit**
+- [x] **Step 4: Verify GREEN and commit**
 
 Run the focused pytest command and `uv lock --check`; expect PASS, then:
 
@@ -760,7 +760,7 @@ git commit -m "build: bundle CUDA runtime for Windows"
 - Consumes: all commits from Tasks 1–5.
 - Produces: objective evidence for Python quality, CUDA STT, capture affinity, packaged diagnostics, and GUI liveness.
 
-- [ ] **Step 1: Run static and unit/integration checks**
+- [x] **Step 1: Run static and unit/integration checks**
 
 ```powershell
 .\.venv\Scripts\python.exe -m ruff check .
@@ -771,7 +771,7 @@ git commit -m "build: bundle CUDA runtime for Windows"
 
 Expected: Ruff/mypy/compileall succeed and all tests pass. If the known PowerShell 5.1 long-TEMP packaging test still times out, rerun that exact test with a short explicit TEMP and record both outputs; do not label the suite green until the short-TEMP invocation passes.
 
-- [ ] **Step 2: Verify installed runtime in a fresh process**
+- [x] **Step 2: Verify installed runtime in a fresh process**
 
 ```powershell
 .\.venv\Scripts\python.exe -c "from interview_assistant.windows_cuda import configure_cuda_runtime; s=configure_cuda_runtime(); print({'ready':s.ready,'missing':s.missing_dlls,'dirs':[str(p) for p in s.directories]})"
@@ -780,7 +780,7 @@ Expected: Ruff/mypy/compileall succeed and all tests pass. If the known PowerShe
 
 Expected: `ready=True`, no missing DLLs, and CUDA device count at least 1.
 
-- [ ] **Step 3: Run real faster-whisper inference**
+- [x] **Step 3: Run real faster-whisper inference**
 
 Use the existing sanitized verifier with the current non-secret config and bundled/test model path:
 
@@ -790,7 +790,9 @@ Use the existing sanitized verifier with the current non-secret config and bundl
 
 Expected JSON: `status="ok"`, `device="cuda"`, positive `text_characters`, and finite timings. The report must not contain transcript text, model identity, LM token, or private cache paths.
 
-- [ ] **Step 4: Run real Windows capture-affinity probe**
+Observed hardware correction: file discovery and `os.add_dll_directory` alone left CTranslate2's deferred C++ loader unable to resolve `cublas64_12.dll`. `configure_cuda_runtime` now preloads the required DLLs in dependency order and retains their handles for the process lifetime; the focused tests, full suite, and real inference all pass.
+
+- [x] **Step 4: Run real Windows capture-affinity probe**
 
 Run:
 
@@ -807,12 +809,12 @@ app.processEvents()
 result = ribbon.affinity_result
 print({
     "ok": None if result is None else result.ok,
-    "value": None if result is None else result.value,
+    "value": None if result is None else result.applied_value,
     "error_code": None if result is None else result.error_code,
 })
 ribbon.close()
 app.processEvents()
-raise SystemExit(0 if result is not None and result.ok and result.value == 17 else 1)
+raise SystemExit(0 if result is not None and result.ok and result.applied_value == 17 else 1)
 '@ | .\.venv\Scripts\python.exe -
 ```
 
