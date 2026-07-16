@@ -220,13 +220,13 @@ JSON пишется атомарно и не содержит путей кон�
 
 ### CUDA smoke
 
-CUDA verifier загружает `audio.stt_model` из указанного config с `device="cuda"`, прогоняет bundled 2.0-second synthetic PCM WAV, форсирует чтение всех segments и выводит JSON с model-load time, transcription time и real-time factor. Успешный отчёт отмечает источник модели как `configured`, но не раскрывает её идентификатор или локальный путь:
+CUDA verifier загружает `audio.stt_model` из указанного config с `device="cuda"`, прогоняет bundled 2.0-second synthetic PCM WAV, форсирует чтение всех segments и выводит JSON с model-load time, transcription time и real-time factor. Успешный отчёт отмечает источник модели как `configured` или `bundled`, но не раскрывает её идентификатор или локальный путь:
 
 ```powershell
 .\.venv\Scripts\python scripts\verify_cuda.py --config "$env:LOCALAPPDATA\InterviewAssistant\InterviewAssistant\config.yaml"
 ```
 
-Он возвращает ненулевой код при отсутствии CUDA, модели, fixture или inference. Синтетический fixture проверяет только целостность CUDA/runtime и не измеряет точность RU/EN. Реальные языковые метрики требуют согласованного корпуса на RTX-машине. Модельные веса не входят в пакет; `faster-whisper` использует заранее доступный cache либо скачивает модель согласно собственным правилам.
+Он возвращает ненулевой код при отсутствии CUDA, модели, fixture или inference. Синтетический fixture проверяет только целостность CUDA/runtime и не измеряет точность RU/EN. Реальные языковые метрики требуют согласованного корпуса на RTX-машине. При запуске из исходников без локального bundle `faster-whisper` сохраняет обычное поведение alias: использует доступный cache либо скачивает модель согласно собственным правилам.
 
 ### Воспроизводимая onedir-сборка
 
@@ -240,13 +240,21 @@ CUDA verifier загружает `audio.stt_model` из указанного con
 .\scripts\build.ps1 -SkipTests
 ```
 
-На RTX 5070 Ti добавьте обязательную CUDA-проверку:
+Сборка без `-SttModelPath` остаётся лёгкой: она не скачивает веса и не добавляет Whisper weights в `dist`. Для offline STT release передайте каталог заранее полученной pinned CTranslate2-модели:
 
 ```powershell
-.\scripts\build.ps1 -VerifyCuda -ConfigPath "$env:LOCALAPPDATA\InterviewAssistant\InterviewAssistant\config.yaml"
+.\scripts\build.ps1 -SttModelPath "D:\models\faster-whisper-large-v3-turbo"
 ```
 
-Результат: `dist\InterviewAssistant\InterviewAssistant.exe`. Пакет включает Python/PyQt6/native runtime/VAD assets и synthetic fixture, но не включает скачанные Whisper/LLM weights, MCP virtual environment или пользовательские secrets.
+Скрипт проверяет каталог по `packaging/stt_model_manifest.json` до запуска PyInstaller: обязательны точные имена, размеры и SHA-256 всех шести файлов. В пакет копируются только перечисленные manifest-файлы под `models/stt/large-v3-turbo`; локальная `.cache`/Hugging Face metadata не копируется. Одна многоязычная модель `large-v3-turbo` обслуживает RU/EN. Зафиксированы repository `dropbox-dash/faster-whisper-large-v3-turbo` и revision `0a363e9161cbc7ed1431c9597a8ceaf0c4f78fcf`, включая `README.md` с model card и уведомлением лицензии `MIT`.
+
+На RTX 5070 Ti offline release дополнительно проверьте CUDA на уже упакованной модели:
+
+```powershell
+.\scripts\build.ps1 -SttModelPath "D:\models\faster-whisper-large-v3-turbo" -VerifyCuda -ConfigPath "$env:LOCALAPPDATA\InterviewAssistant\InterviewAssistant\config.yaml"
+```
+
+Результат: `dist\InterviewAssistant\InterviewAssistant.exe`. Обычный пакет включает Python/PyQt6/native runtime/VAD assets и synthetic fixture, но не включает Whisper/LLM weights. Offline-вариант дополнительно включает только проверенный STT bundle. Оба варианта исключают MCP virtual environment и пользовательские secrets.
 
 ## Приватность и ограничения безопасности
 

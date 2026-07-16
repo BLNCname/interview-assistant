@@ -9,6 +9,14 @@ from numpy.typing import NDArray
 from interview_assistant.audio.models import AudioSource
 
 
+def resolve_stt_model(model_name: str) -> str:
+    """Load the bundle resolver lazily with the model itself."""
+
+    from interview_assistant.stt.bundle import resolve_stt_model as resolve_bundle
+
+    return resolve_bundle(model_name)
+
+
 @dataclass(frozen=True, slots=True)
 class TranscriptHypothesis:
     source: AudioSource
@@ -111,11 +119,20 @@ class WhisperEngine:
             return model
         with self._model_lock:
             if self._model is None:
-                self._model = self._model_factory(
-                    self.model_name,
-                    device=self.device,
-                    compute_type=self.compute_type,
-                )
+                resolved_model = resolve_stt_model(self.model_name)
+                if resolved_model != self.model_name:
+                    self._model = self._model_factory(
+                        resolved_model,
+                        device=self.device,
+                        compute_type=self.compute_type,
+                        local_files_only=True,
+                    )
+                else:
+                    self._model = self._model_factory(
+                        resolved_model,
+                        device=self.device,
+                        compute_type=self.compute_type,
+                    )
             return self._model
 
 
@@ -124,12 +141,19 @@ def _create_whisper_model(
     *,
     device: str,
     compute_type: str,
+    local_files_only: bool = False,
 ) -> _WhisperModel:
     from faster_whisper import WhisperModel  # type: ignore[import-untyped]
 
+    model_options: dict[str, object] = {
+        "device": device,
+        "compute_type": compute_type,
+    }
+    if local_files_only:
+        model_options["local_files_only"] = True
     return cast(
         _WhisperModel,
-        WhisperModel(model_name, device=device, compute_type=compute_type),
+        WhisperModel(model_name, **model_options),
     )
 
 

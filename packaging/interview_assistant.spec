@@ -1,12 +1,16 @@
 # -*- mode: python ; coding: utf-8 -*-
 """Reproducible onedir bundle for the Windows Interview Assistant."""
 
+import json
+import os
 from pathlib import Path
 
 from PyInstaller.utils.hooks import collect_all, copy_metadata
 
 
 ROOT = Path(SPECPATH).resolve().parent
+MANIFEST_PATH = ROOT / "packaging" / "stt_model_manifest.json"
+STT_MODEL_ENVIRONMENT = "INTERVIEW_ASSISTANT_STT_MODEL_PATH"
 MODEL_WEIGHT_SUFFIXES = frozenset(
     {".bin", ".ckpt", ".gguf", ".pt", ".pth", ".safetensors"}
 )
@@ -40,10 +44,26 @@ def _without_model_weights(items):
     ]
 
 
+def _optional_stt_bundle_datas():
+    source_value = os.environ.get(STT_MODEL_ENVIRONMENT, "").strip()
+    if not source_value:
+        return []
+    source_root = Path(source_value)
+    manifest = json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
+    destination = manifest["bundle_subdirectory"]
+    bundle_datas = []
+    for entry in manifest["files"]:
+        source_file = source_root / entry["path"]
+        bundle_datas.append((str(source_file), destination))
+    return bundle_datas
+
+
 datas = [
     (str(ROOT / "assets" / "diagnostics" / "stt-smoke.wav"), "assets/diagnostics"),
     (str(ROOT / "config" / "mcp.template.json"), "config"),
+    (str(MANIFEST_PATH), "packaging"),
 ]
+datas.extend(_optional_stt_bundle_datas())
 binaries = []
 hiddenimports = []
 for package in PACKAGES:

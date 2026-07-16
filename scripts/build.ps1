@@ -1,7 +1,8 @@
 param(
     [switch]$SkipTests,
     [switch]$VerifyCuda,
-    [string]$ConfigPath = ""
+    [string]$ConfigPath = "",
+    [string]$SttModelPath = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -12,10 +13,20 @@ $spec = Join-Path $root "packaging\interview_assistant.spec"
 $distRoot = Join-Path $root "dist"
 $workRoot = Join-Path $root "build\pyinstaller"
 $executable = Join-Path $distRoot "InterviewAssistant\InterviewAssistant.exe"
+$packagedRuntimeRoot = Join-Path $distRoot "InterviewAssistant\_internal"
 $diagnosticsOutput = Join-Path $workRoot "packaged-diagnostics.json"
 $smokeConfig = [IO.Path]::GetFullPath(
     (Join-Path $workRoot "packaged-diagnostics-missing-config.yaml")
 )
+$sttModelEnvironmentName = "INTERVIEW_ASSISTANT_STT_MODEL_PATH"
+$sttModelEnvironmentWasPresent = Test-Path -LiteralPath "Env:$sttModelEnvironmentName"
+$previousSttModelEnvironment = if ($sttModelEnvironmentWasPresent) {
+    (Get-Item -LiteralPath "Env:$sttModelEnvironmentName").Value
+}
+else {
+    $null
+}
+$resolvedSttModelPath = $null
 
 if ($env:OS -ne "Windows_NT") {
     throw "The Interview Assistant package can only be built on Windows."
@@ -43,6 +54,21 @@ try {
         throw "uv did not create the project .venv Python runtime."
     }
 
+    if (-not [string]::IsNullOrWhiteSpace($SttModelPath)) {
+        try {
+            $resolvedSttModelPath = (Resolve-Path -LiteralPath $SttModelPath).Path
+        }
+        catch {
+            throw "The supplied STT model bundle is unavailable."
+        }
+        & $python -m interview_assistant.stt.bundle `
+            --validate-bundle $resolvedSttModelPath `
+            --require-all-files
+        if ($LASTEXITCODE -ne 0) {
+            throw "The supplied STT model bundle failed manifest validation."
+        }
+    }
+
     $commitEpoch = (& git -C $root show -s --format=%ct HEAD).Trim()
     if ($LASTEXITCODE -ne 0 -or $commitEpoch -notmatch "^\d+$") {
         throw "Unable to derive SOURCE_DATE_EPOCH from the current Git commit."
@@ -58,14 +84,43 @@ try {
         }
     }
 
-    # Equivalent reproducible invocation: python -m PyInstaller ...
-    & $python -m PyInstaller `
-        --clean `
-        --noconfirm `
-        --distpath $distRoot `
-        --workpath $workRoot `
-        $spec
-    if ($LASTEXITCODE -ne 0) {
+    $pyInstallerExitCode = 1
+    try {
+        if ($null -eq $resolvedSttModelPath) {
+            Remove-Item `
+                -LiteralPath "Env:$sttModelEnvironmentName" `
+                -Force `
+                -ErrorAction SilentlyContinue
+        }
+        else {
+            Set-Item `
+                -LiteralPath "Env:$sttModelEnvironmentName" `
+                -Value $resolvedSttModelPath
+        }
+
+        # Equivalent reproducible invocation: python -m PyInstaller ...
+        & $python -m PyInstaller `
+            --clean `
+            --noconfirm `
+            --distpath $distRoot `
+            --workpath $workRoot `
+            $spec
+        $pyInstallerExitCode = $LASTEXITCODE
+    }
+    finally {
+        if ($sttModelEnvironmentWasPresent) {
+            Set-Item `
+                -LiteralPath "Env:$sttModelEnvironmentName" `
+                -Value $previousSttModelEnvironment
+        }
+        else {
+            Remove-Item `
+                -LiteralPath "Env:$sttModelEnvironmentName" `
+                -Force `
+                -ErrorAction SilentlyContinue
+        }
+    }
+    if ($pyInstallerExitCode -ne 0) {
         throw "PyInstaller failed."
     }
     if (-not (Test-Path -LiteralPath $executable -PathType Leaf)) {
@@ -110,7 +165,9 @@ try {
             throw "-VerifyCuda requires -ConfigPath with the production STT model."
         }
         $resolvedConfig = (Resolve-Path -LiteralPath $ConfigPath).Path
-        & $python scripts\verify_cuda.py --config $resolvedConfig
+        & $python scripts\verify_cuda.py `
+            --config $resolvedConfig `
+            --bundle-root $packagedRuntimeRoot
         if ($LASTEXITCODE -ne 0) {
             throw "CUDA verification failed."
         }

@@ -16,6 +16,7 @@ from numpy.typing import NDArray
 
 from interview_assistant.composition import default_config_path
 from interview_assistant.config import AppConfig
+from interview_assistant.stt.bundle import resolve_stt_model
 
 
 class _Segment(Protocol):
@@ -43,14 +44,17 @@ def _create_model(
     *,
     device: str,
     compute_type: str,
+    local_files_only: bool = False,
 ) -> _Model:
     from faster_whisper import WhisperModel  # type: ignore[import-untyped]
 
-    return WhisperModel(
-        model_name,
-        device=device,
-        compute_type=compute_type,
-    )
+    model_options: dict[str, object] = {
+        "device": device,
+        "compute_type": compute_type,
+    }
+    if local_files_only:
+        model_options["local_files_only"] = True
+    return WhisperModel(model_name, **model_options)
 
 
 def repository_fixture_path() -> Path:
@@ -76,6 +80,7 @@ def run_verification(
     *,
     model_factory: ModelFactory = _create_model,
     clock: Callable[[], float] = time.perf_counter,
+    bundle_roots: Iterable[Path] | None = None,
 ) -> dict[str, object]:
     """Load the configured CUDA model and force a full transcription iteration."""
 
@@ -83,10 +88,24 @@ def run_verification(
     audio, fixture_seconds = _read_fixture(fixture_path)
 
     load_started = clock()
+    if bundle_roots is None:
+        resolved_model = resolve_stt_model(config.audio.stt_model)
+    else:
+        resolved_model = resolve_stt_model(
+            config.audio.stt_model,
+            roots=tuple(bundle_roots),
+        )
+    model_options: dict[str, object] = {
+        "device": "cuda",
+        "compute_type": "float16",
+    }
+    model_source = "configured"
+    if resolved_model != config.audio.stt_model:
+        model_options["local_files_only"] = True
+        model_source = "bundled"
     model = model_factory(
-        config.audio.stt_model,
-        device="cuda",
-        compute_type="float16",
+        resolved_model,
+        **model_options,
     )
     model_load_seconds = clock() - load_started
 
@@ -108,7 +127,7 @@ def run_verification(
     return {
         "status": "ok",
         "device": "cuda",
-        "model_source": "configured",
+        "model_source": model_source,
         "fixture_seconds": round(fixture_seconds, 6),
         "model_load_seconds": round(model_load_seconds, 6),
         "transcription_seconds": round(transcription_seconds, 6),
@@ -126,6 +145,7 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", type=Path, default=default_config_path())
     parser.add_argument("--fixture", type=Path, default=repository_fixture_path())
+    parser.add_argument("--bundle-root", type=Path, action="append")
     return parser
 
 
@@ -137,6 +157,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             args.config.expanduser().resolve(),
             args.fixture.expanduser().resolve(),
             model_factory=_create_model,
+            bundle_roots=(
+                tuple(path.expanduser().resolve() for path in args.bundle_root)
+                if args.bundle_root
+                else None
+            ),
         )
     except Exception as error:
         report = {

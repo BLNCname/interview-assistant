@@ -8,6 +8,7 @@ __pycache__/
 htmlcov/
 build/
 dist/
+models/
 *.spec
 !packaging/interview_assistant.spec
 logs/

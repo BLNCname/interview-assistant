@@ -15,6 +15,7 @@ import pytest
 
 ROOT = Path(__file__).parents[2]
 SPEC_PATH = ROOT / "packaging" / "interview_assistant.spec"
+STT_MANIFEST_PATH = ROOT / "packaging" / "stt_model_manifest.json"
 BUILD_SCRIPT_PATH = ROOT / "scripts" / "build.ps1"
 CUDA_SCRIPT_PATH = ROOT / "scripts" / "verify_cuda.py"
 DIAGNOSTICS_MODULE_PATH = ROOT / "interview_assistant" / "diagnostics" / "cli.py"
@@ -22,6 +23,57 @@ FIXTURE_PATH = ROOT / "assets" / "diagnostics" / "stt-smoke.wav"
 REQUIREMENTS_PATH = ROOT / "requirements.txt"
 GITIGNORE_PATH = ROOT / ".gitignore"
 UV_LOCK_PATH = ROOT / "uv.lock"
+
+
+def test_stt_model_manifest_pins_exact_offline_bundle_metadata() -> None:
+    manifest = json.loads(STT_MANIFEST_PATH.read_text(encoding="utf-8"))
+
+    assert manifest == {
+        "schema_version": 1,
+        "name": "large-v3-turbo",
+        "repository": "dropbox-dash/faster-whisper-large-v3-turbo",
+        "revision": "0a363e9161cbc7ed1431c9597a8ceaf0c4f78fcf",
+        "license": "MIT",
+        "bundle_subdirectory": "models/stt/large-v3-turbo",
+        "files": [
+            {
+                "path": "config.json",
+                "size": 2263,
+                "sha256": "b0253ea6c0d3bea6b1e19e91a02acfd3b53f4467362efcb5a3e6b16c9b3a9b7e",
+                "runtime_required": True,
+            },
+            {
+                "path": "model.bin",
+                "size": 1617884929,
+                "sha256": "e76620f83d5f5b69efd3d87e3dc180c1bd21df9fbebacfd4335e5e1efcc018da",
+                "runtime_required": True,
+            },
+            {
+                "path": "preprocessor_config.json",
+                "size": 340,
+                "sha256": "7ccc62c6f2765af1f3b46c00c9b5894426835a05021c8b9c01eecb6dfb542711",
+                "runtime_required": True,
+            },
+            {
+                "path": "tokenizer.json",
+                "size": 2710337,
+                "sha256": "297b13372ac43916285644fb9687add3cc62ee2a1adb60da3dc25cc94c1871fd",
+                "runtime_required": True,
+            },
+            {
+                "path": "vocabulary.json",
+                "size": 1068114,
+                "sha256": "c69260f2ab26d659b7c398f9a2b2b48ed0df16c3b47d7326782fd9cba71690c1",
+                "runtime_required": True,
+            },
+            {
+                "path": "README.md",
+                "size": 1445,
+                "sha256": "b3068692728faed23580cce5cd569fc47ff76c690c032b2641ffd5554ea64d8f",
+                "runtime_required": False,
+            },
+        ],
+    }
 
 
 def _load_cuda_module() -> ModuleType:
@@ -92,6 +144,45 @@ def test_build_script_runs_packaged_headless_diagnostics_and_optional_cuda() -> 
     assert '$diagnostics.config -ne "missing"' in source
 
 
+def test_optional_stt_bundle_wiring_is_validated_scoped_and_weight_free_by_default() -> None:
+    build_source = BUILD_SCRIPT_PATH.read_text(encoding="utf-8")
+    spec_source = SPEC_PATH.read_text(encoding="utf-8")
+
+    assert '[string]$SttModelPath = ""' in build_source
+    assert '$sttModelEnvironmentName = "INTERVIEW_ASSISTANT_STT_MODEL_PATH"' in build_source
+    assert "$previousSttModelEnvironment" in build_source
+    assert "Resolve-Path -LiteralPath $SttModelPath" in build_source
+    assert "-m interview_assistant.stt.bundle" in build_source
+    assert "--validate-bundle $resolvedSttModelPath" in build_source
+    assert "--require-all-files" in build_source
+    assert (
+        '$packagedRuntimeRoot = Join-Path $distRoot "InterviewAssistant\\_internal"'
+        in build_source
+    )
+    assert "--bundle-root $packagedRuntimeRoot" in build_source
+    assert "Set-Item `" in build_source
+    assert "Remove-Item `" in build_source
+    assert build_source.count('-LiteralPath "Env:$sttModelEnvironmentName"') >= 4
+    assert build_source.index("--validate-bundle $resolvedSttModelPath") < build_source.index(
+        "-m PyInstaller"
+    )
+    assert build_source.count("finally {") >= 2
+
+    assert 'STT_MODEL_ENVIRONMENT = "INTERVIEW_ASSISTANT_STT_MODEL_PATH"' in spec_source
+    assert 'MANIFEST_PATH = ROOT / "packaging" / "stt_model_manifest.json"' in spec_source
+    assert "def _optional_stt_bundle_datas():" in spec_source
+    assert "if not source_value:" in spec_source
+    assert "return []" in spec_source
+    assert 'destination = manifest["bundle_subdirectory"]' in spec_source
+    assert 'for entry in manifest["files"]:' in spec_source
+    assert '(str(source_file), destination)' in spec_source
+    assert "datas.extend(_optional_stt_bundle_datas())" in spec_source
+    assert '(str(MANIFEST_PATH), "packaging")' in spec_source
+    assert "rglob(" not in spec_source
+    assert "copytree(" not in spec_source
+    assert "MODEL_WEIGHT_SUFFIXES" in spec_source
+
+
 def test_uv_lock_is_current_and_contains_the_dev_extra() -> None:
     assert UV_LOCK_PATH.is_file(), "uv.lock must be checked in for frozen installs"
     source = UV_LOCK_PATH.read_text(encoding="utf-8")
@@ -134,6 +225,20 @@ def test_packaging_spec_is_explicitly_unignored() -> None:
 
     assert "*.spec" in source
     assert "!packaging/interview_assistant.spec" in source
+
+
+def test_readme_and_gitignore_cover_lightweight_and_offline_stt_builds() -> None:
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    ignored = GITIGNORE_PATH.read_text(encoding="utf-8").splitlines()
+
+    assert "models/" in ignored
+    assert ".\\scripts\\build.ps1 -SttModelPath" in readme
+    assert "Сборка без `-SttModelPath` остаётся лёгкой" in readme
+    assert "не скачивает веса" in readme
+    assert "Одна многоязычная модель `large-v3-turbo` обслуживает RU/EN" in readme
+    assert "0a363e9161cbc7ed1431c9597a8ceaf0c4f78fcf" in readme
+    assert "`README.md` с model card" in readme
+    assert "лицензии `MIT`" in readme
 
 
 def test_bundled_stt_fixture_is_deterministic_two_second_pcm() -> None:
@@ -278,6 +383,80 @@ def test_cuda_verifier_uses_configured_model_and_reports_timing_without_text(
         "temperature": 0.0,
     }
     assert "fixture transcript" not in json.dumps(report)
+
+
+def test_cuda_verifier_resolves_bundled_model_offline_without_identity_leaks(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _load_cuda_module()
+    configured_name = "private-configured-model"
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(f"audio:\n  stt_model: {configured_name}\n", encoding="utf-8")
+    private_bundle = tmp_path / "private-release-root" / "models" / "stt" / "model"
+    model = _Model()
+    resolver_calls: list[str] = []
+    factory_calls: list[tuple[str, str, str, bool]] = []
+
+    def resolver(model_name: str) -> str:
+        resolver_calls.append(model_name)
+        return str(private_bundle)
+
+    def model_factory(
+        name: str,
+        *,
+        device: str,
+        compute_type: str,
+        local_files_only: bool,
+    ) -> _Model:
+        factory_calls.append((name, device, compute_type, local_files_only))
+        return model
+
+    monkeypatch.setattr(module, "resolve_stt_model", resolver)
+    ticks = iter((10.0, 11.0, 20.0, 20.5))
+
+    report = module.run_verification(
+        config_path,
+        FIXTURE_PATH,
+        model_factory=model_factory,
+        clock=lambda: next(ticks),
+    )
+
+    assert resolver_calls == [configured_name]
+    assert factory_calls == [(str(private_bundle), "cuda", "float16", True)]
+    assert report["model_source"] == "bundled"
+    serialized = json.dumps(report)
+    assert configured_name not in serialized
+    assert str(private_bundle) not in serialized
+    assert "private-release-root" not in serialized
+
+
+def test_cuda_verifier_passes_packaged_runtime_root_to_shared_resolver(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _load_cuda_module()
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("audio:\n  stt_model: test-model\n", encoding="utf-8")
+    packaged_runtime_root = tmp_path / "dist" / "InterviewAssistant" / "_internal"
+    resolver_calls: list[tuple[str, tuple[Path, ...]]] = []
+
+    def resolver(model_name: str, *, roots: tuple[Path, ...]) -> str:
+        resolver_calls.append((model_name, roots))
+        return model_name
+
+    monkeypatch.setattr(module, "resolve_stt_model", resolver)
+    ticks = iter((10.0, 11.0, 20.0, 20.5))
+
+    module.run_verification(
+        config_path,
+        FIXTURE_PATH,
+        model_factory=lambda *_args, **_kwargs: _Model(),
+        clock=lambda: next(ticks),
+        bundle_roots=(packaged_runtime_root,),
+    )
+
+    assert resolver_calls == [("test-model", (packaged_runtime_root,))]
 
 
 def test_cuda_verifier_cli_returns_nonzero_and_sanitized_json_when_unavailable(
