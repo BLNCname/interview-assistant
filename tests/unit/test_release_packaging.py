@@ -218,7 +218,7 @@ def _run_archive_script(
         temporary_directory = _archive_temp_directory(repository)
     os.makedirs(_extended_windows_path(temporary_directory), exist_ok=True)
     environment = os.environ.copy()
-    environment.update({"TEMP": str(temporary_directory), "TMP": str(temporary_directory)})
+    environment["INTERVIEW_ASSISTANT_ARCHIVE_TEMP"] = str(temporary_directory)
     return subprocess.run(
         [
             _powershell(),
@@ -360,6 +360,9 @@ def test_source_archive_script_declares_fail_closed_git_and_zip_contract() -> No
     assert "\\\\?\\UNC\\" in source
     assert "\\\\?\\" in source
     assert "InterviewAssistant-source-$Version" in source
+    assert "INTERVIEW_ASSISTANT_ARCHIVE_TEMP" in source
+    assert "too long for Git on Windows" in source
+    assert "GetTempPath" not in source
     assert "7z" not in source.casefold()
     assert source.index('"clone"') < source.index("Get-FileHash")
 
@@ -501,7 +504,7 @@ def test_source_archive_is_standalone_sanitized_and_model_overlay_is_exact(
     assert not (extracted_repository / ".git" / "ORIG_HEAD").exists()
 
 
-def test_source_archive_fails_closed_on_hash_mismatch_and_cleans_staging(
+def test_source_archive_rejects_unsupported_long_staging_without_leaking_staging(
     tmp_path: Path,
 ) -> None:
     repository, model_path, _model_files, _head, _secret_commit, _secret_blob = (
@@ -529,7 +532,9 @@ def test_source_archive_fails_closed_on_hash_mismatch_and_cleans_staging(
         assert result.returncode != 0
         assert not output_path.exists()
         assert _staging_directory_names(staging_parent) == before
-        assert "SHA-256" in result.stderr or "SHA-256" in result.stdout
+        assert "too long for Git on Windows" in result.stderr or (
+            "too long for Git on Windows" in result.stdout
+        )
         assert "cleanup failed" not in (result.stdout + result.stderr).casefold()
         assert "RemoveFileSystemItemIOError" not in result.stderr
     finally:

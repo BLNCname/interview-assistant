@@ -74,6 +74,20 @@ function ConvertTo-ExtendedLengthPath {
     return "\\?\" + $fullPath
 }
 
+function Get-ConfiguredTemporaryRoot {
+    $configuredPath = $env:INTERVIEW_ASSISTANT_ARCHIVE_TEMP
+    if ([string]::IsNullOrWhiteSpace($configuredPath)) {
+        $configuredPath = $env:TEMP
+    }
+    if ([string]::IsNullOrWhiteSpace($configuredPath)) {
+        $configuredPath = $env:TMP
+    }
+    if ([string]::IsNullOrWhiteSpace($configuredPath)) {
+        throw "INTERVIEW_ASSISTANT_ARCHIVE_TEMP, TEMP, or TMP is required for staging."
+    }
+    return [IO.Path]::GetFullPath($configuredPath)
+}
+
 function Remove-VerifiedDirectoryTree {
     param(
         [Parameter(Mandatory = $true)]
@@ -268,13 +282,22 @@ if (Test-Path -LiteralPath $resolvedOutputPath) {
 }
 
 $stagingName = "InterviewAssistant-source-staging-$([Guid]::NewGuid().ToString('N'))"
-$temporaryRoot = [IO.Path]::GetFullPath([IO.Path]::GetTempPath())
+$temporaryRoot = Get-ConfiguredTemporaryRoot
 $stagingRoot = [IO.Path]::GetFullPath(
     [IO.Path]::Combine($temporaryRoot, $stagingName)
 )
 Assert-PathWithinRoot -Candidate $stagingRoot -Root $temporaryRoot
 if ((Split-Path -Leaf $stagingRoot) -ne $stagingName) {
     throw "Refusing to create an unexpected staging directory."
+}
+$archiveTopLevel = "InterviewAssistant-source-$Version"
+$anticipatedGitDirectory = [IO.Path]::Combine(
+    $stagingRoot,
+    $archiveTopLevel,
+    ".git"
+)
+if ($anticipatedGitDirectory.Length -ge 260) {
+    throw "The archive staging path is too long for Git on Windows; choose a shorter INTERVIEW_ASSISTANT_ARCHIVE_TEMP."
 }
 $resolvedStagingRoot = $stagingRoot
 $stagingCreationAttempted = $false
@@ -286,7 +309,6 @@ try {
     $extendedStagingRoot = ConvertTo-ExtendedLengthPath -Path $resolvedStagingRoot
     [void][IO.Directory]::CreateDirectory($extendedStagingRoot)
 
-    $archiveTopLevel = "InterviewAssistant-source-$Version"
     $checkoutPath = Join-Path $resolvedStagingRoot $archiveTopLevel
     Assert-PathWithinRoot -Candidate $checkoutPath -Root $resolvedStagingRoot
     [void](Invoke-GitCommand -GitPath $git.Source -Arguments @(
@@ -565,9 +587,7 @@ finally {
     try {
         if ($stagingCreationAttempted) {
             $cleanupCandidate = [IO.Path]::GetFullPath($resolvedStagingRoot)
-            $cleanupTemporaryRoot = [IO.Path]::GetFullPath(
-                [IO.Path]::GetTempPath()
-            )
+            $cleanupTemporaryRoot = Get-ConfiguredTemporaryRoot
             Assert-PathWithinRoot `
                 -Candidate $cleanupCandidate `
                 -Root $cleanupTemporaryRoot

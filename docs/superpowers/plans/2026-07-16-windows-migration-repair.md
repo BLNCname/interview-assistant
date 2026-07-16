@@ -22,6 +22,49 @@
 
 ---
 
+### Task 0: Archive staging isolation from process TEMP
+
+**Files:**
+- Modify: `scripts/create_source_archive.ps1`
+- Test: `tests/unit/test_release_packaging.py`
+
+**Interfaces:**
+- Consumes: optional archive-only `INTERVIEW_ASSISTANT_ARCHIVE_TEMP`, including paths longer than 260 characters; otherwise falls back to `TEMP`/`TMP`.
+- Produces: normal staging without replacing process-level `TEMP`/`TMP`, plus a fast fail-closed error before creation when the resulting `.git` path would exceed Git for Windows' 260-character limit.
+
+- [x] **Step 1: Confirm the existing failing regression test (RED)**
+
+Run:
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest tests\unit\test_release_packaging.py::test_source_archive_rejects_unsupported_long_staging_without_leaking_staging -v
+```
+
+Observed baseline: FAIL after 60 seconds. A minimal probe proved that Windows PowerShell 5.1 itself cannot start when the inherited `TEMP` is the deliberately longer-than-260-character test path, so no code inside the script can repair that environment after launch.
+
+- [x] **Step 2: Add a dedicated archive staging override**
+
+Update the test launcher to keep its normal process `TEMP`/`TMP` and pass its requested staging root through `INTERVIEW_ASSISTANT_ARCHIVE_TEMP`. Update `Get-ConfiguredTemporaryRoot` to prefer that archive-only variable and retain `TEMP`/`TMP` as backward-compatible fallbacks. Before creating staging, calculate the anticipated `.git` path and reject values at or above 260 characters with a clear error. Add source-contract assertions so future changes cannot accidentally reintroduce `[IO.Path]::GetTempPath()`, long process `TEMP` inheritance, or a Git hang.
+
+- [x] **Step 3: Verify GREEN and regression behavior**
+
+Run the focused test from Step 1; expect PASS in less than 60 seconds. Then run:
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest tests\unit\test_release_packaging.py -v
+```
+
+Expected: the full release-packaging module passes, including standalone archive construction and cleanup.
+
+- [ ] **Step 4: Commit the root-cause fix**
+
+```powershell
+git add scripts/create_source_archive.ps1 tests/unit/test_release_packaging.py docs/superpowers/plans/2026-07-16-windows-migration-repair.md
+git commit -m "fix: isolate long archive staging from process temp"
+```
+
+---
+
 ### Task 1: Reproducible package layout
 
 **Files:**
