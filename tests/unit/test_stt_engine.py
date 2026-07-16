@@ -2,12 +2,14 @@ import importlib
 import importlib.util
 import json
 from pathlib import Path
+import sys
 import tomllib
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 
 import numpy as np
 import pytest
 
+from interview_assistant.stt import engine as engine_module
 from interview_assistant.stt.engine import TranscriptionResult, WhisperEngine
 
 
@@ -318,6 +320,33 @@ class FakeWhisperModel:
             [SimpleNamespace(text=" design "), SimpleNamespace(text="a cache ")],
             SimpleNamespace(language="en", language_probability=0.93),
         )
+
+
+def test_cuda_model_factory_configures_runtime_before_whisper(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+    fake_module = ModuleType("faster_whisper")
+
+    def whisper_model(*_args: object, **_kwargs: object) -> FakeWhisperModel:
+        calls.append("WhisperModel")
+        return FakeWhisperModel()
+
+    fake_module.WhisperModel = whisper_model  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "faster_whisper", fake_module)
+    monkeypatch.setattr(
+        engine_module,
+        "configure_cuda_runtime",
+        lambda: calls.append("configure_cuda_runtime"),
+    )
+
+    engine_module._create_whisper_model(
+        "test-model",
+        device="cuda",
+        compute_type="float16",
+    )
+
+    assert calls == ["configure_cuda_runtime", "WhisperModel"]
 
 
 def test_whisper_engine_loads_production_model_lazily_once(

@@ -334,7 +334,7 @@ uv sync --extra dev --extra cuda --frozen
 
 Expected: official Windows wheels are installed under `.venv\Lib\site-packages\nvidia`; CUDA 13 and the display driver are unchanged.
 
-- [ ] **Step 6: Commit runtime discovery**
+- [x] **Step 6: Commit runtime discovery**
 
 ```powershell
 git add interview_assistant/windows_cuda.py tests/unit/test_windows_cuda.py pyproject.toml uv.lock
@@ -357,7 +357,7 @@ git commit -m "feat: configure CUDA 12 runtime libraries"
 - Produces: diagnostics `cuda.runtime` with `status`, `missing_dlls`, and `search_directories`.
 - CUDA model creation configures DLL search before importing faster-whisper.
 
-- [ ] **Step 1: Add failing diagnostics assertions**
+- [x] **Step 1: Add failing diagnostics assertions**
 
 Add this import to `tests/unit/test_task16_packaging.py`:
 
@@ -393,13 +393,13 @@ def test_runtime_report_lists_cuda_search_directories_and_missing_dlls(
     }
 ```
 
-- [ ] **Step 2: Run the focused test and confirm RED**
+- [x] **Step 2: Run the focused test and confirm RED**
 
 Run: `.\.venv\Scripts\python.exe -m pytest tests\unit\test_task16_packaging.py -k runtime_report_lists_cuda -v`
 
 Expected: FAIL because `cuda.runtime` is absent.
 
-- [ ] **Step 3: Add the diagnostics report**
+- [x] **Step 3: Add the diagnostics report**
 
 Import `configure_cuda_runtime` in `interview_assistant/diagnostics/cli.py`. At the start of `build_runtime_report`, call it once. Add this object inside the existing `cuda` mapping on both success and warning paths:
 
@@ -413,11 +413,11 @@ Import `configure_cuda_runtime` in `interview_assistant/diagnostics/cli.py`. At 
 
 The overall report remains `status="ok"` when CPU dependencies/config are valid; GPU runtime remains a readiness warning until hardware verification.
 
-- [ ] **Step 4: Verify diagnostics GREEN**
+- [x] **Step 4: Verify diagnostics GREEN**
 
 Run the focused command from Step 2; expect PASS.
 
-- [ ] **Step 5: Add failing model-factory ordering tests**
+- [x] **Step 5: Add failing model-factory ordering tests**
 
 Add `import sys`, `from types import ModuleType`, and `from interview_assistant.stt import engine as engine_module` to `tests/unit/test_stt_engine.py`, then add:
 
@@ -478,7 +478,7 @@ def test_cuda_verifier_configures_runtime_before_whisper_import(
 
 Also add `import sys` to this test module; `ModuleType` is already imported.
 
-- [ ] **Step 6: Run ordering tests and confirm RED**
+- [x] **Step 6: Run ordering tests and confirm RED**
 
 Run:
 
@@ -489,7 +489,7 @@ Run:
 
 Expected: FAIL because neither entry point configures DLL search.
 
-- [ ] **Step 7: Wire both entry points**
+- [x] **Step 7: Wire both entry points**
 
 In `interview_assistant/stt/engine.py`, import `configure_cuda_runtime` and make the factory body:
 

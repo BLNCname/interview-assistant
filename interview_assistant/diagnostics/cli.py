@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from interview_assistant.config import AppConfig
+from interview_assistant.windows_cuda import configure_cuda_runtime
 
 
 _REQUIRED_DEPENDENCIES = (
@@ -53,6 +54,12 @@ def _config_status(config_path: Path | None) -> str:
 def build_runtime_report(config_path: Path | None) -> dict[str, Any]:
     """Return a redacted package/runtime report without opening GUI or hardware."""
 
+    runtime = configure_cuda_runtime()
+    runtime_report = {
+        "status": "ready" if runtime.ready else "failed",
+        "missing_dlls": list(runtime.missing_dlls),
+        "search_directories": [str(path) for path in runtime.directories],
+    }
     dependencies: dict[str, dict[str, str]] = {}
     dependencies_ready = True
     for module_name, distribution_name in _REQUIRED_DEPENDENCIES:
@@ -79,11 +86,16 @@ def build_runtime_report(config_path: Path | None) -> dict[str, Any]:
     try:
         cuda_count = max(0, _cuda_device_count())
     except Exception:
-        cuda = {"status": "warning", "device_count": 0}
+        cuda = {
+            "status": "warning",
+            "device_count": 0,
+            "runtime": runtime_report,
+        }
     else:
         cuda = {
             "status": "ready" if cuda_count > 0 else "warning",
             "device_count": cuda_count,
+            "runtime": runtime_report,
         }
 
     config = _config_status(config_path)

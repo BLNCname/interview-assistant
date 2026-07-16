@@ -17,6 +17,7 @@ from numpy.typing import NDArray
 from interview_assistant.composition import default_config_path
 from interview_assistant.config import AppConfig
 from interview_assistant.stt.bundle import resolve_stt_model
+from interview_assistant.windows_cuda import configure_cuda_runtime
 
 
 class _Segment(Protocol):
@@ -46,6 +47,7 @@ def _create_model(
     compute_type: str,
     local_files_only: bool = False,
 ) -> _Model:
+    configure_cuda_runtime()
     from faster_whisper import WhisperModel  # type: ignore[import-untyped]
 
     model_options: dict[str, object] = {

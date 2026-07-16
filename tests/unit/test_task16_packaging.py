@@ -4,6 +4,7 @@ import hashlib
 import importlib.util
 import json
 import subprocess
+import sys
 import wave
 from collections.abc import Iterator
 from pathlib import Path
@@ -11,6 +12,8 @@ from types import ModuleType
 
 import numpy as np
 import pytest
+
+from interview_assistant.windows_cuda import CudaRuntimeStatus
 
 
 ROOT = Path(__file__).parents[2]
@@ -278,6 +281,11 @@ def test_no_gui_diagnostics_atomically_write_redacted_json(
     )
     monkeypatch.setattr(module, "_cpu_compute_types", lambda: ("float32",))
     monkeypatch.setattr(module, "_cuda_device_count", lambda: 0)
+    monkeypatch.setattr(
+        module,
+        "configure_cuda_runtime",
+        lambda: CudaRuntimeStatus((), ()),
+    )
 
     exit_code = module.run_no_gui_diagnostics(
         config_path=config_path,
@@ -290,7 +298,15 @@ def test_no_gui_diagnostics_atomically_write_redacted_json(
     assert payload["status"] == "ok"
     assert payload["config"] == "ready"
     assert payload["cpu"] == {"status": "ready", "compute_types": ["float32"]}
-    assert payload["cuda"] == {"status": "warning", "device_count": 0}
+    assert payload["cuda"] == {
+        "status": "warning",
+        "device_count": 0,
+        "runtime": {
+            "status": "ready",
+            "missing_dlls": [],
+            "search_directories": [],
+        },
+    }
     assert "private-model-name" not in serialized
     assert "confidential-model-key" not in serialized
     assert str(config_path) not in serialized
@@ -307,6 +323,11 @@ def test_no_gui_diagnostics_preserve_existing_report_when_atomic_replace_fails(
     monkeypatch.setattr(module, "_dependency_version", lambda *_args: "test")
     monkeypatch.setattr(module, "_cpu_compute_types", lambda: ("float32",))
     monkeypatch.setattr(module, "_cuda_device_count", lambda: 0)
+    monkeypatch.setattr(
+        module,
+        "configure_cuda_runtime",
+        lambda: CudaRuntimeStatus((), ()),
+    )
 
     def fail_replace(_source: Path, _destination: Path) -> None:
         raise OSError("simulated replacement failure")
@@ -340,6 +361,55 @@ class _Model:
     ) -> tuple[Iterator[_Segment], _Info]:
         self.transcribe_calls.append((audio, options))
         return iter((_Segment(),)), _Info()
+
+
+def test_runtime_report_lists_cuda_search_directories_and_missing_dlls(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _load_diagnostics_module()
+    monkeypatch.setattr(
+        module,
+        "configure_cuda_runtime",
+        lambda: CudaRuntimeStatus(
+            (Path(r"C:\CUDA12\bin"), Path(r"C:\CUDNN8\bin")),
+            ("cudnn64_8.dll",),
+        ),
+    )
+    monkeypatch.setattr(module, "_dependency_version", lambda *_args: "1.0")
+    monkeypatch.setattr(module, "_cpu_compute_types", lambda: ("float32",))
+    monkeypatch.setattr(module, "_cuda_device_count", lambda: 1)
+
+    report = module.build_runtime_report(config_path=None)
+
+    assert report["cuda"]["runtime"] == {
+        "status": "failed",
+        "missing_dlls": ["cudnn64_8.dll"],
+        "search_directories": [r"C:\CUDA12\bin", r"C:\CUDNN8\bin"],
+    }
+
+
+def test_cuda_verifier_configures_runtime_before_whisper_import(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _load_cuda_module()
+    calls: list[str] = []
+    fake_module = ModuleType("faster_whisper")
+
+    def whisper_model(*_args: object, **_kwargs: object) -> _Model:
+        calls.append("WhisperModel")
+        return _Model()
+
+    fake_module.WhisperModel = whisper_model  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "faster_whisper", fake_module)
+    monkeypatch.setattr(
+        module,
+        "configure_cuda_runtime",
+        lambda: calls.append("configure_cuda_runtime"),
+    )
+
+    module._create_model("test-model", device="cuda", compute_type="float16")
+
+    assert calls == ["configure_cuda_runtime", "WhisperModel"]
 
 
 def test_cuda_verifier_uses_configured_model_and_reports_timing_without_text(

@@ -7,6 +7,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 from interview_assistant.audio.models import AudioSource
+from interview_assistant.windows_cuda import configure_cuda_runtime
 
 
 def resolve_stt_model(model_name: str) -> str:
@@ -143,6 +144,8 @@ def _create_whisper_model(
     compute_type: str,
     local_files_only: bool = False,
 ) -> _WhisperModel:
+    if device == "cuda":
+        configure_cuda_runtime()
     from faster_whisper import WhisperModel  # type: ignore[import-untyped]
 
     model_options: dict[str, object] = {
