@@ -71,6 +71,12 @@ _WINDOWS_RESERVED_FILENAMES = frozenset(
         "CONOUT$",
         "NUL",
         "PRN",
+        "COM¹",
+        "COM²",
+        "COM³",
+        "LPT¹",
+        "LPT²",
+        "LPT³",
         *(f"COM{number}" for number in range(1, 10)),
         *(f"LPT{number}" for number in range(1, 10)),
     }
@@ -82,7 +88,12 @@ def _invalid_manifest() -> SttManifestError:
 
 
 def _is_windows_safe_basename(value: object) -> bool:
-    if not isinstance(value, str) or not value or value[-1] in {" ", "."}:
+    if (
+        not isinstance(value, str)
+        or not value
+        or len(value) > 255
+        or value[-1] in {" ", "."}
+    ):
         return False
     if any(
         ord(character) < 32
