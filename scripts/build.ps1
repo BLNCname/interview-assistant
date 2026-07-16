@@ -47,7 +47,7 @@ try {
         throw "uv.lock is missing or out of date; regenerate and review it before building."
     }
 
-    & $uv.Source sync --extra dev --frozen
+    & $uv.Source sync --extra dev --extra cuda --frozen
     if ($LASTEXITCODE -ne 0) {
         throw "Frozen uv sync failed; regenerate and review uv.lock before building."
     }

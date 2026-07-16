@@ -27,11 +27,15 @@ class CudaRuntimeStatus:
 
 
 def _default_directories() -> tuple[Path, ...]:
-    site_packages = Path(sys.prefix) / "Lib" / "site-packages" / "nvidia"
+    if bool(getattr(sys, "frozen", False)):
+        package_root = Path(getattr(sys, "_MEIPASS"))
+    else:
+        package_root = Path(sys.prefix) / "Lib" / "site-packages"
+    nvidia_root = package_root / "nvidia"
     candidates = (
-        site_packages / "cuda_runtime" / "bin",
-        site_packages / "cublas" / "bin",
-        site_packages / "cudnn" / "bin",
+        nvidia_root / "cuda_runtime" / "bin",
+        nvidia_root / "cublas" / "bin",
+        nvidia_root / "cudnn" / "bin",
     )
     return tuple(path.resolve() for path in candidates if path.is_dir())
 

@@ -1,5 +1,8 @@
 from pathlib import Path
 
+import pytest
+
+from interview_assistant import windows_cuda
 from interview_assistant.windows_cuda import configure_cuda_runtime
 
 
@@ -48,3 +51,28 @@ def test_cuda_runtime_reports_each_missing_dll(tmp_path: Path) -> None:
         "cublasLt64_12.dll",
         "cudnn64_8.dll",
     )
+
+
+def test_cuda_runtime_discovers_frozen_nvidia_layout(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    nvidia_root = tmp_path / "nvidia"
+    directories = (
+        nvidia_root / "cuda_runtime" / "bin",
+        nvidia_root / "cublas" / "bin",
+        nvidia_root / "cudnn" / "bin",
+    )
+    for directory in directories:
+        directory.mkdir(parents=True)
+    (directories[0] / "cudart64_12.dll").touch()
+    (directories[1] / "cublas64_12.dll").touch()
+    (directories[1] / "cublasLt64_12.dll").touch()
+    (directories[2] / "cudnn64_8.dll").touch()
+    monkeypatch.setattr(windows_cuda.sys, "frozen", True, raising=False)
+    monkeypatch.setattr(windows_cuda.sys, "_MEIPASS", str(tmp_path), raising=False)
+
+    status = configure_cuda_runtime(add_directory=lambda _value: object())
+
+    assert status.ready
+    assert status.directories == tuple(path.resolve() for path in directories)

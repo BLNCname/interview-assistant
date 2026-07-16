@@ -23,6 +23,9 @@ PACKAGES = (
     "keyring",
     "pyaudiowpatch",
     "pynput",
+    "nvidia.cuda_runtime",
+    "nvidia.cublas",
+    "nvidia.cudnn",
 )
 DISTRIBUTIONS = (
     "PyQt6",
@@ -33,6 +36,9 @@ DISTRIBUTIONS = (
     "keyring",
     "PyAudioWPatch",
     "pynput",
+    "nvidia-cuda-runtime-cu12",
+    "nvidia-cublas-cu12",
+    "nvidia-cudnn-cu12",
 )
 
 

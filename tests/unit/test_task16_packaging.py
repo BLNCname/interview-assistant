@@ -111,6 +111,8 @@ def test_pyinstaller_spec_declares_reproducible_onedir_windowed_bundle() -> None
     assert "version=" in source
     for package in ("PyQt6", "faster_whisper", "ctranslate2", "mss", "keyring"):
         assert package in source
+    for package in ("nvidia.cuda_runtime", "nvidia.cublas", "nvidia.cudnn"):
+        assert package in source
     assert "stt-smoke.wav" in source
     assert "MODEL_WEIGHT_SUFFIXES" in source
     assert "copy_metadata" in source
@@ -135,9 +137,11 @@ def test_build_script_runs_packaged_headless_diagnostics_and_optional_cuda() -> 
     assert "Select-Object -First 1" in source
     assert "uv is required" in source
     assert "& $uv.Source lock --check" in source
-    assert "& $uv.Source sync --extra dev --frozen" in source
+    assert "& $uv.Source sync --extra dev --extra cuda --frozen" in source
     lock_check_index = source.index("& $uv.Source lock --check")
-    frozen_sync_index = source.index("& $uv.Source sync --extra dev --frozen")
+    frozen_sync_index = source.index(
+        "& $uv.Source sync --extra dev --extra cuda --frozen"
+    )
     assert lock_check_index < frozen_sync_index
     assert frozen_sync_index < source.index(
         '$python = Join-Path $root ".venv\\Scripts\\python.exe"'

@@ -658,7 +658,7 @@ Run:
 
 Expected: all tests pass; update existing assertions that intentionally encode the old RGB values, never affinity/state behavior.
 
-- [ ] **Step 6: Commit Ribbon repair**
+- [x] **Step 6: Commit Ribbon repair**
 
 ```powershell
 git add interview_assistant/ui/overlay.py tests/unit/test_overlay.py
@@ -678,7 +678,7 @@ git commit -m "fix: make graphite ribbon capture compatible"
 - Consumes: optional dependency group `cuda` from Task 2.
 - Produces: PyInstaller onedir `_internal/nvidia/{cuda_runtime,cublas,cudnn}/bin` and frozen-process discovery using the same relative layout.
 
-- [ ] **Step 1: Write failing packaging assertions**
+- [x] **Step 1: Write failing packaging assertions**
 
 Extend `test_pyinstaller_spec_declares_reproducible_onedir_windowed_bundle`:
 
@@ -693,13 +693,13 @@ Extend `test_build_script_runs_packaged_headless_diagnostics_and_optional_cuda`:
 assert "uv sync --extra dev --extra cuda --frozen" in source
 ```
 
-- [ ] **Step 2: Run and confirm RED**
+- [x] **Step 2: Run and confirm RED**
 
 Run: `.\.venv\Scripts\python.exe -m pytest tests\unit\test_task16_packaging.py -k "pyinstaller_spec or build_script" -v`
 
 Expected: FAIL because NVIDIA packages and the CUDA extra are absent.
 
-- [ ] **Step 3: Include the two NVIDIA runtime packages**
+- [x] **Step 3: Include the NVIDIA runtime packages**
 
 Add these exact entries to `PACKAGES` in `packaging/interview_assistant.spec`:
 
