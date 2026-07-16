@@ -36,6 +36,11 @@ dev = [
   "pyinstaller>=6.10,<7",
 ]
 
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["interview_assistant*"]
+exclude = ["src*"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"

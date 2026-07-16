@@ -56,7 +56,7 @@ Run the focused test from Step 1; expect PASS in less than 60 seconds. Then run:
 
 Expected: the full release-packaging module passes, including standalone archive construction and cleanup.
 
-- [ ] **Step 4: Commit the root-cause fix**
+- [x] **Step 4: Commit the root-cause fix**
 
 ```powershell
 git add scripts/create_source_archive.ps1 tests/unit/test_release_packaging.py docs/superpowers/plans/2026-07-16-windows-migration-repair.md
@@ -77,7 +77,7 @@ git commit -m "fix: isolate long archive staging from process temp"
 - Consumes: setuptools editable installation from the repository root.
 - Produces: explicit package discovery for `interview_assistant*`; generated `src` metadata can never become an import source.
 
-- [ ] **Step 1: Write the failing package-layout test**
+- [x] **Step 1: Write the failing package-layout test**
 
 Append to `tests/unit/test_package.py`:
 
@@ -85,7 +85,7 @@ Append to `tests/unit/test_package.py`:
 from pathlib import Path
 
 
-def test_setuptools_discovers_only_the_root_application_package() -> None:
+def test_setuptools_discovers_only_the_root_package() -> None:
     root = Path(__file__).parents[2]
     pyproject = (root / "pyproject.toml").read_text(encoding="utf-8")
 
@@ -95,13 +95,13 @@ def test_setuptools_discovers_only_the_root_application_package() -> None:
     assert "*.egg-info/" in (root / ".gitignore").read_text(encoding="utf-8")
 ```
 
-- [ ] **Step 2: Run the test and confirm RED**
+- [x] **Step 2: Run the test and confirm RED**
 
-Run: `.\.venv\Scripts\python.exe -m pytest tests\unit\test_package.py::test_setuptools_discovers_only_the_root_application_package -v`
+Run: `.\.venv\Scripts\python.exe -m pytest tests\unit\test_package.py::test_setuptools_discovers_only_the_root_package -v`
 
 Expected: FAIL because `[tool.setuptools.packages.find]` is absent.
 
-- [ ] **Step 3: Add explicit discovery and ignore rules**
+- [x] **Step 3: Add explicit discovery and ignore rules**
 
 Append to `pyproject.toml`:
 
@@ -118,7 +118,7 @@ Append to `.gitignore`:
 *.egg-info/
 ```
 
-- [ ] **Step 4: Verify GREEN and clean only generated artifacts**
+- [x] **Step 4: Verify GREEN and clean only generated artifacts**
 
 Run the same focused pytest command; expect PASS.
 
