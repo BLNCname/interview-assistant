@@ -54,19 +54,46 @@ def test_stale_delta_is_ignored(qtbot) -> None:
     assert ribbon.answer_text == ""
 
 
-def test_window_uses_overlay_flags_and_translucent_surface(qtbot) -> None:
-    bus = EventBus()
-    ribbon = LiquidRibbon(bus, config=OverlayConfig(opacity=0.2, max_height=280), settings=None)
+def test_window_uses_capture_compatible_opacity_and_rounded_mask(qtbot) -> None:
+    ribbon = LiquidRibbon(
+        EventBus(),
+        config=OverlayConfig(opacity=0.2, max_height=280),
+        settings=None,
+    )
     qtbot.addWidget(ribbon)
 
     flags = ribbon.windowFlags()
     assert flags & Qt.WindowType.FramelessWindowHint
     assert flags & Qt.WindowType.Tool
     assert flags & Qt.WindowType.WindowStaysOnTopHint
-    assert ribbon.testAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+    assert not ribbon.testAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+    assert ribbon.effective_window_opacity == 0.65
+    assert ribbon.windowOpacity() >= 0.65
+    assert math.isclose(ribbon.windowOpacity(), 0.65, abs_tol=1 / 255)
+    assert not ribbon.mask().isEmpty()
     assert ribbon.maximumHeight() == 280
     assert ribbon.surface.background_alpha >= 180
     assert ribbon.surface.corner_radius == 18
+
+
+def test_default_ribbon_uses_approved_graphite_palette(qtbot) -> None:
+    ribbon = LiquidRibbon(EventBus(), settings=None)
+    qtbot.addWidget(ribbon)
+
+    assert ribbon.effective_window_opacity == 0.88
+    assert ribbon.surface.gradient_top_rgb == (52, 54, 58)
+    assert ribbon.surface.gradient_bottom_rgb == (37, 38, 42)
+
+
+def test_window_mask_tracks_resize(qtbot) -> None:
+    ribbon = LiquidRibbon(EventBus(), settings=None)
+    qtbot.addWidget(ribbon)
+    ribbon.show()
+    qtbot.waitExposed(ribbon)
+    ribbon.resize(780, 180)
+    QApplication.processEvents()
+
+    assert ribbon.mask().boundingRect() == ribbon.rect()
 
 
 def test_reference_spacing_and_standard_collapse_icon_are_applied(qtbot) -> None:

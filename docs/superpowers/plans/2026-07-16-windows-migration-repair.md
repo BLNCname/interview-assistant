@@ -524,7 +524,7 @@ configure_cuda_runtime()
 from faster_whisper import WhisperModel  # type: ignore[import-untyped]
 ```
 
-- [ ] **Step 8: Verify GREEN and commit**
+- [x] **Step 8: Verify GREEN and commit**
 
 Run both focused commands, then:
 
@@ -546,7 +546,7 @@ git commit -m "feat: expose CUDA runtime readiness"
 - Produces: `LiquidRibbon._update_window_mask() -> None`, called after construction and from `resizeEvent`.
 - Preserves: affinity HWND lifecycle, state machine, drag/resize, collapse height 48 px.
 
-- [ ] **Step 1: Replace the old translucency test with failing capture-compatible assertions**
+- [x] **Step 1: Replace the old translucency test with failing capture-compatible assertions**
 
 Update `test_window_uses_overlay_flags_and_translucent_surface` in `tests/unit/test_overlay.py` to:
 
@@ -587,7 +587,7 @@ def test_window_mask_tracks_resize(qtbot) -> None:
     assert ribbon.mask().boundingRect() == ribbon.rect()
 ```
 
-- [ ] **Step 2: Run the three tests and confirm RED**
+- [x] **Step 2: Run the three tests and confirm RED**
 
 Run:
 
@@ -597,7 +597,7 @@ Run:
 
 Expected: FAIL on top-level translucent attribute, missing property/mask, and old blue palette.
 
-- [ ] **Step 3: Implement whole-window opacity and mask**
+- [x] **Step 3: Implement whole-window opacity and mask**
 
 In `interview_assistant/ui/overlay.py`:
 
@@ -635,7 +635,7 @@ self.effective_window_opacity = max(0.65, config.opacity)
 self.setWindowOpacity(self.effective_window_opacity)
 ```
 
-- [ ] **Step 4: Remove decorative blue/violet edge tint**
+- [x] **Step 4: Remove decorative blue/violet edge tint**
 
 Replace the edge gradient in `_RibbonSurface.paintEvent` with a neutral highlight:
 
@@ -647,7 +647,7 @@ edge.setColorAt(1.0, QColor(255, 255, 255, 42))
 
 Keep `_MODEL_CHIP_RGB` as the small cyan functional accent; change neutral secondary text inputs from blue-gray `(148, 163, 184)` to `(174, 174, 178)` and answer text preference to `(232, 232, 234)`.
 
-- [ ] **Step 5: Verify GREEN and the full Ribbon regression set**
+- [x] **Step 5: Verify GREEN and the full Ribbon regression set**
 
 Run:
 

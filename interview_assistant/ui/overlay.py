@@ -16,6 +16,7 @@ from PyQt6.QtGui import (
     QPainter,
     QPainterPath,
     QPen,
+    QRegion,
     QResizeEvent,
     QShowEvent,
     QTextCharFormat,
@@ -48,13 +49,13 @@ _MARKDOWN_TOKEN = re.compile(r"\*\*([^*\n]+)\*\*|`([^`\n]+)`")
 _LONG_UNBROKEN_TOKEN = re.compile(r"\S{65,}")
 
 _RGB = tuple[int, int, int]
-_SURFACE_TOP_RGB: _RGB = (30, 41, 59)
-_SURFACE_BOTTOM_RGB: _RGB = (15, 23, 42)
+_SURFACE_TOP_RGB: _RGB = (52, 54, 58)
+_SURFACE_BOTTOM_RGB: _RGB = (37, 38, 42)
 _STATUS_CHIP_RGB: _RGB = (255, 255, 255)
-_STATUS_CHIP_ALPHA = 14
+_STATUS_CHIP_ALPHA = 8
 _MODEL_CHIP_RGB: _RGB = (125, 211, 252)
-_MODEL_CHIP_ALPHA = 31
-_ANSWER_BACKGROUND_RGB: _RGB = (2, 6, 23)
+_MODEL_CHIP_ALPHA = 12
+_ANSWER_BACKGROUND_RGB: _RGB = (18, 18, 20)
 _ANSWER_BACKGROUND_ALPHA = 35
 _WHITE_RGB: _RGB = (255, 255, 255)
 _WCAG_AA_CONTRAST = 4.5
@@ -199,10 +200,9 @@ class _RibbonSurface(QWidget):
         painter.drawPath(path)
 
         edge = QLinearGradient(rect.topLeft(), rect.topRight())
-        edge.setColorAt(0.0, QColor(125, 211, 252, 150))
-        edge.setColorAt(0.38, QColor(125, 211, 252, 0))
-        edge.setColorAt(0.72, QColor(167, 139, 250, 0))
-        edge.setColorAt(1.0, QColor(167, 139, 250, 125))
+        edge.setColorAt(0.0, QColor(255, 255, 255, 72))
+        edge.setColorAt(0.45, QColor(255, 255, 255, 0))
+        edge.setColorAt(1.0, QColor(255, 255, 255, 42))
         painter.setPen(QPen(edge, 1.0))
         painter.drawPath(path)
 
@@ -286,12 +286,14 @@ class LiquidRibbon(QMainWindow):
         self._fallback_resize_edges = Qt.Edge(0)
 
         self.setWindowTitle("Interview Assistant")
-        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.effective_window_opacity = max(0.65, self._config.opacity)
+        self.setWindowOpacity(math.ceil(self.effective_window_opacity * 255) / 255)
         self.setMinimumHeight(self._minimum_expanded_height)
         self.setMaximumHeight(self._config.max_height)
         self._build_content()
         self._set_default_geometry()
         self._restore_geometry()
+        self._update_window_mask()
 
         # All event connections are established before callers can show the window.
         events.state_changed.connect(self.show_state)
@@ -322,6 +324,8 @@ class LiquidRibbon(QMainWindow):
         """Apply saved visual settings to the existing native overlay window."""
 
         self._config = config
+        self.effective_window_opacity = max(0.65, config.opacity)
+        self.setWindowOpacity(math.ceil(self.effective_window_opacity * 255) / 255)
         self.surface.set_opacity(config.opacity)
         self._minimum_expanded_height = min(120, config.max_height)
         self._expanded_height = min(
@@ -339,6 +343,17 @@ class LiquidRibbon(QMainWindow):
             min(config.max_height, max(self._minimum_expanded_height, self.height())),
         )
         self._adjust_height(shrink=True)
+
+    def _update_window_mask(self) -> None:
+        if self.width() <= 0 or self.height() <= 0:
+            return
+        path = QPainterPath()
+        path.addRoundedRect(QRectF(self.rect()), 18.0, 18.0)
+        self.setMask(QRegion(path.toFillPolygon().toPolygon()))
+
+    def resizeEvent(self, event: QResizeEvent | None) -> None:
+        super().resizeEvent(event)
+        self._update_window_mask()
 
     def showEvent(self, event: QShowEvent | None) -> None:
         super().showEvent(event)
@@ -412,7 +427,7 @@ class LiquidRibbon(QMainWindow):
             for background in surface_backgrounds
         )
         secondary_text = _hex_color(
-            _accessible_text_rgb((148, 163, 184), surface_backgrounds)
+            _accessible_text_rgb((174, 174, 178), surface_backgrounds)
         )
         status_text = _hex_color(
             _accessible_text_rgb((203, 213, 225), status_backgrounds)
@@ -421,7 +436,7 @@ class LiquidRibbon(QMainWindow):
             _accessible_text_rgb((186, 230, 253), model_backgrounds)
         )
         answer_text = _hex_color(
-            _accessible_text_rgb((219, 234, 254), answer_backgrounds)
+            _accessible_text_rgb((232, 232, 234), answer_backgrounds)
         )
         control_text = _hex_color(
             _accessible_text_rgb((219, 234, 254), surface_backgrounds)
@@ -560,7 +575,7 @@ class LiquidRibbon(QMainWindow):
             f"background: {_rgba_css(_ANSWER_BACKGROUND_RGB, _ANSWER_BACKGROUND_ALPHA)}; "
             "border: 0; border-radius: 8px; padding: 2px 5px; font-size: 13px; }"
             "QScrollBar:vertical { width: 7px; background: transparent; }"
-            "QScrollBar::handle:vertical { background: rgba(148, 163, 184, 90); "
+            "QScrollBar::handle:vertical { background: rgba(174, 174, 178, 90); "
             "border-radius: 3px; min-height: 18px; }"
         )
         self.answer_layout.addWidget(self.answer_browser, 1)
