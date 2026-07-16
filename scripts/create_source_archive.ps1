@@ -61,6 +61,83 @@ function Assert-PathWithinRoot {
     }
 }
 
+function ConvertTo-ExtendedLengthPath {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path
+    )
+
+    $fullPath = [IO.Path]::GetFullPath($Path)
+    if ($fullPath.StartsWith("\\", [StringComparison]::Ordinal)) {
+        return "\\?\UNC\" + $fullPath.Substring(2)
+    }
+    return "\\?\" + $fullPath
+}
+
+function Remove-VerifiedDirectoryTree {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path
+    )
+
+    $extendedPath = ConvertTo-ExtendedLengthPath -Path $Path
+    if ([IO.Directory]::Exists($extendedPath)) {
+        $pendingDirectories = New-Object "System.Collections.Generic.Stack[string]"
+        $pendingDirectories.Push($extendedPath)
+        while ($pendingDirectories.Count -gt 0) {
+            $currentDirectory = $pendingDirectories.Pop()
+            foreach ($entryPath in [IO.Directory]::EnumerateFileSystemEntries(
+                $currentDirectory
+            )) {
+                $attributes = [IO.File]::GetAttributes($entryPath)
+                $isDirectory = (
+                    $attributes -band [IO.FileAttributes]::Directory
+                ) -ne 0
+                $isReparsePoint = (
+                    $attributes -band [IO.FileAttributes]::ReparsePoint
+                ) -ne 0
+                if ($isDirectory -and -not $isReparsePoint) {
+                    $pendingDirectories.Push($entryPath)
+                }
+                elseif (
+                    -not $isDirectory -and
+                    -not $isReparsePoint -and
+                    ($attributes -band [IO.FileAttributes]::ReadOnly) -ne 0
+                ) {
+                    $writableAttributes = $attributes -bxor (
+                        [IO.FileAttributes]::ReadOnly
+                    )
+                    [IO.File]::SetAttributes(
+                        $entryPath,
+                        [IO.FileAttributes]$writableAttributes
+                    )
+                }
+            }
+        }
+        [IO.Directory]::Delete($extendedPath, $true)
+    }
+}
+
+function Remove-VerifiedFile {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path
+    )
+
+    $extendedPath = ConvertTo-ExtendedLengthPath -Path $Path
+    if ([IO.File]::Exists($extendedPath)) {
+        $attributes = [IO.File]::GetAttributes($extendedPath)
+        if (($attributes -band [IO.FileAttributes]::ReadOnly) -ne 0) {
+            $writableAttributes = $attributes -bxor [IO.FileAttributes]::ReadOnly
+            [IO.File]::SetAttributes(
+                $extendedPath,
+                [IO.FileAttributes]$writableAttributes
+            )
+        }
+        [IO.File]::Delete($extendedPath)
+    }
+}
+
 $git = Get-Command git.exe -CommandType Application -ErrorAction SilentlyContinue | `
     Select-Object -First 1
 if ($null -eq $git) {
@@ -98,12 +175,47 @@ $sourceHead = ([string]($headOutput | Select-Object -Last 1)).Trim()
 if ($sourceHead -notmatch "^[0-9a-fA-F]{40,64}$") {
     throw "Unable to resolve the current Git HEAD."
 }
-
-$manifestPath = Join-Path $resolvedRepository "packaging\stt_model_manifest.json"
-if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) {
-    throw "The tracked STT model manifest is missing."
+$branchOutput = Invoke-GitCommand -GitPath $git.Source -Arguments @(
+    "-C",
+    $resolvedRepository,
+    "symbolic-ref",
+    "--quiet",
+    "--short",
+    "HEAD"
+)
+$sourceBranch = ([string]($branchOutput | Select-Object -Last 1)).Trim()
+if ([string]::IsNullOrWhiteSpace($sourceBranch)) {
+    throw "The source HEAD must be attached to a local branch."
 }
-$manifest = Get-Content -Raw -LiteralPath $manifestPath | ConvertFrom-Json
+$branchHeadOutput = Invoke-GitCommand -GitPath $git.Source -Arguments @(
+    "-C",
+    $resolvedRepository,
+    "rev-parse",
+    "--verify",
+    "refs/heads/$sourceBranch"
+)
+$branchHead = ([string]($branchHeadOutput | Select-Object -Last 1)).Trim()
+if ($branchHead -ne $sourceHead) {
+    throw "The source branch changed while release inputs were captured."
+}
+
+$manifestObject = "${sourceHead}:packaging/stt_model_manifest.json"
+$manifestOutput = Invoke-GitCommand -GitPath $git.Source -Arguments @(
+    "-C",
+    $resolvedRepository,
+    "show",
+    $manifestObject
+)
+$manifestJson = ($manifestOutput -join "`n")
+if ([string]::IsNullOrWhiteSpace($manifestJson)) {
+    throw "The captured HEAD STT model manifest is missing."
+}
+try {
+    $manifest = $manifestJson | ConvertFrom-Json
+}
+catch {
+    throw "The captured HEAD STT model manifest is invalid."
+}
 $requiredManifestProperties = @(
     "schema_version",
     "name",
@@ -128,50 +240,6 @@ if (
     @($manifest.files).Count -eq 0
 ) {
     throw "The tracked STT model manifest metadata is invalid."
-}
-
-if (-not (Test-Path -LiteralPath $SttModelPath -PathType Container)) {
-    throw "The supplied STT model directory does not exist."
-}
-$resolvedModelPath = (Resolve-Path -LiteralPath $SttModelPath).Path
-$validatedModelFiles = @()
-$seenModelFiles = @{}
-foreach ($entry in @($manifest.files)) {
-    foreach ($propertyName in @("path", "size", "sha256", "runtime_required")) {
-        if ($null -eq $entry.PSObject.Properties[$propertyName]) {
-            throw "The tracked STT model manifest file schema is invalid."
-        }
-    }
-    $relativeFile = [string]$entry.path
-    $normalizedKey = $relativeFile.ToLowerInvariant()
-    if (
-        [string]::IsNullOrWhiteSpace($relativeFile) -or
-        $relativeFile -ne [IO.Path]::GetFileName($relativeFile) -or
-        $seenModelFiles.ContainsKey($normalizedKey) -or
-        ($entry.size -isnot [int] -and $entry.size -isnot [long]) -or
-        [long]$entry.size -lt 0 -or
-        [string]$entry.sha256 -notmatch "^[0-9a-fA-F]{64}$" -or
-        $entry.runtime_required -isnot [bool]
-    ) {
-        throw "The tracked STT model manifest file entry is invalid."
-    }
-    $seenModelFiles[$normalizedKey] = $true
-    $sourceModelFile = Join-Path $resolvedModelPath $relativeFile
-    if (-not (Test-Path -LiteralPath $sourceModelFile -PathType Leaf)) {
-        throw "A manifest-listed STT model file is missing."
-    }
-    $modelFileInfo = Get-Item -LiteralPath $sourceModelFile
-    if ($modelFileInfo.Length -ne [long]$entry.size) {
-        throw "A manifest-listed STT model file has an unexpected size."
-    }
-    $actualHash = (Get-FileHash -LiteralPath $sourceModelFile -Algorithm SHA256).Hash
-    if ($actualHash -ne ([string]$entry.sha256).ToUpperInvariant()) {
-        throw "A manifest-listed STT model file has an unexpected SHA-256."
-    }
-    $validatedModelFiles += [PSCustomObject]@{
-        Name = $relativeFile
-        Source = $sourceModelFile
-    }
 }
 
 if ([string]::IsNullOrWhiteSpace($OutputPath)) {
@@ -200,21 +268,34 @@ if (Test-Path -LiteralPath $resolvedOutputPath) {
 }
 
 $stagingName = "InterviewAssistant-source-staging-$([Guid]::NewGuid().ToString('N'))"
-$stagingRoot = Join-Path ([IO.Path]::GetTempPath()) $stagingName
-$resolvedStagingRoot = $null
+$temporaryRoot = [IO.Path]::GetFullPath([IO.Path]::GetTempPath())
+$stagingRoot = [IO.Path]::GetFullPath(
+    [IO.Path]::Combine($temporaryRoot, $stagingName)
+)
+Assert-PathWithinRoot -Candidate $stagingRoot -Root $temporaryRoot
+if ((Split-Path -Leaf $stagingRoot) -ne $stagingName) {
+    throw "Refusing to create an unexpected staging directory."
+}
+$resolvedStagingRoot = $stagingRoot
+$stagingCreationAttempted = $false
 $producedArchive = $null
+$primaryError = $null
+$cleanupError = $null
 try {
-    New-Item -ItemType Directory -Path $stagingRoot | Out-Null
-    $resolvedStagingRoot = (Resolve-Path -LiteralPath $stagingRoot).Path
-    $temporaryRoot = (Resolve-Path -LiteralPath ([IO.Path]::GetTempPath())).Path
-    Assert-PathWithinRoot -Candidate $resolvedStagingRoot -Root $temporaryRoot
+    $stagingCreationAttempted = $true
+    $extendedStagingRoot = ConvertTo-ExtendedLengthPath -Path $resolvedStagingRoot
+    [void][IO.Directory]::CreateDirectory($extendedStagingRoot)
 
     $archiveTopLevel = "InterviewAssistant-source-$Version"
     $checkoutPath = Join-Path $resolvedStagingRoot $archiveTopLevel
     Assert-PathWithinRoot -Candidate $checkoutPath -Root $resolvedStagingRoot
     [void](Invoke-GitCommand -GitPath $git.Source -Arguments @(
         "clone",
-        "--no-hardlinks",
+        "--no-local",
+        "--single-branch",
+        "--no-tags",
+        "--branch",
+        $sourceBranch,
         "--no-checkout",
         "--",
         $resolvedRepository,
@@ -224,7 +305,8 @@ try {
         "-C",
         $checkoutPath,
         "checkout",
-        "--detach",
+        "-B",
+        $sourceBranch,
         $sourceHead
     ))
     [void](Invoke-GitCommand -GitPath $git.Source -Arguments @(
@@ -234,6 +316,17 @@ try {
         "remove",
         "origin"
     ))
+    $remoteHeadRefPath = Join-Path $checkoutPath ".git\refs\remotes\origin\HEAD"
+    $extendedRemoteHeadRefPath = ConvertTo-ExtendedLengthPath -Path $remoteHeadRefPath
+    if ([IO.File]::Exists($extendedRemoteHeadRefPath)) {
+        [void](Invoke-GitCommand -GitPath $git.Source -Arguments @(
+            "-C",
+            $checkoutPath,
+            "symbolic-ref",
+            "--delete",
+            "refs/remotes/origin/HEAD"
+        ))
+    }
     $clonedHeadOutput = Invoke-GitCommand -GitPath $git.Source -Arguments @(
         "-C",
         $checkoutPath,
@@ -245,6 +338,18 @@ try {
     if ($clonedHead -ne $sourceHead) {
         throw "The standalone clone does not match the source HEAD."
     }
+    $clonedBranchOutput = Invoke-GitCommand -GitPath $git.Source -Arguments @(
+        "-C",
+        $checkoutPath,
+        "symbolic-ref",
+        "--quiet",
+        "--short",
+        "HEAD"
+    )
+    $clonedBranch = ([string]($clonedBranchOutput | Select-Object -Last 1)).Trim()
+    if ($clonedBranch -ne $sourceBranch) {
+        throw "The standalone clone is not on the captured source branch."
+    }
     $remainingRemotes = @(
         Invoke-GitCommand -GitPath $git.Source -Arguments @(
             "-C",
@@ -255,9 +360,110 @@ try {
     if ($remainingRemotes.Count -ne 0) {
         throw "The standalone clone unexpectedly retains a Git remote."
     }
+    $remainingRemoteRefs = @(
+        Invoke-GitCommand -GitPath $git.Source -Arguments @(
+            "-C",
+            $checkoutPath,
+            "for-each-ref",
+            "--format=%(refname)",
+            "refs/remotes/"
+        )
+    )
+    if ($remainingRemoteRefs.Count -ne 0) {
+        throw "The standalone clone unexpectedly retains a remote-tracking ref."
+    }
+    $remoteRefsDirectory = Join-Path $checkoutPath ".git\refs\remotes"
+    Assert-PathWithinRoot -Candidate $remoteRefsDirectory -Root $resolvedStagingRoot
+    Remove-VerifiedDirectoryTree -Path $remoteRefsDirectory
     $alternatesPath = Join-Path $checkoutPath ".git\objects\info\alternates"
     if (Test-Path -LiteralPath $alternatesPath) {
         throw "The source clone depends on an external Git object store."
+    }
+
+    [void](Invoke-GitCommand -GitPath $git.Source -Arguments @(
+        "-C",
+        $checkoutPath,
+        "reflog",
+        "expire",
+        "--expire=now",
+        "--expire-unreachable=now",
+        "--all"
+    ))
+    [void](Invoke-GitCommand -GitPath $git.Source -Arguments @(
+        "-C",
+        $checkoutPath,
+        "gc",
+        "--prune=now"
+    ))
+    $gitLogsPath = Join-Path $checkoutPath ".git\logs"
+    Assert-PathWithinRoot -Candidate $gitLogsPath -Root $resolvedStagingRoot
+    Remove-VerifiedDirectoryTree -Path $gitLogsPath
+    foreach ($transientGitFile in @("FETCH_HEAD", "ORIG_HEAD")) {
+        $transientGitPath = Join-Path $checkoutPath ".git\$transientGitFile"
+        Assert-PathWithinRoot -Candidate $transientGitPath -Root $resolvedStagingRoot
+        Remove-VerifiedFile -Path $transientGitPath
+    }
+    $fsckOutput = @(
+        Invoke-GitCommand -GitPath $git.Source -Arguments @(
+            "-C",
+            $checkoutPath,
+            "fsck",
+            "--no-reflogs",
+            "--unreachable",
+            "--no-progress"
+        )
+    )
+    $unexpectedFsckOutput = @($fsckOutput | Where-Object {
+        -not [string]::IsNullOrWhiteSpace([string]$_)
+    })
+    if ($unexpectedFsckOutput.Count -ne 0) {
+        throw "The standalone clone retains unreachable Git objects."
+    }
+
+    if (-not (Test-Path -LiteralPath $SttModelPath -PathType Container)) {
+        throw "The supplied STT model directory does not exist."
+    }
+    $resolvedModelPath = (Resolve-Path -LiteralPath $SttModelPath).Path
+    $validatedModelFiles = @()
+    $seenModelFiles = @{}
+    foreach ($entry in @($manifest.files)) {
+        foreach ($propertyName in @("path", "size", "sha256", "runtime_required")) {
+            if ($null -eq $entry.PSObject.Properties[$propertyName]) {
+                throw "The tracked STT model manifest file schema is invalid."
+            }
+        }
+        $relativeFile = [string]$entry.path
+        $normalizedKey = $relativeFile.ToLowerInvariant()
+        if (
+            [string]::IsNullOrWhiteSpace($relativeFile) -or
+            $relativeFile -ne [IO.Path]::GetFileName($relativeFile) -or
+            $seenModelFiles.ContainsKey($normalizedKey) -or
+            ($entry.size -isnot [int] -and $entry.size -isnot [long]) -or
+            [long]$entry.size -lt 0 -or
+            [string]$entry.sha256 -notmatch "^[0-9a-fA-F]{64}$" -or
+            $entry.runtime_required -isnot [bool]
+        ) {
+            throw "The tracked STT model manifest file entry is invalid."
+        }
+        $seenModelFiles[$normalizedKey] = $true
+        $sourceModelFile = Join-Path $resolvedModelPath $relativeFile
+        if (-not (Test-Path -LiteralPath $sourceModelFile -PathType Leaf)) {
+            throw "A manifest-listed STT model file is missing."
+        }
+        $modelFileInfo = Get-Item -LiteralPath $sourceModelFile
+        if ($modelFileInfo.Length -ne [long]$entry.size) {
+            throw "A manifest-listed STT model file has an unexpected size."
+        }
+        $actualHash = (
+            Get-FileHash -LiteralPath $sourceModelFile -Algorithm SHA256
+        ).Hash
+        if ($actualHash -ne ([string]$entry.sha256).ToUpperInvariant()) {
+            throw "A manifest-listed STT model file has an unexpected SHA-256."
+        }
+        $validatedModelFiles += [PSCustomObject]@{
+            Name = $relativeFile
+            Source = $sourceModelFile
+        }
     }
 
     $runtimeConfig = Join-Path $checkoutPath "config.yaml"
@@ -352,23 +558,44 @@ try {
     }
     $producedArchive = (Resolve-Path -LiteralPath $resolvedOutputPath).Path
 }
+catch {
+    $primaryError = $_
+}
 finally {
-    if (
-        $null -ne $resolvedStagingRoot -and
-        (Test-Path -LiteralPath $resolvedStagingRoot -PathType Container)
-    ) {
-        $cleanupCandidate = (Resolve-Path -LiteralPath $resolvedStagingRoot).Path
-        $cleanupTemporaryRoot = (
-            Resolve-Path -LiteralPath ([IO.Path]::GetTempPath())
-        ).Path
-        Assert-PathWithinRoot -Candidate $cleanupCandidate -Root $cleanupTemporaryRoot
-        if ((Split-Path -Leaf $cleanupCandidate) -ne $stagingName) {
-            throw "Refusing to clean an unexpected staging directory."
+    try {
+        if ($stagingCreationAttempted) {
+            $cleanupCandidate = [IO.Path]::GetFullPath($resolvedStagingRoot)
+            $cleanupTemporaryRoot = [IO.Path]::GetFullPath(
+                [IO.Path]::GetTempPath()
+            )
+            Assert-PathWithinRoot `
+                -Candidate $cleanupCandidate `
+                -Root $cleanupTemporaryRoot
+            if ((Split-Path -Leaf $cleanupCandidate) -ne $stagingName) {
+                throw "Refusing to clean an unexpected staging directory."
+            }
+            Remove-VerifiedDirectoryTree -Path $cleanupCandidate
+            $extendedCleanupCandidate = ConvertTo-ExtendedLengthPath `
+                -Path $cleanupCandidate
+            if ([IO.Directory]::Exists($extendedCleanupCandidate)) {
+                throw "The script-owned staging directory could not be removed."
+            }
         }
-        Remove-Item -LiteralPath $cleanupCandidate -Recurse -Force
+    }
+    catch {
+        $cleanupError = $_
     }
 }
 
+if ($null -ne $primaryError) {
+    if ($null -ne $cleanupError) {
+        Write-Warning "Staging cleanup encountered a secondary error."
+    }
+    throw $primaryError
+}
+if ($null -ne $cleanupError) {
+    throw $cleanupError
+}
 if ($null -eq $producedArchive) {
     throw "The source ZIP archive was not produced."
 }

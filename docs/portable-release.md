@@ -27,8 +27,9 @@ Hugging Face metadata. After extraction on the target PC, recreate the developme
 uv sync --extra dev --frozen
 ```
 
-The extracted standalone clone has no `origin` remote. Add the intended remote explicitly before
-pushing any commits.
+The extracted standalone clone remains on the captured source branch at the exact captured commit.
+It has no `origin` remote, remote-tracking refs, reflogs, transient fetch state, tags, or
+unreachable Git objects. Add the intended remote explicitly before pushing any commits.
 
 ## Trust and hardware verification
 

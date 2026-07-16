@@ -46,9 +46,12 @@ def _model_entry(path: str, content: bytes, *, runtime_required: bool) -> dict[s
     }
 
 
-def _create_source_repository(tmp_path: Path) -> tuple[Path, Path, dict[str, bytes], str]:
+def _create_source_repository(
+    tmp_path: Path,
+) -> tuple[Path, Path, dict[str, bytes], str, str, str]:
+    repository_store = tmp_path / "repository store"
+    repository_store.mkdir()
     repository = tmp_path / "source repository"
-    repository.mkdir()
     model_files = {
         "config.json": b'{"model": "tiny-test-fixture"}\n',
         "model.bin": b"small-not-a-real-model\x00\x01",
@@ -90,17 +93,45 @@ def _create_source_repository(tmp_path: Path) -> tuple[Path, Path, dict[str, byt
         ),
     }
     for relative_path, tracked_content in tracked.items():
-        path = repository / relative_path
+        path = repository_store / relative_path
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(tracked_content, encoding="utf-8")
 
-    _git("init", "-b", "main", cwd=repository)
-    _git("config", "user.name", "Release Test", cwd=repository)
-    _git("config", "user.email", "release-test@example.invalid", cwd=repository)
-    _git("add", ".", cwd=repository)
-    _git("commit", "-m", "fixture head", cwd=repository)
-    head = _git("rev-parse", "HEAD", cwd=repository).stdout.strip()
-    _git("remote", "add", "origin", "https://example.invalid/source.git", cwd=repository)
+    _git("init", "-b", "main", cwd=repository_store)
+    _git("config", "user.name", "Release Test", cwd=repository_store)
+    _git("config", "user.email", "release-test@example.invalid", cwd=repository_store)
+    _git("add", ".", cwd=repository_store)
+    _git("commit", "-m", "fixture head", cwd=repository_store)
+    head = _git("rev-parse", "HEAD", cwd=repository_store).stdout.strip()
+
+    _git("switch", "-c", "discarded-secret-history", cwd=repository_store)
+    _git("config", "user.name", "Secret Fixture Identity", cwd=repository_store)
+    _git("config", "user.email", "secret-fixture@example.invalid", cwd=repository_store)
+    (repository_store / "credential-secret.txt").write_text(
+        "DANGLING_SECRET_BLOB_MUST_NOT_BE_ARCHIVED\n",
+        encoding="utf-8",
+    )
+    _git("add", "credential-secret.txt", cwd=repository_store)
+    _git("commit", "-m", "discarded secret fixture", cwd=repository_store)
+    secret_commit = _git("rev-parse", "HEAD", cwd=repository_store).stdout.strip()
+    secret_blob = _git(
+        "rev-parse",
+        "HEAD:credential-secret.txt",
+        cwd=repository_store,
+    ).stdout.strip()
+    _git("switch", "main", cwd=repository_store)
+    _git("branch", "-D", "discarded-secret-history", cwd=repository_store)
+    _git("config", "user.name", "Release Test", cwd=repository_store)
+    _git("config", "user.email", "release-test@example.invalid", cwd=repository_store)
+    _git(
+        "remote",
+        "add",
+        "origin",
+        "https://example.invalid/source.git",
+        cwd=repository_store,
+    )
+    _git("switch", "--detach", cwd=repository_store)
+    _git("worktree", "add", str(repository), "main", cwd=repository_store)
 
     ignored_files = {
         ".venv/secret.txt": "venv secret\n",
@@ -135,7 +166,21 @@ def _create_source_repository(tmp_path: Path) -> tuple[Path, Path, dict[str, byt
     cache_file = model_path / ".cache" / "huggingface" / "download-token"
     cache_file.parent.mkdir(parents=True)
     cache_file.write_text("must not be archived\n", encoding="utf-8")
-    return repository, model_path, model_files, head
+    return repository, model_path, model_files, head, secret_commit, secret_blob
+
+
+def _write_dirty_worktree_manifest(repository: Path, model_path: Path) -> None:
+    manifest_path = repository / "packaging" / "stt_model_manifest.json"
+    dirty_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    dirty_manifest["dirty_marker"] = "WORKTREE_MANIFEST_MUST_NOT_BE_ARCHIVED"
+    dirty_manifest["files"] = [
+        _model_entry(
+            "unlisted.bin",
+            (model_path / "unlisted.bin").read_bytes(),
+            runtime_required=True,
+        )
+    ]
+    manifest_path.write_text(json.dumps(dirty_manifest, indent=2) + "\n", encoding="utf-8")
 
 
 def _archive_temp_directory(repository: Path) -> Path:
@@ -144,13 +189,34 @@ def _archive_temp_directory(repository: Path) -> Path:
     return temporary_root / f"ia-t19-{temporary_id}"
 
 
+def _extended_windows_path(path: Path) -> str:
+    absolute = os.path.abspath(path)
+    if absolute.startswith("\\\\"):
+        return "\\\\?\\UNC\\" + absolute[2:]
+    return "\\\\?\\" + absolute
+
+
+def _staging_directory_names(parent: Path) -> set[str]:
+    extended_parent = _extended_windows_path(parent)
+    if not os.path.isdir(extended_parent):
+        return set()
+    return {
+        entry.name
+        for entry in os.scandir(extended_parent)
+        if entry.name.startswith("InterviewAssistant-source-staging-")
+    }
+
+
 def _run_archive_script(
     repository: Path,
     model_path: Path,
     output_path: Path,
+    *,
+    temporary_directory: Path | None = None,
 ) -> subprocess.CompletedProcess[str]:
-    temporary_directory = _archive_temp_directory(repository)
-    temporary_directory.mkdir(parents=True, exist_ok=True)
+    if temporary_directory is None:
+        temporary_directory = _archive_temp_directory(repository)
+    os.makedirs(_extended_windows_path(temporary_directory), exist_ok=True)
     environment = os.environ.copy()
     environment.update({"TEMP": str(temporary_directory), "TMP": str(temporary_directory)})
     return subprocess.run(
@@ -257,28 +323,64 @@ def test_source_archive_script_declares_fail_closed_git_and_zip_contract() -> No
     assert "bundle_subdirectory" in source
     assert "rev-parse" in source
     assert "--verify" in source
+    assert "symbolic-ref" in source
+    assert '"show"' in source
     assert "clone" in source
-    assert "--no-hardlinks" in source
+    assert "--no-local" in source
+    assert "--single-branch" in source
+    assert "--no-tags" in source
     assert "--no-checkout" in source
     assert "checkout" in source
-    assert "--detach" in source
+    assert '"-B"' in source
+    assert "--detach" not in source
+    assert "--no-hardlinks" not in source
     assert "remote" in source
     assert "remove" in source
     assert "origin" in source
+    assert "refs/remotes/origin/HEAD" in source
+    assert '"--delete"' in source
+    assert "reflog" in source
+    assert "expire" in source
+    assert '"gc"' in source
+    assert "--prune=now" in source
+    assert "fsck" in source
+    assert "--no-reflogs" in source
+    assert "--unreachable" in source
+    assert '".git\\logs"' in source
+    assert "FETCH_HEAD" in source
+    assert "ORIG_HEAD" in source
     assert "update-index" in source
     assert "--skip-worktree" in source
     assert "tar.exe" in source
     assert '"-a"' in source
     assert "finally" in source
-    assert "Remove-Item" in source
+    assert "[IO.Directory]::Delete" in source
+    assert "[IO.Directory]::Exists($extendedPath)" in source
+    assert "[IO.FileAttributes]::ReadOnly" in source
+    assert "\\\\?\\UNC\\" in source
+    assert "\\\\?\\" in source
     assert "InterviewAssistant-source-$Version" in source
     assert "7z" not in source.casefold()
+    assert source.index('"clone"') < source.index("Get-FileHash")
 
 
 def test_source_archive_is_standalone_sanitized_and_model_overlay_is_exact(
     tmp_path: Path,
 ) -> None:
-    repository, model_path, model_files, head = _create_source_repository(tmp_path)
+    repository, model_path, model_files, head, secret_commit, secret_blob = (
+        _create_source_repository(tmp_path)
+    )
+    assert (repository / ".git").is_file(), "fixture must exercise a linked worktree source"
+    source_fsck = _git(
+        "fsck",
+        "--no-reflogs",
+        "--unreachable",
+        "--no-progress",
+        cwd=repository,
+    ).stdout
+    assert f"unreachable commit {secret_commit}" in source_fsck
+    assert f"unreachable blob {secret_blob}" in source_fsck
+    _write_dirty_worktree_manifest(repository, model_path)
     output_path = tmp_path / "release output" / "portable source.zip"
     status_before = _git("status", "--porcelain=v1", "--untracked-files=all", cwd=repository).stdout
     remote_before = _git("remote", "get-url", "origin", cwd=repository).stdout
@@ -308,6 +410,10 @@ def test_source_archive_is_standalone_sanitized_and_model_overlay_is_exact(
         assert archive.read(app_name).decode("utf-8").strip() == "VALUE = 'tracked-head'"
         assert prefix + "docs/superpowers/plans/implementation.md" in normalized
         assert prefix + "packaging/stt_model_manifest.json" in normalized
+        manifest_name = names[normalized.index(prefix + "packaging/stt_model_manifest.json")]
+        archived_manifest = json.loads(archive.read(manifest_name))
+        assert "dirty_marker" not in archived_manifest
+        assert [entry["path"] for entry in archived_manifest["files"]] == list(model_files)
         assert prefix + "scripts/build.ps1" in normalized
         assert prefix + "config.yaml" not in normalized
         for forbidden in (
@@ -321,6 +427,7 @@ def test_source_archive_is_standalone_sanitized_and_model_overlay_is_exact(
             "credentials.reg",
             "lmstudio-token.txt",
             "untracked.txt",
+            "credential-secret.txt",
         ):
             assert not any(name.startswith(prefix + forbidden) for name in normalized)
         model_prefix = prefix + "models/stt/large-v3-turbo/"
@@ -334,36 +441,99 @@ def test_source_archive_is_standalone_sanitized_and_model_overlay_is_exact(
         git_config = archive.read(git_config_name).decode("utf-8")
         assert '[remote "origin"]' not in git_config
         assert str(repository) not in git_config
+        assert "Secret Fixture Identity" not in git_config
         assert prefix + ".git/objects/info/alternates" not in normalized
+        assert not any(name.startswith(prefix + ".git/logs/") for name in normalized)
+        assert not any(name.startswith(prefix + ".git/refs/remotes/") for name in normalized)
+        assert prefix + ".git/FETCH_HEAD" not in normalized
+        assert prefix + ".git/ORIG_HEAD" not in normalized
 
     extracted = tmp_path / "extracted"
     with zipfile.ZipFile(output_path) as archive:
         archive.extractall(extracted)
     extracted_repository = extracted / "InterviewAssistant-source-9.8.7-test"
     assert _git("rev-parse", "HEAD", cwd=extracted_repository).stdout.strip() == head
+    assert _git("symbolic-ref", "--short", "HEAD", cwd=extracted_repository).stdout.strip() == (
+        "main"
+    )
     assert _git("remote", cwd=extracted_repository).stdout.strip() == ""
     assert _git("status", "--porcelain=v1", cwd=extracted_repository).stdout.strip() == ""
     _git("cat-file", "-e", "HEAD^{commit}", cwd=extracted_repository)
+    fsck_output = _git(
+        "fsck",
+        "--no-reflogs",
+        "--unreachable",
+        "--no-progress",
+        cwd=extracted_repository,
+    )
+    assert fsck_output.stdout == ""
+    assert fsck_output.stderr == ""
+    reachable_objects = _git("rev-list", "--objects", "--all", cwd=extracted_repository).stdout
+    assert "credential-secret.txt" not in reachable_objects
+    identities = _git(
+        "log",
+        "--all",
+        "--format=%an <%ae>",
+        cwd=extracted_repository,
+    ).stdout
+    assert "Secret Fixture Identity" not in identities
+    assert "secret-fixture@example.invalid" not in identities
+    secret_lookup = subprocess.run(
+        ["git", "cat-file", "-e", f"{secret_commit}^{{commit}}"],
+        cwd=extracted_repository,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert secret_lookup.returncode != 0
+    secret_blob_lookup = subprocess.run(
+        ["git", "cat-file", "-e", secret_blob],
+        cwd=extracted_repository,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert secret_blob_lookup.returncode != 0
+    assert not (extracted_repository / ".git" / "logs").exists()
+    assert not (extracted_repository / ".git" / "FETCH_HEAD").exists()
+    assert not (extracted_repository / ".git" / "ORIG_HEAD").exists()
 
 
 def test_source_archive_fails_closed_on_hash_mismatch_and_cleans_staging(
     tmp_path: Path,
 ) -> None:
-    repository, model_path, _model_files, _head = _create_source_repository(tmp_path)
+    repository, model_path, _model_files, _head, _secret_commit, _secret_blob = (
+        _create_source_repository(tmp_path)
+    )
     original_model = (model_path / "model.bin").read_bytes()
     corrupted_model = bytes((original_model[0] ^ 1,)) + original_model[1:]
     (model_path / "model.bin").write_bytes(corrupted_model)
     output_path = tmp_path / "must-not-exist.zip"
-    staging_parent = _archive_temp_directory(repository)
-    before = set(staging_parent.glob("InterviewAssistant-source-staging-*"))
+    staging_parent = tmp_path.parent
+    for index in range(3):
+        staging_parent /= f"long-temp-{index}-" + ("x" * 70)
+    assert len(str(staging_parent)) > 260
+    long_root = tmp_path.parent / ("long-temp-0-" + ("x" * 70))
+    before = _staging_directory_names(staging_parent)
 
-    result = _run_archive_script(repository, model_path, output_path)
+    try:
+        result = _run_archive_script(
+            repository,
+            model_path,
+            output_path,
+            temporary_directory=staging_parent,
+        )
 
-    assert result.returncode != 0
-    assert not output_path.exists()
-    after = set(staging_parent.glob("InterviewAssistant-source-staging-*"))
-    assert after == before
-    assert "SHA-256" in result.stderr or "SHA-256" in result.stdout
+        assert result.returncode != 0
+        assert not output_path.exists()
+        assert _staging_directory_names(staging_parent) == before
+        assert "SHA-256" in result.stderr or "SHA-256" in result.stdout
+        assert "cleanup failed" not in (result.stdout + result.stderr).casefold()
+        assert "RemoveFileSystemItemIOError" not in result.stderr
+    finally:
+        shutil.rmtree(_extended_windows_path(long_root), ignore_errors=True)
 
 
 def test_portable_release_guide_documents_migration_and_unsigned_boundaries() -> None:
@@ -380,6 +550,8 @@ def test_portable_release_guide_documents_migration_and_unsigned_boundaries() ->
     assert "lm studio" in folded and "model availability" in folded
     assert "large-v3-turbo" in source
     assert "ru/en" in folded
+    assert "captured source branch" in folded
+    assert "unreachable git objects" in folded
     assert "git history" in folded
     assert ".venv" in source
     assert "uv sync --extra dev --frozen" in source
