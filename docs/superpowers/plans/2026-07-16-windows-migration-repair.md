@@ -889,7 +889,7 @@ Record `git rev-parse main` and `git rev-parse feature/interview-assistant`. Cre
 git tag migration-pre-root-switch feature/interview-assistant
 ```
 
-- [ ] **Step 4: Remove the verified linked worktree and switch the root**
+- [x] **Step 4: Remove the verified linked worktree and switch the root**
 
 From the root, after confirming the hidden worktree is clean:
 
@@ -901,7 +901,7 @@ git worktree prune
 
 If `git worktree remove` reports any modified/untracked file, stop and preserve it; never use `--force`.
 
-- [ ] **Step 5: Recreate the environment in the final root and run smoke checks**
+- [x] **Step 5: Recreate the environment in the final root and run smoke checks**
 
 ```powershell
 uv sync --extra dev --extra cuda --frozen
@@ -911,6 +911,8 @@ git status --short --branch
 ```
 
 Expected: only the root worktree exists, it is on `feature/interview-assistant`, focused tests pass, and status is clean.
+
+Observed: Git lists only the root worktree on `feature/interview-assistant`; focused smoke passed 50/50. The fresh root selected supported Python 3.12, which exposed a one-tick scheduling assumption in a shutdown test. The test now waits for the observable quit callback with a timeout, and the full Python 3.12 suite passes 691/691 without changing production shutdown order.
 
 - [ ] **Step 6: Final acceptance summary**
 

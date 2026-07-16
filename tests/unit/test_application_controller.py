@@ -798,8 +798,12 @@ async def test_quit_request_awaits_cleanup_before_qapplication_quit(
         while not app.is_shutdown:
             await asyncio.sleep(0)
 
+    async def wait_for_quit() -> None:
+        while not quit_after_close_counts:
+            await asyncio.sleep(0)
+
     await asyncio.wait_for(wait_for_shutdown(), timeout=1.0)
-    await asyncio.sleep(0)
+    await asyncio.wait_for(wait_for_quit(), timeout=1.0)
     assert quit_after_close_counts == [1]
     assert components.close_count == 1
     await controller.shutdown()
