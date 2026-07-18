@@ -16,17 +16,15 @@ ISS_PATH = ROOT / "packaging" / "interview_assistant.iss"
 INSTALLER_SCRIPT_PATH = ROOT / "scripts" / "build_installer.ps1"
 ARCHIVE_SCRIPT_PATH = ROOT / "scripts" / "create_source_archive.ps1"
 PORTABLE_DOC_PATH = ROOT / "docs" / "portable-release.md"
+SPEC_PATH = ROOT / "packaging" / "interview_assistant.spec"
 APP_ID = "9CE7901A-56E8-49CB-A8ED-8D5CF4F97C7D"
 
 
-def test_release_source_content_includes_updated_prompt_and_config() -> None:
-    prompt = ROOT / "prompts" / "interview_system.md"
-    config = ROOT / "config.yaml"
+def test_frozen_bundle_includes_prompt_but_not_machine_config() -> None:
+    source = SPEC_PATH.read_text(encoding="utf-8")
 
-    assert prompt.is_file()
-    assert config.is_file()
-    assert "120" in prompt.read_text(encoding="utf-8")
-    assert "hotkeys:" in config.read_text(encoding="utf-8")
+    assert '(str(ROOT / "prompts" / "interview_system.md"), "prompts")' in source
+    assert "config.yaml" not in source
 
 
 def _powershell() -> str:
@@ -89,6 +87,7 @@ def _create_source_repository(
         "tests/test_fixture.py": "def test_fixture():\n    assert True\n",
         "assets/icon.txt": "asset\n",
         "config.yaml": "machine: checked-in-runtime-value\n",
+        "prompts/interview_system.md": "Candidate release prompt\n",
         ".gitignore": (
             ".venv/\n"
             "build/\n"
@@ -429,6 +428,7 @@ def test_source_archive_is_standalone_sanitized_and_model_overlay_is_exact(
         assert "dirty_marker" not in archived_manifest
         assert [entry["path"] for entry in archived_manifest["files"]] == list(model_files)
         assert prefix + "scripts/build.ps1" in normalized
+        assert prefix + "prompts/interview_system.md" in normalized
         assert prefix + "config.yaml" not in normalized
         for forbidden in (
             ".venv/",

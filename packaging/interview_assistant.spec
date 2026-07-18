@@ -69,6 +69,7 @@ datas = [
     (str(ROOT / "assets" / "branding" / "interview-assistant.ico"), "assets/branding"),
     (str(ROOT / "config" / "mcp.template.json"), "config"),
     (str(MANIFEST_PATH), "packaging"),
+    (str(ROOT / "prompts" / "interview_system.md"), "prompts"),
 ]
 datas.extend(_optional_stt_bundle_datas())
 binaries = []

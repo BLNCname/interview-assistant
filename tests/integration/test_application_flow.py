@@ -253,6 +253,8 @@ async def test_question_to_streaming_overlay_loads_shared_model_once(
     assert registry.load_count == 1
     assert client.payloads[0]["model"] == "instance:qwen-vl"
     assert client.payloads[0]["store"] is False
+    assert "подготовленного кандидата" in str(client.payloads[0]["input"])
+    assert "обычно не превышай 120 слов" in str(client.payloads[0]["input"])
     assert audio.started == stt.started == hotkeys.started == 1
 
     await runtime.shutdown()
@@ -435,7 +437,7 @@ async def test_external_unload_recovers_and_replays_only_recovery_context(
     replay_input = client.payloads[1]["input"]
     assert isinstance(replay_input, list)
     replay_prompt = replay_input[0]["content"]
-    assert "Answer the latest interview question concisely" in replay_prompt
+    assert "подготовленного кандидата" in replay_prompt
     assert "Спроектируйте сервис коротких ссылок" in replay_prompt
     assert "This old context must never be replayed" not in replay_prompt
     assert app.ribbon.answer_text.endswith("Recovered API Gateway")

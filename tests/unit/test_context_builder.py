@@ -1,4 +1,5 @@
 from pathlib import Path
+import sys
 
 import pytest
 
@@ -64,6 +65,23 @@ def test_packaged_prompt_defines_concise_candidate_style_and_exception() -> None
     assert "код" in lowered and "system design" in lowered
     assert "ограничение" in lowered and "не применяется" in lowered
     assert "как ии" in lowered
+
+
+def test_context_builder_prefers_frozen_packaged_candidate_prompt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    frozen_prompt = tmp_path / "frozen" / "prompts" / "interview_system.md"
+    frozen_prompt.parent.mkdir(parents=True)
+    frozen_prompt.write_text("Frozen candidate contract", encoding="utf-8")
+    monkeypatch.setattr(sys, "_MEIPASS", str(frozen_prompt.parents[1]), raising=False)
+
+    snapshot = ContextBuilder(
+        TranscriptStore(),
+        latest_question=DetectedQuestion(1, "theory", "latest question", 1.0),
+    ).normal()
+
+    assert snapshot.items[0].text == "Frozen candidate contract"
 
 
 def test_normal_context_is_deterministic_and_includes_supplied_fields(
@@ -136,7 +154,7 @@ def test_system_trigger_is_labelled_as_interviewer_request() -> None:
     ).normal()
 
     assert "Latest interviewer request:\nЧто такое CAP?" in snapshot.prompt
-    assert "Candidate clarification trigger" not in snapshot.prompt
+    assert all(item.label != "Candidate clarification trigger" for item in snapshot.items)
 
 
 def test_recovery_context_uses_role_aware_request_labels() -> None:
@@ -170,7 +188,7 @@ def test_recovery_system_trigger_keeps_microphone_history_non_trigger_label() ->
     snapshot = ContextBuilder(store, latest_question=question).recovery()
 
     assert "Latest clarification from You:\nУточняю детали CAP" in snapshot.prompt
-    assert "Candidate clarification trigger" not in snapshot.prompt
+    assert all(item.label != "Candidate clarification trigger" for item in snapshot.items)
 
 
 def test_recovery_source_less_question_keeps_microphone_history_non_trigger_label() -> None:
@@ -181,7 +199,7 @@ def test_recovery_source_less_question_keeps_microphone_history_non_trigger_labe
     snapshot = ContextBuilder(store, latest_question=question).recovery()
 
     assert "Latest clarification from You:\nУточняю детали CAP" in snapshot.prompt
-    assert "Candidate clarification trigger" not in snapshot.prompt
+    assert all(item.label != "Candidate clarification trigger" for item in snapshot.items)
 
 
 def test_normal_context_drops_oldest_low_priority_history_first() -> None:
