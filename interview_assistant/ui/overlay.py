@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import math
 import re
-from collections.abc import Iterable, Iterator
+from collections.abc import Iterable
 
 from PyQt6.QtCore import (
     QByteArray,
@@ -31,8 +31,6 @@ from PyQt6.QtGui import (
     QRegion,
     QResizeEvent,
     QShowEvent,
-    QTextCharFormat,
-    QTextCursor,
 )
 from PyQt6.QtWidgets import (
     QApplication,
@@ -42,7 +40,6 @@ from PyQt6.QtWidgets import (
     QMainWindow,
     QSizePolicy,
     QStyle,
-    QTextBrowser,
     QToolButton,
     QVBoxLayout,
     QWidget,
@@ -50,6 +47,7 @@ from PyQt6.QtWidgets import (
 
 from interview_assistant.config import OverlayConfig
 from interview_assistant.events import EventBus
+from interview_assistant.ui.markdown import SafeMarkdownBrowser, render_safe_markdown
 from interview_assistant.ui.windows_affinity import (
     AffinityApplier,
     AffinityResult,
@@ -57,7 +55,6 @@ from interview_assistant.ui.windows_affinity import (
     apply_capture_exclusion,
 )
 
-_MARKDOWN_TOKEN = re.compile(r"\*\*([^*\n]+)\*\*|`([^`\n]+)`")
 _LONG_UNBROKEN_TOKEN = re.compile(r"\S{65,}")
 
 _RGB = tuple[int, int, int]
@@ -67,10 +64,11 @@ _STATUS_CHIP_RGB: _RGB = (255, 255, 255)
 _STATUS_CHIP_ALPHA = 8
 _MODEL_CHIP_RGB: _RGB = (125, 211, 252)
 _MODEL_CHIP_ALPHA = 12
-_ANSWER_BACKGROUND_RGB: _RGB = (18, 18, 20)
-_ANSWER_BACKGROUND_ALPHA = 35
+_ANSWER_BACKGROUND_RGB: _RGB = (12, 12, 14)
+_ANSWER_BACKGROUND_ALPHA = 112
 _WHITE_RGB: _RGB = (255, 255, 255)
 _WCAG_AA_CONTRAST = 4.5
+_MINIMUM_EFFECTIVE_WINDOW_OPACITY = 0.75
 
 
 def _composite_rgb(
@@ -120,8 +118,7 @@ def _accessible_text_rgb(
             round(preferred[2] + ((255 - preferred[2]) * white_mix / 255)),
         )
         if all(
-            _contrast_ratio(color, background) >= _WCAG_AA_CONTRAST
-            for background in candidates
+            _contrast_ratio(color, background) >= _WCAG_AA_CONTRAST for background in candidates
         ):
             return color
     return _WHITE_RGB
@@ -183,10 +180,11 @@ class _RibbonSurface(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
 
     def set_opacity(self, opacity: float) -> None:
-        # The glass remains dark enough to back high-contrast text even at the
-        # lowest user setting; opacity still controls the strength of the tint.
-        self.background_alpha = max(180, round(166 + (76 * opacity)))
-        self.background_bottom_alpha = max(180, self.background_alpha - 22)
+        del opacity
+        # Window opacity supplies the glass effect. The graphite fill itself is
+        # opaque so text retains contrast over both light and dark desktops.
+        self.background_alpha = 255
+        self.background_bottom_alpha = 255
         self.update()
 
     def paintEvent(self, event: QPaintEvent | None) -> None:
@@ -208,11 +206,7 @@ class _RibbonSurface(QWidget):
         )
         painter.fillPath(path, background)
 
-        border = (
-            QColor("#50DE73")
-            if self.property("editMode")
-            else QColor(255, 255, 255, 56)
-        )
+        border = QColor("#50DE73") if self.property("editMode") else QColor(255, 255, 255, 56)
         painter.setPen(QPen(border, 1.0))
         painter.drawPath(path)
 
@@ -232,11 +226,7 @@ class _StatusDot(QWidget):
 
     def set_state(self, state: str) -> None:
         normalized = state.casefold()
-        if (
-            "offline" in normalized
-            or "protected" in normalized
-            or "unavailable" in normalized
-        ):
+        if "offline" in normalized or "protected" in normalized or "unavailable" in normalized:
             self._color = QColor("#fb7185")
         elif "recover" in normalized or "search" in normalized:
             self._color = QColor("#fbbf24")
@@ -310,7 +300,10 @@ class LiquidRibbon(QMainWindow):
         self._geometry_timer.timeout.connect(self._persist_geometry)
 
         self.setWindowTitle("Interview Assistant")
-        self.effective_window_opacity = max(0.65, self._config.opacity)
+        self.effective_window_opacity = max(
+            _MINIMUM_EFFECTIVE_WINDOW_OPACITY,
+            self._config.opacity,
+        )
         self.setWindowOpacity(math.ceil(self.effective_window_opacity * 255) / 255)
         self.setMinimumHeight(self._minimum_expanded_height)
         self.setMaximumHeight(self._config.max_height)
@@ -352,7 +345,10 @@ class LiquidRibbon(QMainWindow):
         """Apply saved visual settings to the existing native overlay window."""
 
         self._config = config
-        self.effective_window_opacity = max(0.65, config.opacity)
+        self.effective_window_opacity = max(
+            _MINIMUM_EFFECTIVE_WINDOW_OPACITY,
+            config.opacity,
+        )
         self.setWindowOpacity(math.ceil(self.effective_window_opacity * 255) / 255)
         self.surface.set_opacity(config.opacity)
         self._minimum_expanded_height = min(120, config.max_height)
@@ -458,9 +454,7 @@ class LiquidRibbon(QMainWindow):
                 self.hide()
             self._update_edit_indicator()
             self._reapply_capture_exclusion(previous_affinity_hwnd)
-            self._events.notification.emit(
-                "Unable to change overlay interaction mode."
-            )
+            self._events.notification.emit("Unable to change overlay interaction mode.")
             self.setGeometry(previous_geometry)
 
     def toggle_edit_mode(self) -> None:
@@ -480,10 +474,7 @@ class LiquidRibbon(QMainWindow):
         self._apply_capture_exclusion_to_current_hwnd()
 
     def _schedule_geometry_persistence(self) -> None:
-        if (
-            not getattr(self, "_geometry_persistence_enabled", False)
-            or self._settings is None
-        ):
+        if not getattr(self, "_geometry_persistence_enabled", False) or self._settings is None:
             return
         self._geometry_timer.start()
 
@@ -529,21 +520,11 @@ class LiquidRibbon(QMainWindow):
             )
             for background in surface_backgrounds
         )
-        secondary_text = _hex_color(
-            _accessible_text_rgb((174, 174, 178), surface_backgrounds)
-        )
-        status_text = _hex_color(
-            _accessible_text_rgb((203, 213, 225), status_backgrounds)
-        )
-        model_text = _hex_color(
-            _accessible_text_rgb((186, 230, 253), model_backgrounds)
-        )
-        answer_text = _hex_color(
-            _accessible_text_rgb((232, 232, 234), answer_backgrounds)
-        )
-        control_text = _hex_color(
-            _accessible_text_rgb((219, 234, 254), surface_backgrounds)
-        )
+        secondary_text = _hex_color(_accessible_text_rgb((232, 232, 234), surface_backgrounds))
+        status_text = _hex_color(_accessible_text_rgb((248, 248, 250), status_backgrounds))
+        model_text = _hex_color(_accessible_text_rgb((236, 248, 254), model_backgrounds))
+        answer_text = _hex_color(_accessible_text_rgb((248, 248, 250), answer_backgrounds))
+        control_text = _hex_color(_accessible_text_rgb((219, 234, 254), surface_backgrounds))
         self.content_layout = QVBoxLayout(self.surface)
         self.content_layout.setContentsMargins(14, 12, 14, 12)
         self.content_layout.setSpacing(8)
@@ -649,12 +630,8 @@ class LiquidRibbon(QMainWindow):
             QSizePolicy.Policy.Ignored,
             QSizePolicy.Policy.Expanding,
         )
-        self.question_label.setAlignment(
-            Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft
-        )
-        self.question_label.setStyleSheet(
-            "color: #ffffff; font-size: 14px; font-weight: 600;"
-        )
+        self.question_label.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
+        self.question_label.setStyleSheet("color: #ffffff; font-size: 14px; font-weight: 600;")
         self.question_layout.addWidget(self.question_label, 1)
         self.body_layout.addWidget(self.question_panel)
 
@@ -662,16 +639,17 @@ class LiquidRibbon(QMainWindow):
         self.answer_layout = QVBoxLayout(answer_panel)
         self.answer_layout.setContentsMargins(0, 0, 0, 0)
         self.answer_layout.setSpacing(5)
-        self.answer_browser = QTextBrowser(answer_panel)
+        self.answer_browser = SafeMarkdownBrowser(answer_panel)
+        answer_font = QFont(font)
+        answer_font.setPixelSize(15)
+        self.answer_browser.setFont(answer_font)
         self.answer_browser.setAcceptRichText(False)
         self.answer_browser.setOpenExternalLinks(False)
         self.answer_browser.setOpenLinks(False)
         self.answer_browser.setReadOnly(True)
         self.answer_browser.setUndoRedoEnabled(False)
         self.answer_browser.setFrameShape(QFrame.Shape.NoFrame)
-        self.answer_browser.setHorizontalScrollBarPolicy(
-            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
-        )
+        self.answer_browser.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.answer_browser.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         self.answer_browser.setTextInteractionFlags(
             Qt.TextInteractionFlag.TextSelectableByMouse
@@ -685,7 +663,7 @@ class LiquidRibbon(QMainWindow):
         self.answer_browser.setStyleSheet(
             f"QTextBrowser {{ color: {answer_text}; "
             f"background: {_rgba_css(_ANSWER_BACKGROUND_RGB, _ANSWER_BACKGROUND_ALPHA)}; "
-            "border: 0; border-radius: 8px; padding: 2px 5px; font-size: 13px; }"
+            "border: 0; border-radius: 8px; padding: 3px 6px; font-size: 15px; }"
             "QScrollBar:vertical { width: 7px; background: transparent; }"
             "QScrollBar::handle:vertical { background: rgba(174, 174, 178, 90); "
             "border-radius: 3px; min-height: 18px; }"
@@ -802,36 +780,12 @@ class LiquidRibbon(QMainWindow):
         if request_id != self._active_request_id:
             return
         self.answer_text += delta
-        cursor = self.answer_browser.textCursor()
-        cursor.movePosition(QTextCursor.MoveOperation.End)
-        for text, char_format in self._safe_markdown(delta):
-            cursor.insertText(text, char_format)
-        self.answer_browser.setTextCursor(cursor)
+        render_safe_markdown(
+            self.answer_browser,
+            self.answer_text,
+            preserve_scroll=True,
+        )
         self._adjust_height()
-        self.answer_browser.ensureCursorVisible()
-        scrollbar = self.answer_browser.verticalScrollBar()
-        assert scrollbar is not None
-        scrollbar.setValue(scrollbar.maximum())
-
-    @staticmethod
-    def _safe_markdown(delta: str) -> Iterator[tuple[str, QTextCharFormat]]:
-        plain_format = QTextCharFormat()
-        offset = 0
-        for match in _MARKDOWN_TOKEN.finditer(delta):
-            if match.start() > offset:
-                yield delta[offset : match.start()], plain_format
-            formatted = QTextCharFormat()
-            if match.group(1) is not None:
-                formatted.setFontWeight(QFont.Weight.Bold.value)
-                yield match.group(1), formatted
-            else:
-                formatted.setFontFamilies(["Cascadia Mono", "Consolas", "monospace"])
-                formatted.setFontFixedPitch(True)
-                formatted.setBackground(QColor(255, 255, 255, 18))
-                yield match.group(2), formatted
-            offset = match.end()
-        if offset < len(delta):
-            yield delta[offset:], plain_format
 
     def toggle_collapsed(self) -> None:
         if self.is_collapsed:
@@ -841,9 +795,7 @@ class LiquidRibbon(QMainWindow):
             self.body_widget.show()
             restored = max(self._minimum_expanded_height, self._expanded_height)
             self.resize(self.width(), min(self._config.max_height, restored))
-            self.collapse_button.setIcon(
-                self._standard_icon(QStyle.StandardPixmap.SP_ArrowUp)
-            )
+            self.collapse_button.setIcon(self._standard_icon(QStyle.StandardPixmap.SP_ArrowUp))
             self.collapse_button.setToolTip("Collapse")
             self._adjust_height()
             return
@@ -854,9 +806,7 @@ class LiquidRibbon(QMainWindow):
         self.setMinimumHeight(self.collapsed_height)
         self.setMaximumHeight(self.collapsed_height)
         self.resize(self.width(), self.collapsed_height)
-        self.collapse_button.setIcon(
-            self._standard_icon(QStyle.StandardPixmap.SP_ArrowDown)
-        )
+        self.collapse_button.setIcon(self._standard_icon(QStyle.StandardPixmap.SP_ArrowDown))
         self.collapse_button.setToolTip("Expand")
 
     def _adjust_height(self, *, shrink: bool = False) -> None:
@@ -993,7 +943,9 @@ class LiquidRibbon(QMainWindow):
         right = original.right()
         bottom = original.bottom()
         minimum_width = min(480, original.width())
-        minimum_height = self.collapsed_height if self.is_collapsed else self._minimum_expanded_height
+        minimum_height = (
+            self.collapsed_height if self.is_collapsed else self._minimum_expanded_height
+        )
 
         if self._fallback_resize_edges & Qt.Edge.LeftEdge:
             left = min(original.left() + delta.x(), right - minimum_width + 1)

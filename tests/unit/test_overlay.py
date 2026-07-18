@@ -2,9 +2,17 @@ import math
 from unittest.mock import Mock
 
 import pytest
-from PyQt6.QtCore import QEvent, QPointF, QSettings, Qt
-from PyQt6.QtGui import QFont, QMouseEvent, QPalette, QShowEvent, QTextCursor
-from PyQt6.QtWidgets import QApplication, QLabel, QStyle, QWidget
+from PyQt6.QtCore import QEvent, QPointF, QSettings, Qt, QUrl
+from PyQt6.QtGui import (
+    QFont,
+    QMouseEvent,
+    QPalette,
+    QShowEvent,
+    QTextCursor,
+    QTextDocument,
+    QTextFormat,
+)
+from PyQt6.QtWidgets import QApplication, QLabel, QStyle, QTextBrowser, QWidget
 
 from interview_assistant.config import OverlayConfig
 from interview_assistant.events import EventBus
@@ -43,6 +51,100 @@ def test_streaming_delta_appends_without_replacing(qtbot) -> None:
     assert ribbon.answer_text == "Hello world"
 
 
+def _rendered_ribbon(qtbot, markdown: str) -> LiquidRibbon:
+    bus = EventBus()
+    ribbon = LiquidRibbon(bus, settings=None)
+    qtbot.addWidget(ribbon)
+    bus.answer_reset.emit(1)
+    bus.answer_delta.emit(1, markdown)
+    return ribbon
+
+
+def _cursor_at(browser: QTextBrowser, text: str) -> QTextCursor:
+    cursor = QTextCursor(browser.document())
+    cursor.setPosition(browser.toPlainText().index(text) + 1)
+    return cursor
+
+
+def test_markdown_split_across_deltas_renders_without_delimiters(qtbot) -> None:
+    bus = EventBus()
+    ribbon = LiquidRibbon(bus, settings=None)
+    qtbot.addWidget(ribbon)
+    bus.answer_reset.emit(7)
+    bus.answer_delta.emit(7, "## **Структура")
+    bus.answer_delta.emit(7, " проблемы**\n\n- Первый пункт\n- Второй пункт")
+
+    assert ribbon.answer_text.startswith("## **Структура")
+    assert "**" not in ribbon.answer_browser.toPlainText()
+    assert "Структура проблемы" in ribbon.answer_browser.toPlainText()
+    assert ribbon.answer_browser.document().blockCount() >= 3
+
+
+def test_markdown_fenced_code_and_inline_code_receive_monospace_format(qtbot) -> None:
+    ribbon = _rendered_ribbon(qtbot, "Use `dict`:\n```python\nprint('ok')\n```")
+
+    assert "print('ok')" in ribbon.answer_browser.toPlainText()
+    assert _cursor_at(ribbon.answer_browser, "dict").charFormat().fontFixedPitch()
+    assert _cursor_at(ribbon.answer_browser, "print").charFormat().fontFixedPitch()
+
+
+def test_model_markdown_cannot_load_resources_or_activate_links(
+    qtbot, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    browser_base = getattr(overlay_module, "SafeMarkdownBrowser", QTextBrowser)
+
+    class ResourceSpyBrowser(browser_base):
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            super().__init__(*args, **kwargs)
+            self.resource_requests: list[QUrl] = []
+
+        def loadResource(self, resource_type: int, name: QUrl) -> object:
+            self.resource_requests.append(name)
+            return super().loadResource(resource_type, name)
+
+    monkeypatch.setattr(
+        overlay_module,
+        browser_base.__name__,
+        ResourceSpyBrowser,
+    )
+    ribbon = _rendered_ribbon(
+        qtbot,
+        "![x](file:///private.txt) [open](https://evil.invalid) "
+        "<img src='https://evil.invalid/pixel'>",
+    )
+    browser = ribbon.answer_browser
+
+    assert any(base.__name__ == "SafeMarkdownBrowser" for base in type(browser).__mro__)
+    assert browser.resource_requests == []
+    assert (
+        browser.loadResource(
+            QTextDocument.ResourceType.ImageResource.value,
+            QUrl("file:///private.txt"),
+        )
+        is None
+    )
+    assert not browser.openLinks()
+    assert not browser.openExternalLinks()
+    assert "private.txt" not in browser.toPlainText()
+    assert "href=" not in browser.toHtml()
+
+
+def test_stream_rerender_preserves_manual_scroll_position(qtbot) -> None:
+    ribbon = _rendered_ribbon(qtbot, "line\n" * 100)
+    ribbon.set_edit_mode(True)
+    ribbon.show()
+    qtbot.waitExposed(ribbon)
+    bar = ribbon.answer_browser.verticalScrollBar()
+    assert bar.maximum() > 0
+    bar.setValue(bar.maximum() // 3)
+    before = bar.value() / bar.maximum()
+
+    ribbon.append_delta(1, "tail")
+
+    after = bar.value() / bar.maximum()
+    assert after == pytest.approx(before, abs=0.08)
+
+
 def test_stale_delta_is_ignored(qtbot) -> None:
     bus = EventBus()
     ribbon = LiquidRibbon(bus, settings=None)
@@ -67,9 +169,9 @@ def test_window_uses_capture_compatible_opacity_and_rounded_mask(qtbot) -> None:
     assert flags & Qt.WindowType.Tool
     assert flags & Qt.WindowType.WindowStaysOnTopHint
     assert not ribbon.testAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
-    assert ribbon.effective_window_opacity == 0.65
-    assert ribbon.windowOpacity() >= 0.65
-    assert math.isclose(ribbon.windowOpacity(), 0.65, abs_tol=1 / 255)
+    assert ribbon.effective_window_opacity == 0.75
+    assert ribbon.windowOpacity() >= 0.75
+    assert math.isclose(ribbon.windowOpacity(), 0.75, abs_tol=1 / 255)
     assert not ribbon.mask().isEmpty()
     assert ribbon.maximumHeight() == 280
     assert ribbon.surface.background_alpha >= 180
@@ -394,23 +496,11 @@ def test_notifications_are_visible_plain_text_in_the_ribbon(qtbot) -> None:
     assert ribbon.notification_label.textFormat() is Qt.TextFormat.PlainText
 
 
-def test_delta_uses_incremental_cursor_insertion(
-    qtbot, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_delta_rerenders_accumulated_answer(qtbot) -> None:
     bus = EventBus()
     ribbon = LiquidRibbon(bus, settings=None)
     qtbot.addWidget(ribbon)
     bus.answer_reset.emit(3)
-
-    def forbidden_replacement(*_args: object, **_kwargs: object) -> None:
-        raise AssertionError("streaming must not replace the whole document")
-
-    for method_name in ("setHtml", "setPlainText"):
-        monkeypatch.setattr(
-            ribbon.answer_browser,
-            method_name,
-            forbidden_replacement,
-        )
 
     bus.answer_delta.emit(3, "one")
     bus.answer_delta.emit(3, " two")
@@ -471,7 +561,9 @@ def test_question_and_sources_are_plain_text(qtbot) -> None:
 
     assert ribbon.question_label.text() == "Explain <b>ownership</b>"
     assert ribbon.question_label.textFormat() is Qt.TextFormat.PlainText
-    assert ribbon.sources_label.text() == "Sources: <a href='https://evil.invalid'>source</a> · docs"
+    assert (
+        ribbon.sources_label.text() == "Sources: <a href='https://evil.invalid'>source</a> · docs"
+    )
     assert ribbon.sources_label.textFormat() is Qt.TextFormat.PlainText
 
 
@@ -587,9 +679,8 @@ def test_compact_height_uses_width_aware_label_heights(qtbot) -> None:
             frame_height + max(question_height, answer_height) + 4,
         ),
     )
-    assert (
-        ribbon.question_label.sizeHint().height()
-        > ribbon.question_label.heightForWidth(question_width)
+    assert ribbon.question_label.sizeHint().height() > ribbon.question_label.heightForWidth(
+        question_width
     )
     assert ribbon.sources_label.sizeHint().height() > sources_height
 
@@ -608,10 +699,7 @@ def test_unbroken_question_and_sources_cannot_expand_ribbon_past_screen(qtbot) -
     ribbon.setGeometry(available.x(), available.y(), target_width, 180)
 
     long_question = "q" * 2_000
-    long_sources = tuple(
-        "https://example.invalid/" + (character * 300)
-        for character in ("a", "b")
-    )
+    long_sources = tuple("https://example.invalid/" + (character * 300) for character in ("a", "b"))
     ribbon.set_question(long_question)
     ribbon.set_sources(long_sources)
 
@@ -683,7 +771,17 @@ def _widget_text_rgb(widget: QWidget) -> tuple[float, float, float]:
     return float(color.red()), float(color.green()), float(color.blue())
 
 
-def test_minimum_opacity_secondary_text_meets_wcag_aa_over_white(qtbot) -> None:
+def _window_composite_rgb(
+    foreground: tuple[float, float, float],
+    background: tuple[float, float, float],
+    opacity: float,
+) -> tuple[float, float, float]:
+    return tuple(
+        (foreground[index] * opacity) + (background[index] * (1 - opacity)) for index in range(3)
+    )
+
+
+def test_minimum_opacity_primary_and_secondary_contrast_meets_wcag_aa(qtbot) -> None:
     ribbon = LiquidRibbon(
         EventBus(),
         config=OverlayConfig(opacity=0.2),
@@ -693,55 +791,71 @@ def test_minimum_opacity_secondary_text_meets_wcag_aa_over_white(qtbot) -> None:
     ribbon.show()
     qtbot.waitExposed(ribbon)
 
-    white = (255.0, 255.0, 255.0)
-    alpha = ribbon.surface.background_alpha
-    surface_backgrounds = (
-        _composite_rgb(ribbon.surface.gradient_top_rgb, alpha, white),
-        _composite_rgb(
-            ribbon.surface.gradient_bottom_rgb,
-            ribbon.surface.background_bottom_alpha,
-            white,
-        ),
-    )
     question_eyebrow = next(
         label for label in ribbon.findChildren(QLabel) if label.text() == "ВОПРОС"
     )
-    text_backgrounds = {
-        "question eyebrow": (question_eyebrow, surface_backgrounds),
-        "sources": (ribbon.sources_label, surface_backgrounds),
-        "status": (
-            ribbon.status_label,
-            tuple(
-                _composite_rgb(_STATUS_CHIP_RGB, _STATUS_CHIP_ALPHA, bg)
-                for bg in surface_backgrounds
-            ),
-        ),
-        "model": (
-            ribbon.model_chip,
-            tuple(
-                _composite_rgb(_MODEL_CHIP_RGB, _MODEL_CHIP_ALPHA, bg)
-                for bg in surface_backgrounds
-            ),
-        ),
-        "answer": (
-            ribbon.answer_browser,
-            tuple(
-                _composite_rgb(_ANSWER_BACKGROUND_RGB, _ANSWER_BACKGROUND_ALPHA, bg)
-                for bg in surface_backgrounds
-            ),
-        ),
-    }
-
     failures: list[str] = []
-    for name, (widget, backgrounds) in text_backgrounds.items():
-        foreground = _widget_text_rgb(widget)
-        worst_case = min(
-            _contrast_ratio(foreground, background) for background in backgrounds
+    for desktop in ((0.0, 0.0, 0.0), (255.0, 255.0, 255.0)):
+        surface_backgrounds = (
+            _composite_rgb(
+                ribbon.surface.gradient_top_rgb,
+                ribbon.surface.background_alpha,
+                desktop,
+            ),
+            _composite_rgb(
+                ribbon.surface.gradient_bottom_rgb,
+                ribbon.surface.background_bottom_alpha,
+                desktop,
+            ),
         )
-        if worst_case < 4.5:
-            failures.append(f"{name}={worst_case:.2f}:1")
+        answer_backgrounds = tuple(
+            _composite_rgb(_ANSWER_BACKGROUND_RGB, _ANSWER_BACKGROUND_ALPHA, bg)
+            for bg in surface_backgrounds
+        )
+        status_backgrounds = tuple(
+            _composite_rgb(_STATUS_CHIP_RGB, _STATUS_CHIP_ALPHA, bg) for bg in surface_backgrounds
+        )
+        model_backgrounds = tuple(
+            _composite_rgb(_MODEL_CHIP_RGB, _MODEL_CHIP_ALPHA, bg) for bg in surface_backgrounds
+        )
+        for name, widget, backgrounds in (
+            ("question eyebrow", question_eyebrow, surface_backgrounds),
+            ("sources", ribbon.sources_label, surface_backgrounds),
+            ("status", ribbon.status_label, status_backgrounds),
+            ("model", ribbon.model_chip, model_backgrounds),
+            ("answer", ribbon.answer_browser, answer_backgrounds),
+        ):
+            rendered_foreground = _window_composite_rgb(
+                _widget_text_rgb(widget),
+                desktop,
+                ribbon.effective_window_opacity,
+            )
+            rendered_backgrounds = tuple(
+                _window_composite_rgb(
+                    background,
+                    desktop,
+                    ribbon.effective_window_opacity,
+                )
+                for background in backgrounds
+            )
+            worst_case = min(
+                _contrast_ratio(rendered_foreground, background)
+                for background in rendered_backgrounds
+            )
+            if worst_case < 4.5:
+                failures.append(f"{name}={worst_case:.2f}:1 over {desktop}")
 
     assert failures == [], "WCAG AA contrast failures: " + ", ".join(failures)
+
+
+def test_markdown_answer_uses_readable_size_and_compact_heading(qtbot) -> None:
+    ribbon = _rendered_ribbon(qtbot, "## Compact heading\n\nBody")
+    browser_font = ribbon.answer_browser.font()
+    heading_format = _cursor_at(ribbon.answer_browser, "Compact").charFormat()
+
+    assert browser_font.pixelSize() == 15
+    heading_pixels = float(heading_format.property(QTextFormat.Property.FontPixelSize))
+    assert 15 <= heading_pixels <= 19
 
 
 def test_geometry_round_trips_through_injected_settings(qtbot, tmp_path) -> None:
