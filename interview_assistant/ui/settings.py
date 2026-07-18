@@ -271,7 +271,27 @@ class SettingsWindow(QMainWindow):
         self.save_button = QPushButton("Save", central)
         self.readiness_button = QPushButton("Run checks", central)
         self.start_button = QPushButton("Start", central)
-        self.start_button.setEnabled(False)
+        self.start_button.setObjectName("startButton")
+        self.start_button.setStyleSheet(
+            """
+            QPushButton#startButton[readyToStart="true"] {
+                background-color: #343A40;
+                color: #FFFFFF;
+                border: 1px solid #272B30;
+                padding: 4px 14px;
+            }
+            QPushButton#startButton[readyToStart="true"]:hover {
+                background-color: #41474E;
+            }
+            QPushButton#startButton[readyToStart="true"]:pressed {
+                background-color: #272B30;
+            }
+            """
+        )
+        self._set_start_available(
+            False,
+            "Run readiness checks before starting.",
+        )
         actions.addWidget(self.save_button)
         actions.addWidget(self.readiness_button)
         actions.addWidget(self.start_button)
@@ -410,8 +430,20 @@ class SettingsWindow(QMainWindow):
     def clear_readiness(self, message: str = "Running readiness checks...") -> None:
         self._readiness_report = None
         self.readiness_table.setRowCount(0)
-        self.start_button.setEnabled(False)
+        self._set_start_available(
+            False,
+            "Run readiness checks before starting.",
+        )
         self.readiness_status_label.setText(message)
+
+    def _set_start_available(self, available: bool, tooltip: str) -> None:
+        self.start_button.setEnabled(available)
+        self.start_button.setProperty("readyToStart", available)
+        self.start_button.setToolTip(tooltip)
+        style = self.start_button.style()
+        assert style is not None
+        style.unpolish(self.start_button)
+        style.polish(self.start_button)
 
     def set_readiness_report(self, report: ReadinessReport) -> None:
         self._readiness_report = report
@@ -428,8 +460,34 @@ class SettingsWindow(QMainWindow):
                 item = QTableWidgetItem(value)
                 item.setToolTip(value)
                 self.readiness_table.setItem(row, column, item)
-        self.readiness_status_label.setText(f"Readiness: {report.status}")
-        self.start_button.setEnabled(report.can_start)
+        if not report.can_start:
+            blocking_count = sum(
+                result.required and result.status == "failed"
+                for result in report.checks
+            )
+            suffix = "check" if blocking_count == 1 else "checks"
+            self.readiness_status_label.setText(
+                f"Readiness: failed — {blocking_count} blocking {suffix}"
+            )
+            self._set_start_available(
+                False,
+                f"Start is blocked by {blocking_count} blocking {suffix}.",
+            )
+        elif report.status == "warning":
+            warning_count = sum(
+                result.status != "ready" for result in report.checks
+            )
+            suffix = "warning" if warning_count == 1 else "warnings"
+            self.readiness_status_label.setText(
+                f"Readiness: ready — {warning_count} non-blocking {suffix}"
+            )
+            self._set_start_available(
+                True,
+                f"Ready to start; {warning_count} non-blocking {suffix} remain.",
+            )
+        else:
+            self.readiness_status_label.setText("Readiness: ready")
+            self._set_start_available(True, "Ready to start.")
 
     def show_notification(self, message: str) -> None:
         self.notification_label.setText(str(message))

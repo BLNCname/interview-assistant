@@ -39,6 +39,27 @@ def _report(status: str) -> ReadinessReport:
     )
 
 
+def _startable_warning_report() -> ReadinessReport:
+    return ReadinessReport(
+        tuple(
+            CheckResult(
+                name=name,
+                status=status,  # type: ignore[arg-type]
+                message=f"{name} result",
+                remediation=f"Remediate {name}",
+                duration_ms=1.25,
+                required=True,
+                timed_out=False,
+            )
+            for name, status in (
+                ("windows_dwm", "ready"),
+                ("stt_ru_fixture", "warning"),
+                ("context7", "warning"),
+            )
+        )
+    )
+
+
 def _window(
     qtbot,
     tmp_path: Path,
@@ -145,12 +166,22 @@ def test_readiness_failure_disables_start_but_warning_is_visible_and_permits_it(
 
     window.set_readiness_report(_report("failed"))
     assert not window.start_button.isEnabled()
+    assert window.start_button.property("readyToStart") is False
+    assert window.readiness_status_label.text() == (
+        "Readiness: failed — 1 blocking check"
+    )
+    assert "blocking" in window.start_button.toolTip().casefold()
     assert window.readiness_table.item(0, 2).text() == "Affinity result"
     assert window.readiness_table.item(0, 3).text() == "Enable capture exclusion"
 
-    window.set_readiness_report(_report("warning"))
+    window.set_readiness_report(_startable_warning_report())
     assert window.start_button.isEnabled()
-    assert "warning" in window.readiness_status_label.text().casefold()
+    assert window.start_button.property("readyToStart") is True
+    assert window.readiness_status_label.text() == (
+        "Readiness: ready — 2 non-blocking warnings"
+    )
+    assert "ready to start" in window.start_button.toolTip().casefold()
+    assert "#343a40" in window.start_button.styleSheet().casefold()
     qtbot.mouseClick(window.start_button, Qt.MouseButton.LeftButton)
     assert starts == [True]
 
