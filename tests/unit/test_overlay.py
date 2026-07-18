@@ -96,6 +96,118 @@ def test_window_mask_tracks_resize(qtbot) -> None:
     assert ribbon.mask().boundingRect() == ribbon.rect()
 
 
+def test_ribbon_starts_click_through_and_edit_mode_restores_input(qtbot) -> None:
+    ribbon = LiquidRibbon(EventBus(), settings=None)
+    qtbot.addWidget(ribbon)
+
+    assert ribbon.windowFlags() & Qt.WindowType.WindowTransparentForInput
+    assert not ribbon.is_edit_mode
+    assert not ribbon.edit_mode_label.isVisible()
+
+    ribbon.set_edit_mode(True)
+
+    assert not (ribbon.windowFlags() & Qt.WindowType.WindowTransparentForInput)
+    assert ribbon.is_edit_mode
+    assert ribbon.property("editMode") is True
+    assert ribbon.surface.property("editMode") is True
+    assert "#50DE73" in ribbon.edit_mode_label.styleSheet()
+    assert not ribbon.edit_mode_label.isHidden()
+
+
+def test_edit_transition_preserves_geometry_content_and_visibility(qtbot) -> None:
+    ribbon = LiquidRibbon(EventBus(), settings=None)
+    qtbot.addWidget(ribbon)
+    ribbon.setGeometry(100, 120, 780, 220)
+    ribbon._reset_answer(1)
+    ribbon.append_delta(1, "answer")
+    ribbon.show()
+    qtbot.waitExposed(ribbon)
+    before = ribbon.geometry()
+
+    ribbon.set_edit_mode(True)
+
+    assert ribbon.geometry() == before
+    assert ribbon.answer_text == "answer"
+    assert ribbon.answer_browser.toPlainText() == "answer"
+    assert ribbon.isVisible()
+
+
+def test_edit_transition_preserves_collapsed_state(qtbot) -> None:
+    ribbon = LiquidRibbon(EventBus(), settings=None)
+    qtbot.addWidget(ribbon)
+    ribbon.toggle_collapsed()
+    before = ribbon.geometry()
+
+    ribbon.set_edit_mode(True)
+
+    assert ribbon.is_collapsed
+    assert ribbon.geometry() == before
+    assert ribbon.body_widget.isHidden()
+
+
+def test_geometry_is_debounced_into_qsettings(qtbot, tmp_path) -> None:
+    settings = QSettings(str(tmp_path / "debounced.ini"), QSettings.Format.IniFormat)
+    ribbon = LiquidRibbon(EventBus(), settings=settings)
+    qtbot.addWidget(ribbon)
+    ribbon.set_edit_mode(True)
+    ribbon.setGeometry(140, 160, 720, 240)
+
+    qtbot.waitUntil(lambda: settings.contains(LiquidRibbon.GEOMETRY_KEY))
+
+    restored = LiquidRibbon(EventBus(), settings=settings)
+    qtbot.addWidget(restored)
+    assert restored.geometry() == ribbon.geometry()
+
+
+def test_passive_ribbon_does_not_start_move_or_resize_handlers(qtbot) -> None:
+    ribbon = _FallbackRibbon(EventBus(), settings=None)
+    qtbot.addWidget(ribbon)
+    ribbon.setGeometry(100, 100, 600, 180)
+    press = _mouse_event(
+        QEvent.Type.MouseButtonPress,
+        local_x=598,
+        local_y=178,
+        global_x=698,
+        global_y=278,
+        button=Qt.MouseButton.LeftButton,
+        buttons=Qt.MouseButton.LeftButton,
+    )
+
+    ribbon.mousePressEvent(press)
+
+    assert ribbon._fallback_action is None
+
+
+def test_failed_edit_transition_restores_previous_window_state(
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events = EventBus()
+    notifications: list[str] = []
+    events.notification.connect(notifications.append)
+    ribbon = LiquidRibbon(events, settings=None)
+    qtbot.addWidget(ribbon)
+    ribbon.setGeometry(100, 120, 780, 220)
+    ribbon.show()
+    qtbot.waitExposed(ribbon)
+    before_flags = ribbon.windowFlags()
+    before_geometry = ribbon.geometry()
+
+    def fail_transition(_flag: Qt.WindowType, _enabled: bool = True) -> None:
+        raise RuntimeError("native transition failed")
+
+    monkeypatch.setattr(ribbon, "setWindowFlag", fail_transition)
+
+    ribbon.set_edit_mode(True)
+
+    assert ribbon.windowFlags() == before_flags
+    assert ribbon.geometry() == before_geometry
+    assert ribbon.isVisible()
+    assert not ribbon.is_edit_mode
+    assert ribbon.property("editMode") is False
+    assert notifications == ["Unable to change overlay interaction mode."]
+
+
 def test_reference_spacing_and_standard_collapse_icon_are_applied(qtbot) -> None:
     bus = EventBus()
     ribbon = LiquidRibbon(bus, settings=None)
@@ -698,6 +810,7 @@ class _FallbackRibbon(LiquidRibbon):
 def test_drag_handler_has_safe_fallback_when_native_move_is_unavailable(qtbot) -> None:
     ribbon = _FallbackRibbon(EventBus(), settings=None)
     qtbot.addWidget(ribbon)
+    ribbon.set_edit_mode(True)
     ribbon.setGeometry(100, 100, 600, 180)
     press = _mouse_event(
         QEvent.Type.MouseButtonPress,
@@ -732,6 +845,7 @@ def test_resize_handler_uses_edges_and_enforces_configured_maximum(qtbot) -> Non
         settings=None,
     )
     qtbot.addWidget(ribbon)
+    ribbon.set_edit_mode(True)
     ribbon.setGeometry(100, 100, 600, 180)
     press = _mouse_event(
         QEvent.Type.MouseButtonPress,

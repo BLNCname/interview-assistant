@@ -207,6 +207,7 @@ _SIGNAL_BY_ACTION = {
     HotkeyAction.SCREENSHOT: "screenshot_requested",
     HotkeyAction.PAUSE: "pause_toggled",
     HotkeyAction.OVERLAY_VISIBILITY: "overlay_visibility_toggled",
+    HotkeyAction.OVERLAY_INTERACTION: "overlay_interaction_toggled",
     HotkeyAction.FORCED_WEB_SEARCH: "forced_search_requested",
     HotkeyAction.CLEAR_ANSWER: "answer_clear_requested",
 }

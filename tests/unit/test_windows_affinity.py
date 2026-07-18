@@ -6,6 +6,12 @@ from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
+from PyQt6.QtCore import QEvent, Qt
+from PyQt6.QtWidgets import QApplication
+
+from interview_assistant.events import EventBus
+from interview_assistant.ui.overlay import LiquidRibbon
+from interview_assistant.ui.windows_affinity import AffinityResult, WDA_EXCLUDEFROMCAPTURE
 
 
 @pytest.fixture
@@ -198,3 +204,41 @@ def test_affinity_result_is_frozen() -> None:
 
     with pytest.raises(FrozenInstanceError):
         setattr(result, "ok", False)
+
+
+def test_edit_transition_reapplies_affinity_to_current_hwnd(
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    handles = [101]
+    transition_returned = False
+    applied_handles: list[int] = []
+
+    def apply_affinity(hwnd: int) -> AffinityResult:
+        if hwnd == 202:
+            assert not transition_returned
+        applied_handles.append(hwnd)
+        return AffinityResult(True, WDA_EXCLUDEFROMCAPTURE, None)
+
+    monkeypatch.setattr(LiquidRibbon, "winId", lambda _ribbon: handles[-1])
+    ribbon = LiquidRibbon(
+        EventBus(),
+        settings=None,
+        affinity_applier=apply_affinity,
+    )
+    qtbot.addWidget(ribbon)
+    ribbon.show()
+    qtbot.waitExposed(ribbon)
+    original_set_window_flag = ribbon.setWindowFlag
+
+    def recreate_native_window(flag: Qt.WindowType, enabled: bool = True) -> None:
+        original_set_window_flag(flag, enabled)
+        handles.append(202)
+        QApplication.sendEvent(ribbon, QEvent(QEvent.Type.WinIdChange))
+
+    monkeypatch.setattr(ribbon, "setWindowFlag", recreate_native_window)
+
+    ribbon.set_edit_mode(True)
+    transition_returned = True
+
+    assert applied_handles == [101, 202]

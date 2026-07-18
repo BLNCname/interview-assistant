@@ -270,6 +270,9 @@ class ApplicationRuntime(QObject):
         events.screenshot_requested.connect(self._on_screenshot_requested)
         events.pause_toggled.connect(self._on_pause_toggled)
         events.overlay_visibility_toggled.connect(self._on_overlay_visibility_toggled)
+        events.overlay_interaction_toggled.connect(
+            self._on_overlay_interaction_toggled
+        )
         events.forced_search_requested.connect(self._on_forced_search_requested)
         events.answer_clear_requested.connect(self._on_answer_clear_requested)
         self._actions_connected = True
@@ -285,6 +288,10 @@ class ApplicationRuntime(QObject):
             (
                 events.overlay_visibility_toggled,
                 self._on_overlay_visibility_toggled,
+            ),
+            (
+                events.overlay_interaction_toggled,
+                self._on_overlay_interaction_toggled,
             ),
             (events.forced_search_requested, self._on_forced_search_requested),
             (events.answer_clear_requested, self._on_answer_clear_requested),
@@ -631,6 +638,12 @@ class ApplicationRuntime(QObject):
             self.application.ribbon.hide()
         else:
             self.application.ribbon.show()
+
+    @pyqtSlot()
+    def _on_overlay_interaction_toggled(self) -> None:
+        if self._closing:
+            return
+        self.application.ribbon.toggle_edit_mode()
 
     @pyqtSlot()
     def _on_forced_search_requested(self) -> None:

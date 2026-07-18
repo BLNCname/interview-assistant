@@ -10,7 +10,6 @@ from interview_assistant.app import InterviewApplication
 from interview_assistant.audio.worker import AudioWorker
 from interview_assistant.capture.worker import CaptureWorker
 from interview_assistant.composition import (
-    DEFAULT_HOTKEY_BINDINGS,
     ProductionComponents,
     build_production_components,
 )
@@ -18,7 +17,7 @@ from interview_assistant.config import AppConfig
 from interview_assistant.diagnostics.readiness import READINESS_CHECK_NAMES
 from interview_assistant.stt.engine import TranscriptionResult
 from interview_assistant.stt.worker import StreamingSTTWorker
-from interview_assistant.utils.hotkeys import HotkeyAction, HotkeyManager
+from interview_assistant.utils.hotkeys import HotkeyAction, HotkeyChord, HotkeyManager
 
 
 def _config() -> AppConfig:
@@ -141,9 +140,24 @@ async def test_stt_readiness_uses_worker_engine_and_close_drains_inference_threa
     app.shutdown()
 
 
-def test_default_hotkeys_cover_every_action_once() -> None:
-    assert set(DEFAULT_HOTKEY_BINDINGS) == set(HotkeyAction)
-    assert len(set(DEFAULT_HOTKEY_BINDINGS.values())) == len(HotkeyAction)
+async def test_production_composition_uses_saved_hotkeys(qtbot) -> None:
+    app = InterviewApplication.for_test()
+    qtbot.addWidget(app.ribbon)
+    config = _config()
+    config.hotkeys.overlay_interaction = "ctrl+alt+f8"
+
+    components = build_production_components(
+        app,
+        config,
+        None,
+        loop=asyncio.get_running_loop(),
+    )
+
+    assert components.runtime.services.hotkeys.bindings[
+        HotkeyAction.OVERLAY_INTERACTION
+    ] == HotkeyChord.parse("ctrl+alt+f8")
+    await components.aclose()
+    app.shutdown()
 
 
 async def test_unsupported_searxng_provider_is_disabled_and_reported_as_warning(

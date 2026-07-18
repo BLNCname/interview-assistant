@@ -4,7 +4,18 @@ import math
 import re
 from collections.abc import Iterable, Iterator
 
-from PyQt6.QtCore import QByteArray, QEvent, QPoint, QRect, QRectF, QSettings, QSize, Qt, pyqtSignal
+from PyQt6.QtCore import (
+    QByteArray,
+    QEvent,
+    QPoint,
+    QRect,
+    QRectF,
+    QSettings,
+    QSize,
+    Qt,
+    QTimer,
+    pyqtSignal,
+)
 from PyQt6.QtGui import (
     QColor,
     QCloseEvent,
@@ -12,6 +23,7 @@ from PyQt6.QtGui import (
     QIcon,
     QLinearGradient,
     QMouseEvent,
+    QMoveEvent,
     QPaintEvent,
     QPainter,
     QPainterPath,
@@ -196,7 +208,12 @@ class _RibbonSurface(QWidget):
         )
         painter.fillPath(path, background)
 
-        painter.setPen(QPen(QColor(255, 255, 255, 56), 1.0))
+        border = (
+            QColor("#50DE73")
+            if self.property("editMode")
+            else QColor(255, 255, 255, 56)
+        )
+        painter.setPen(QPen(border, 1.0))
         painter.drawPath(path)
 
         edge = QLinearGradient(rect.topLeft(), rect.topRight())
@@ -261,6 +278,7 @@ class LiquidRibbon(QMainWindow):
             Qt.WindowType.FramelessWindowHint
             | Qt.WindowType.Tool
             | Qt.WindowType.WindowStaysOnTopHint
+            | Qt.WindowType.WindowTransparentForInput
         )
         super().__init__(None, flags)
         self._events = events
@@ -277,6 +295,7 @@ class LiquidRibbon(QMainWindow):
         self._expanded_height = min(180, self._config.max_height)
         self._minimum_expanded_height = min(120, self._config.max_height)
         self.is_collapsed = False
+        self.is_edit_mode = False
         self.answer_text = ""
         self.question_text = "Ожидание вопроса…"
         self.source_texts: tuple[str, ...] = ()
@@ -284,6 +303,11 @@ class LiquidRibbon(QMainWindow):
         self._fallback_press_global: QPoint | None = None
         self._fallback_press_geometry: QRect | None = None
         self._fallback_resize_edges = Qt.Edge(0)
+        self._geometry_persistence_enabled = False
+        self._geometry_timer = QTimer(self)
+        self._geometry_timer.setSingleShot(True)
+        self._geometry_timer.setInterval(250)
+        self._geometry_timer.timeout.connect(self._persist_geometry)
 
         self.setWindowTitle("Interview Assistant")
         self.effective_window_opacity = max(0.65, self._config.opacity)
@@ -291,9 +315,13 @@ class LiquidRibbon(QMainWindow):
         self.setMinimumHeight(self._minimum_expanded_height)
         self.setMaximumHeight(self._config.max_height)
         self._build_content()
+        self.setProperty("editMode", False)
+        self.surface.setProperty("editMode", False)
+        self._update_edit_indicator()
         self._set_default_geometry()
         self._restore_geometry()
         self._update_window_mask()
+        self._geometry_persistence_enabled = True
 
         # All event connections are established before callers can show the window.
         events.state_changed.connect(self.show_state)
@@ -354,6 +382,11 @@ class LiquidRibbon(QMainWindow):
     def resizeEvent(self, event: QResizeEvent | None) -> None:
         super().resizeEvent(event)
         self._update_window_mask()
+        self._schedule_geometry_persistence()
+
+    def moveEvent(self, event: QMoveEvent | None) -> None:
+        super().moveEvent(event)
+        self._schedule_geometry_persistence()
 
     def showEvent(self, event: QShowEvent | None) -> None:
         super().showEvent(event)
@@ -389,6 +422,76 @@ class LiquidRibbon(QMainWindow):
     def mark_capture_exclusion_unavailable(self) -> None:
         self._capture_exclusion_unavailable = True
         self._refresh_status()
+
+    def set_edit_mode(self, enabled: bool) -> None:
+        enabled = bool(enabled)
+        if enabled == self.is_edit_mode:
+            return
+
+        previous_mode = self.is_edit_mode
+        previous_flags = self.windowFlags()
+        previous_geometry = QRect(self.geometry())
+        was_visible = self.isVisible()
+        previous_affinity_hwnd = self._affinity_hwnd
+        try:
+            self.setWindowFlag(Qt.WindowType.WindowTransparentForInput, not enabled)
+            self.is_edit_mode = enabled
+            self.setProperty("editMode", enabled)
+            self.surface.setProperty("editMode", enabled)
+            self.setGeometry(previous_geometry)
+            if was_visible:
+                self.show()
+            else:
+                self.hide()
+            self._update_edit_indicator()
+            self._reapply_capture_exclusion(previous_affinity_hwnd)
+            self._schedule_geometry_persistence()
+        except Exception:
+            self.setWindowFlags(previous_flags)
+            self.is_edit_mode = previous_mode
+            self.setProperty("editMode", previous_mode)
+            self.surface.setProperty("editMode", previous_mode)
+            self.setGeometry(previous_geometry)
+            if was_visible:
+                self.show()
+            else:
+                self.hide()
+            self._update_edit_indicator()
+            self._reapply_capture_exclusion(previous_affinity_hwnd)
+            self._events.notification.emit(
+                "Unable to change overlay interaction mode."
+            )
+            self.setGeometry(previous_geometry)
+
+    def toggle_edit_mode(self) -> None:
+        self.set_edit_mode(not self.is_edit_mode)
+
+    def _update_edit_indicator(self) -> None:
+        if self.is_edit_mode:
+            self.edit_mode_label.show()
+        else:
+            self.edit_mode_label.hide()
+        self.surface.update()
+
+    def _reapply_capture_exclusion(self, previous_hwnd: int | None) -> None:
+        current_hwnd = int(self.winId())
+        if current_hwnd == previous_hwnd:
+            self._affinity_hwnd = None
+        self._apply_capture_exclusion_to_current_hwnd()
+
+    def _schedule_geometry_persistence(self) -> None:
+        if (
+            not getattr(self, "_geometry_persistence_enabled", False)
+            or self._settings is None
+        ):
+            return
+        self._geometry_timer.start()
+
+    def _persist_geometry(self) -> None:
+        if self._settings is None or not self._geometry_persistence_enabled:
+            return
+        self._settings.setValue(self.GEOMETRY_KEY, self.saveGeometry())
+        self._settings.sync()
 
     def _build_content(self) -> None:
         self.surface = _RibbonSurface(self._config.opacity, self)
@@ -476,6 +579,15 @@ class LiquidRibbon(QMainWindow):
             "padding: 2px 7px; }"
         )
         header_layout.addWidget(self.model_chip)
+
+        self.edit_mode_label = QLabel("Режим настройки", self.header_widget)
+        self.edit_mode_label.setTextFormat(Qt.TextFormat.PlainText)
+        self.edit_mode_label.setStyleSheet(
+            "QLabel { color: #50DE73; border: 1px solid #50DE73; "
+            "border-radius: 9px; padding: 2px 7px; font-size: 12px; }"
+        )
+        self.edit_mode_label.hide()
+        header_layout.addWidget(self.edit_mode_label)
         header_layout.addStretch(1)
 
         self.settings_button = QToolButton(self.header_widget)
@@ -828,6 +940,9 @@ class LiquidRibbon(QMainWindow):
         if event is None:
             super().mousePressEvent(event)
             return
+        if not self.is_edit_mode:
+            event.ignore()
+            return
         if event.button() != Qt.MouseButton.LeftButton:
             super().mousePressEvent(event)
             return
@@ -849,6 +964,9 @@ class LiquidRibbon(QMainWindow):
     def mouseMoveEvent(self, event: QMouseEvent | None) -> None:
         if event is None:
             super().mouseMoveEvent(event)
+            return
+        if not self.is_edit_mode:
+            event.ignore()
             return
         if (
             self._fallback_action is None
@@ -896,10 +1014,12 @@ class LiquidRibbon(QMainWindow):
         self._fallback_press_global = None
         self._fallback_press_geometry = None
         self._fallback_resize_edges = Qt.Edge(0)
+        if event is not None and not self.is_edit_mode:
+            event.ignore()
+            return
         super().mouseReleaseEvent(event)
 
     def closeEvent(self, event: QCloseEvent | None) -> None:
-        if self._settings is not None:
-            self._settings.setValue(self.GEOMETRY_KEY, self.saveGeometry())
-            self._settings.sync()
+        self._geometry_timer.stop()
+        self._persist_geometry()
         super().closeEvent(event)

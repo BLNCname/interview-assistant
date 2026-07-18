@@ -59,6 +59,27 @@ def test_default_hotkeys_cover_every_action_once() -> None:
     assert DEFAULT_HOTKEY_BINDINGS[HotkeyAction.OVERLAY_INTERACTION] == "ctrl+shift+i"
 
 
+def test_overlay_interaction_hotkey_emits_the_matching_signal() -> None:
+    events = EventBus()
+    received: list[str] = []
+    events.overlay_interaction_toggled.connect(lambda: received.append("interaction"))
+    factory = ListenerFactory()
+    manager = HotkeyManager(
+        events,
+        {HotkeyAction.OVERLAY_INTERACTION: "ctrl+alt+f8"},
+        listener_factory=factory,
+    )
+    manager.start()
+
+    listener = factory.listeners[0]
+    listener.on_press("Key.ctrl_l")
+    listener.on_press("Key.alt_l")
+    listener.on_press("Key.f8")
+
+    assert received == ["interaction"]
+    manager.stop()
+
+
 def test_chord_has_stable_portable_text() -> None:
     chord = HotkeyChord.parse("Shift + Control + I")
 
@@ -183,6 +204,7 @@ def test_all_actions_emit_only_their_event_bus_signal(qtbot) -> None:
         HotkeyAction.SCREENSHOT: "screenshot_requested",
         HotkeyAction.PAUSE: "pause_toggled",
         HotkeyAction.OVERLAY_VISIBILITY: "overlay_visibility_toggled",
+        HotkeyAction.OVERLAY_INTERACTION: "overlay_interaction_toggled",
         HotkeyAction.FORCED_WEB_SEARCH: "forced_search_requested",
         HotkeyAction.CLEAR_ANSWER: "answer_clear_requested",
     }

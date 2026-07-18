@@ -306,6 +306,21 @@ def _runtime(
     return ApplicationRuntime(app, _config(), services), services, active_client
 
 
+def test_runtime_toggles_overlay_edit_mode_from_event(qtbot) -> None:
+    app = InterviewApplication.for_test()
+    qtbot.addWidget(app.ribbon)
+    runtime, _, _ = _runtime(app)
+
+    assert not app.ribbon.is_edit_mode
+    app.events.overlay_interaction_toggled.emit()
+    assert app.ribbon.is_edit_mode
+    app.events.overlay_interaction_toggled.emit()
+    assert not app.ribbon.is_edit_mode
+
+    del runtime
+    app.shutdown()
+
+
 async def test_concurrent_shutdown_callers_join_one_cleanup_barrier(qtbot) -> None:
     app = InterviewApplication.for_test()
     qtbot.addWidget(app.ribbon)
@@ -802,6 +817,7 @@ async def test_resource_only_shutdown_disconnects_actions_before_runtime_rebuild
         app.events.screenshot_requested,
         app.events.pause_toggled,
         app.events.overlay_visibility_toggled,
+        app.events.overlay_interaction_toggled,
         app.events.forced_search_requested,
         app.events.answer_clear_requested,
     )

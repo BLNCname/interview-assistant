@@ -4,7 +4,7 @@ import asyncio
 import ctypes
 import subprocess
 import sys
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from importlib import import_module
 from pathlib import Path
@@ -51,7 +51,7 @@ from interview_assistant.ui.settings import (
     SettingsWindow,
 )
 from interview_assistant.ui.windows_affinity import AffinityApplier
-from interview_assistant.utils.hotkeys import HotkeyAction, HotkeyChord, HotkeyManager
+from interview_assistant.utils.hotkeys import HotkeyManager
 
 
 class ControllerSecretStore(Protocol):
@@ -91,19 +91,6 @@ class ControllerComponents(Protocol):
 
 
 ComponentFactory = Callable[[AppConfig, str | None], ControllerComponents]
-
-
-DEFAULT_HOTKEY_BINDINGS: Mapping[
-    HotkeyAction | str,
-    str | HotkeyChord,
-] = {
-    HotkeyAction.FORCE_REQUEST: "ctrl+shift+space",
-    HotkeyAction.SCREENSHOT: "ctrl+shift+s",
-    HotkeyAction.PAUSE: "ctrl+shift+p",
-    HotkeyAction.OVERLAY_VISIBILITY: "ctrl+shift+o",
-    HotkeyAction.FORCED_WEB_SEARCH: "ctrl+shift+w",
-    HotkeyAction.CLEAR_ANSWER: "ctrl+shift+c",
-}
 
 
 class _UnconfiguredAudioWorker:
@@ -328,7 +315,7 @@ def build_production_components(
         token,
     )
     registry = ModelRegistry(client, config.lmstudio.preferred_device_name)
-    hotkeys = HotkeyManager(application.events, DEFAULT_HOTKEY_BINDINGS)
+    hotkeys = HotkeyManager(application.events, config.hotkeys.as_bindings())
     coordinator = RequestCoordinator(application.events, client)
     search_mode = (
         config.search.mode if config.search.provider == "duckduckgo" else "off"
