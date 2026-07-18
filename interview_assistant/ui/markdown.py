@@ -16,8 +16,8 @@ _ESCAPED_IMAGE_LABEL = re.compile(r"\\!\[([^\]\r\n]*)\](?=[\[(])")
 _FENCE_OPEN = re.compile(
     r"(?m)^ {0,3}(?P<fence>`{3,}|~{3,})[^\r\n]*(?=\r?$)",
 )
-_INDENTED_CODE_LINE = re.compile(r"(?m)^(?: {4}|\t)[^\r\n]*(?=\r?$)")
 _INLINE_CODE_OPEN = re.compile(r"(?<!`)(`+)(?!`)")
+_LIST_ITEM = re.compile(r"^ {0,3}(?:[-+*]|\d{1,9}[.)])(?:[ \t]+|$)")
 _MARKDOWN_FEATURES = (
     QTextDocument.MarkdownFeature.MarkdownDialectGitHub
     | QTextDocument.MarkdownFeature.MarkdownNoHTML
@@ -105,16 +105,29 @@ def _protect_fenced_blocks(
     return "".join(parts)
 
 
-def _protect_pattern_matches(
+def _protect_indented_code(
     markdown: str,
-    pattern: re.Pattern[str],
     marker: str,
     protected: list[tuple[str, str]],
 ) -> str:
-    return pattern.sub(
-        lambda match: _protect_literal(match.group(0), marker, protected),
-        markdown,
-    )
+    parts: list[str] = []
+    inside_list = False
+    for line in markdown.splitlines(keepends=True):
+        content = line.rstrip("\r\n")
+        ending = line[len(content) :]
+        if _LIST_ITEM.match(content):
+            inside_list = True
+        elif not content.strip():
+            pass
+        elif inside_list and content.startswith((" ", "\t")):
+            pass
+        else:
+            inside_list = False
+
+        if not inside_list and content.startswith(("    ", "\t")):
+            content = _protect_literal(content, marker, protected)
+        parts.extend((content, ending))
+    return "".join(parts)
 
 
 def _protect_inline_code(
@@ -146,7 +159,7 @@ def _neutralize_images(markdown: str) -> str:
         marker += "-"
     protected: list[tuple[str, str]] = []
     prose = _protect_fenced_blocks(markdown, marker, protected)
-    prose = _protect_pattern_matches(prose, _INDENTED_CODE_LINE, marker, protected)
+    prose = _protect_indented_code(prose, marker, protected)
     prose = _protect_inline_code(prose, marker, protected)
     prose = _ESCAPED_IMAGE_LABEL.sub(
         lambda match: f"\\!\\[{match.group(1)}\\]",

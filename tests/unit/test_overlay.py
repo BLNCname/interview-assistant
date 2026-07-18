@@ -173,6 +173,43 @@ def test_markdown_reference_images_are_neutralized_to_alt_text(qtbot) -> None:
     assert "private.txt" not in plain_text
 
 
+@pytest.mark.parametrize(
+    ("markdown", "alt"),
+    [
+        (
+            "- item\n    ![List alt](file:///list.png)",
+            "List alt",
+        ),
+        (
+            "1. item\n    ![Ordered alt][asset]\n\n[asset]: file:///ordered.png",
+            "Ordered alt",
+        ),
+        (
+            "- item\n    second continuation\n        ![Nested alt](file:///nested.png)",
+            "Nested alt",
+        ),
+        (
+            "- item\n\tsecond continuation\n\t![Tabbed alt](file:///tabbed.png)",
+            "Tabbed alt",
+        ),
+    ],
+    ids=["unordered", "ordered", "nested", "tabbed"],
+)
+def test_markdown_images_in_list_continuations_are_neutralized(
+    qtbot,
+    markdown: str,
+    alt: str,
+) -> None:
+    ribbon = _rendered_ribbon(qtbot, markdown)
+    plain_text = ribbon.answer_browser.toPlainText()
+
+    assert ribbon.answer_text == markdown
+    assert ribbon.answer_browser.resource_requests == ()
+    assert alt in plain_text
+    assert f"![{alt}]" not in plain_text
+    assert "\ufffc" not in plain_text
+
+
 def test_markdown_shortcut_images_only_are_neutralized_in_prose(qtbot) -> None:
     markdown = (
         "![Shortcut alt]\n\n"
