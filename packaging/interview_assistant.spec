@@ -66,6 +66,7 @@ def _optional_stt_bundle_datas():
 
 datas = [
     (str(ROOT / "assets" / "diagnostics" / "stt-smoke.wav"), "assets/diagnostics"),
+    (str(ROOT / "assets" / "branding" / "interview-assistant.ico"), "assets/branding"),
     (str(ROOT / "config" / "mcp.template.json"), "config"),
     (str(MANIFEST_PATH), "packaging"),
 ]
@@ -122,6 +123,7 @@ exe = EXE(
     codesign_identity=None,
     entitlements_file=None,
     version=str(ROOT / "packaging" / "version_info.txt"),
+    icon=str(ROOT / "assets" / "branding" / "interview-assistant.ico"),
 )
 
 collection = COLLECT(

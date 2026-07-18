@@ -6,6 +6,7 @@ from importlib import import_module
 from pathlib import Path
 from typing import cast
 
+from PyQt6.QtGui import QIcon
 from PyQt6.QtWidgets import QApplication
 
 from interview_assistant.composition import (
@@ -20,6 +21,16 @@ QEventLoop = cast(
     Callable[[QApplication], asyncio.AbstractEventLoop],
     getattr(import_module("qasync"), "QEventLoop"),
 )
+
+
+def _application_icon_path() -> Path:
+    frozen_root = getattr(sys, "_MEIPASS", None)
+    root = (
+        Path(frozen_root)
+        if isinstance(frozen_root, str)
+        else Path(__file__).resolve().parent
+    )
+    return root / "assets" / "branding" / "interview-assistant.ico"
 
 
 async def _finalize(
@@ -74,6 +85,10 @@ def main(
         return diagnostic_exit_code
 
     qt_app = QApplication(runtime_argv)
+    icon = QIcon(str(_application_icon_path()))
+    if icon.isNull():
+        raise RuntimeError("Application branding icon could not be loaded")
+    qt_app.setWindowIcon(icon)
     loop = QEventLoop(qt_app)
     asyncio.set_event_loop(loop)
     controller = create_production_controller(

@@ -12,6 +12,7 @@ from types import ModuleType
 
 import numpy as np
 import pytest
+from PIL import Image
 
 from interview_assistant.windows_cuda import CudaRuntimeStatus
 
@@ -23,9 +24,31 @@ BUILD_SCRIPT_PATH = ROOT / "scripts" / "build.ps1"
 CUDA_SCRIPT_PATH = ROOT / "scripts" / "verify_cuda.py"
 DIAGNOSTICS_MODULE_PATH = ROOT / "interview_assistant" / "diagnostics" / "cli.py"
 FIXTURE_PATH = ROOT / "assets" / "diagnostics" / "stt-smoke.wav"
+BRAND_PNG_PATH = ROOT / "assets" / "branding" / "interview-assistant-logo.png"
+BRAND_ICO_PATH = ROOT / "assets" / "branding" / "interview-assistant.ico"
 REQUIREMENTS_PATH = ROOT / "requirements.txt"
 GITIGNORE_PATH = ROOT / ".gitignore"
 UV_LOCK_PATH = ROOT / "uv.lock"
+
+
+def test_liquid_glass_branding_assets_are_release_ready() -> None:
+    with Image.open(BRAND_PNG_PATH) as logo:
+        assert logo.width == logo.height
+        assert logo.width >= 1024
+        assert not getattr(logo, "text", {})
+
+    with Image.open(BRAND_ICO_PATH) as icon:
+        frame_sizes = set(icon.ico.sizes())
+
+    assert {
+        (16, 16),
+        (24, 24),
+        (32, 32),
+        (48, 48),
+        (64, 64),
+        (128, 128),
+        (256, 256),
+    } <= frame_sizes
 
 
 def test_stt_model_manifest_pins_exact_offline_bundle_metadata() -> None:
@@ -117,6 +140,14 @@ def test_pyinstaller_spec_declares_reproducible_onedir_windowed_bundle() -> None
     assert "MODEL_WEIGHT_SUFFIXES" in source
     assert "copy_metadata" in source
     assert "ROOT = Path(SPECPATH).resolve().parent\n" in source
+    assert (
+        '(str(ROOT / "assets" / "branding" / "interview-assistant.ico"), '
+        '"assets/branding")'
+    ) in source
+    assert (
+        'icon=str(ROOT / "assets" / "branding" / "interview-assistant.ico")'
+        in source
+    )
 
 
 def test_build_script_runs_packaged_headless_diagnostics_and_optional_cuda() -> None:

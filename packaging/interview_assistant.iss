@@ -22,6 +22,7 @@ OutputBaseFilename=InterviewAssistant-Setup-{#AppVersion}-win64
 Compression=lzma2/ultra64
 SolidCompression=yes
 LZMAUseSeparateProcess=yes
+SetupIconFile={#SourcePath}\..\assets\branding\interview-assistant.ico
 WizardStyle=modern
 SetupLogging=yes
 CloseApplications=yes

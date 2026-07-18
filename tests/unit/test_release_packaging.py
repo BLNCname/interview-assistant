@@ -260,6 +260,10 @@ def test_inno_setup_is_per_user_versioned_and_deletes_only_owned_upgrade_files()
     assert "OutputBaseFilename=InterviewAssistant-Setup-{#AppVersion}-win64" in source
     assert "Compression=lzma2/ultra64" in source
     assert "SolidCompression=yes" in source
+    assert (
+        "SetupIconFile={#SourcePath}\\..\\assets\\branding\\"
+        "interview-assistant.ico"
+    ) in source
     assert 'Source: "{#DistPath}\\*"; DestDir: "{app}"' in source
     assert "recursesubdirs" in source
     assert "createallsubdirs" in source

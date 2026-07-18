@@ -8,9 +8,22 @@ import main as main_module
 
 class _QtApplication:
     created_argv: list[str] | None = None
+    window_icon: object | None = None
 
     def __init__(self, argv: list[str]) -> None:
         type(self).created_argv = argv
+        type(self).window_icon = None
+
+    def setWindowIcon(self, icon: object) -> None:
+        type(self).window_icon = icon
+
+
+class _Icon:
+    def __init__(self, source: str) -> None:
+        self.source = source
+
+    def isNull(self) -> bool:
+        return False
 
 
 class _Controller:
@@ -132,6 +145,7 @@ def test_main_uses_one_qasync_loop_and_awaits_shutdown(
         return loop
 
     monkeypatch.setattr(main_module, "QApplication", _QtApplication)
+    monkeypatch.setattr(main_module, "QIcon", _Icon)
     monkeypatch.setattr(main_module, "QEventLoop", loop_factory)
     monkeypatch.setattr(main_module.asyncio, "set_event_loop", lambda _loop: None)
     monkeypatch.setattr(
@@ -147,6 +161,36 @@ def test_main_uses_one_qasync_loop_and_awaits_shutdown(
     assert controller.shutdowns == 1
     assert len(loops) == 1
     assert loops[0].forever_count == 1
+
+
+def test_main_applies_project_branding_to_qapplication(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    controller = _Controller()
+    monkeypatch.setattr(main_module, "QApplication", _QtApplication)
+    monkeypatch.setattr(main_module, "QIcon", _Icon, raising=False)
+    monkeypatch.setattr(main_module, "QEventLoop", _EventLoop)
+    monkeypatch.setattr(main_module.asyncio, "set_event_loop", lambda _loop: None)
+    monkeypatch.setattr(
+        main_module,
+        "create_production_controller",
+        lambda _app, _loop, config_path: controller,
+    )
+
+    result = main_module.main(
+        ["interview-assistant"],
+        config_path=tmp_path / "config.yaml",
+    )
+
+    assert result == 0
+    assert isinstance(_QtApplication.window_icon, _Icon)
+    assert Path(_QtApplication.window_icon.source) == (
+        Path(main_module.__file__).resolve().parent
+        / "assets"
+        / "branding"
+        / "interview-assistant.ico"
+    )
 
 
 class _SlowController(_Controller):
@@ -170,6 +214,7 @@ def test_main_exits_cleanly_when_qt_quits_during_initial_readiness(
     controller = _SlowController()
 
     monkeypatch.setattr(main_module, "QApplication", _QtApplication)
+    monkeypatch.setattr(main_module, "QIcon", _Icon)
     monkeypatch.setattr(main_module, "QEventLoop", _EventLoop)
     monkeypatch.setattr(main_module.asyncio, "set_event_loop", lambda _loop: None)
     monkeypatch.setattr(
