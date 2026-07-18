@@ -100,6 +100,41 @@ def test_markdown_fenced_literal_content_is_not_rewritten(qtbot, fence: str) -> 
     assert _cursor_at(ribbon.answer_browser, "value").charFormat().fontFixedPitch()
 
 
+@pytest.mark.parametrize(
+    ("markdown", "literal"),
+    [
+        (
+            "```markdown\n![x](https://evil.invalid/fenced.png)\n```",
+            "![x](https://evil.invalid/fenced.png)",
+        ),
+        (
+            "~~~markdown\n![x][asset]\n~~~\n\n[asset]: https://evil.invalid/reference.png",
+            "![x][asset]",
+        ),
+        (
+            "Use `![x](https://evil.invalid/inline.png)` literally.",
+            "![x](https://evil.invalid/inline.png)",
+        ),
+        (
+            "    ![x](https://evil.invalid/indented.png)",
+            "![x](https://evil.invalid/indented.png)",
+        ),
+    ],
+    ids=["backtick-fence", "tilde-fence", "inline-code", "indented-code"],
+)
+def test_markdown_image_syntax_in_code_regions_remains_literal(
+    qtbot,
+    markdown: str,
+    literal: str,
+) -> None:
+    ribbon = _rendered_ribbon(qtbot, markdown)
+
+    assert ribbon.answer_text == markdown
+    assert literal in ribbon.answer_browser.toPlainText()
+    assert _cursor_at(ribbon.answer_browser, literal).charFormat().fontFixedPitch()
+    assert ribbon.answer_browser.resource_requests == ()
+
+
 def test_model_markdown_cannot_load_resources_or_activate_links(qtbot) -> None:
     ribbon = _rendered_ribbon(
         qtbot,
@@ -134,6 +169,29 @@ def test_markdown_reference_images_are_neutralized_to_alt_text(qtbot) -> None:
     assert ribbon.answer_browser.resource_requests == ()
     assert "Reference alt" in plain_text
     assert "Collapsed alt" in plain_text
+    assert "\ufffc" not in plain_text
+    assert "private.txt" not in plain_text
+
+
+def test_markdown_shortcut_images_only_are_neutralized_in_prose(qtbot) -> None:
+    markdown = (
+        "![Shortcut alt]\n\n"
+        "![Conservative alt]\n\n"
+        "[label]\n\n"
+        r"\![x](https://evil.invalid/escaped.png)"
+        "\n\n[Shortcut alt]: file:///private.txt"
+    )
+    ribbon = _rendered_ribbon(qtbot, markdown)
+    plain_text = ribbon.answer_browser.toPlainText()
+
+    assert ribbon.answer_text == markdown
+    assert ribbon.answer_browser.resource_requests == ()
+    assert "Shortcut alt" in plain_text
+    assert "Conservative alt" in plain_text
+    assert "![Shortcut alt]" not in plain_text
+    assert "![Conservative alt]" not in plain_text
+    assert "[label]" in plain_text
+    assert "![x](https://evil.invalid/escaped.png)" in plain_text
     assert "\ufffc" not in plain_text
     assert "private.txt" not in plain_text
 

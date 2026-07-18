@@ -8,9 +8,16 @@ from PyQt6.QtGui import QFont, QTextCharFormat, QTextCursor, QTextDocument, QTex
 from PyQt6.QtWidgets import QTextBrowser
 
 _IMAGE = re.compile(
-    r"!\[([^\]\r\n]*)\]\(\s*(?:<[^>\r\n]*>|[^)\r\n]*)\s*\)",
+    r"(?<!\\)!\[([^\]\r\n]*)\]\(\s*(?:<[^>\r\n]*>|[^)\r\n]*)\s*\)",
 )
-_REFERENCE_IMAGE = re.compile(r"!\[([^\]\r\n]*)\]\[[^\]\r\n]*\]")
+_REFERENCE_IMAGE = re.compile(r"(?<!\\)!\[([^\]\r\n]*)\]\[[^\]\r\n]*\]")
+_SHORTCUT_IMAGE = re.compile(r"(?<!\\)!\[([^\]\r\n]*)\](?![\[(])")
+_ESCAPED_IMAGE_LABEL = re.compile(r"\\!\[([^\]\r\n]*)\](?=[\[(])")
+_FENCE_OPEN = re.compile(
+    r"(?m)^ {0,3}(?P<fence>`{3,}|~{3,})[^\r\n]*(?=\r?$)",
+)
+_INDENTED_CODE_LINE = re.compile(r"(?m)^(?: {4}|\t)[^\r\n]*(?=\r?$)")
+_INLINE_CODE_OPEN = re.compile(r"(?<!`)(`+)(?!`)")
 _MARKDOWN_FEATURES = (
     QTextDocument.MarkdownFeature.MarkdownDialectGitHub
     | QTextDocument.MarkdownFeature.MarkdownNoHTML
@@ -66,9 +73,91 @@ def restore_scroll_state(browser: QTextBrowser, state: ScrollState) -> None:
         scrollbar.setValue(round(state.relative_position * scrollbar.maximum()))
 
 
+def _protect_literal(
+    literal: str,
+    marker: str,
+    protected: list[tuple[str, str]],
+) -> str:
+    placeholder = f"{marker}{len(protected)}\ue001"
+    protected.append((placeholder, literal))
+    return placeholder
+
+
+def _protect_fenced_blocks(
+    markdown: str,
+    marker: str,
+    protected: list[tuple[str, str]],
+) -> str:
+    parts: list[str] = []
+    position = 0
+    while opener := _FENCE_OPEN.search(markdown, position):
+        parts.append(markdown[position : opener.start()])
+        fence = opener.group("fence")
+        closer_pattern = re.compile(
+            rf"(?m)^ {{0,3}}{re.escape(fence[0])}{{{len(fence)},}}"
+            r"[ \t]*(?=\r?$)",
+        )
+        closer = closer_pattern.search(markdown, opener.end())
+        end = closer.end() if closer is not None else len(markdown)
+        parts.append(_protect_literal(markdown[opener.start() : end], marker, protected))
+        position = end
+    parts.append(markdown[position:])
+    return "".join(parts)
+
+
+def _protect_pattern_matches(
+    markdown: str,
+    pattern: re.Pattern[str],
+    marker: str,
+    protected: list[tuple[str, str]],
+) -> str:
+    return pattern.sub(
+        lambda match: _protect_literal(match.group(0), marker, protected),
+        markdown,
+    )
+
+
+def _protect_inline_code(
+    markdown: str,
+    marker: str,
+    protected: list[tuple[str, str]],
+) -> str:
+    position = 0
+    while opener := _INLINE_CODE_OPEN.search(markdown, position):
+        delimiter = opener.group(1)
+        closer_pattern = re.compile(rf"(?<!`){re.escape(delimiter)}(?!`)")
+        closer = closer_pattern.search(markdown, opener.end())
+        if closer is None:
+            position = opener.end()
+            continue
+        placeholder = _protect_literal(
+            markdown[opener.start() : closer.end()],
+            marker,
+            protected,
+        )
+        markdown = markdown[: opener.start()] + placeholder + markdown[closer.end() :]
+        position = opener.start() + len(placeholder)
+    return markdown
+
+
 def _neutralize_images(markdown: str) -> str:
-    without_inline_images = _IMAGE.sub(lambda match: match.group(1), markdown)
-    return _REFERENCE_IMAGE.sub(lambda match: match.group(1), without_inline_images)
+    marker = "\ue000codex-literal-"
+    while marker in markdown:
+        marker += "-"
+    protected: list[tuple[str, str]] = []
+    prose = _protect_fenced_blocks(markdown, marker, protected)
+    prose = _protect_pattern_matches(prose, _INDENTED_CODE_LINE, marker, protected)
+    prose = _protect_inline_code(prose, marker, protected)
+    prose = _ESCAPED_IMAGE_LABEL.sub(
+        lambda match: f"\\!\\[{match.group(1)}\\]",
+        prose,
+    )
+    prose = _IMAGE.sub(lambda match: match.group(1), prose)
+    prose = _REFERENCE_IMAGE.sub(lambda match: match.group(1), prose)
+    prose = _SHORTCUT_IMAGE.sub(lambda match: match.group(1), prose)
+    for placeholder, literal in protected:
+        prose = prose.replace(placeholder, literal)
+    return prose
 
 
 def _remove_anchors(document: QTextDocument) -> None:
@@ -100,7 +189,7 @@ def _apply_compact_block_formatting(document: QTextDocument) -> None:
             heading_format.setProperty(QTextFormat.Property.FontPixelSize, 18)
             heading_format.setFontWeight(QFont.Weight.DemiBold.value)
             cursor.mergeCharFormat(heading_format)
-        elif block_format.property(QTextFormat.Property.BlockCodeFence) is not None:
+        elif block_format.property(QTextFormat.Property.BlockCodeLanguage) is not None:
             block_format.setTopMargin(3)
             block_format.setBottomMargin(5)
             cursor = QTextCursor(block)
