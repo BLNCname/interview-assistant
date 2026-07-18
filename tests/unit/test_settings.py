@@ -4,10 +4,12 @@ from pathlib import Path
 
 import pytest
 from PyQt6.QtCore import QByteArray, QSettings, QSize, Qt
+from PyQt6.QtGui import QKeySequence
 
-from interview_assistant.config import AppConfig
+from interview_assistant.config import AppConfig, HotkeysConfig
 from interview_assistant.diagnostics.readiness import CheckResult, ReadinessReport
 from interview_assistant.ui.settings import SettingsBinding, SettingsChoice, SettingsWindow
+from interview_assistant.utils.hotkeys import HotkeyAction
 
 
 class FakeSecretStore:
@@ -86,6 +88,56 @@ def _window(
     return window, binding, active_secret_store, settings
 
 
+def _hotkey_text(window: SettingsWindow, action: HotkeyAction) -> str:
+    return (
+        window.hotkey_edits[action]
+        .keySequence()
+        .toString(QKeySequence.SequenceFormat.PortableText)
+        .casefold()
+    )
+
+
+def test_settings_exposes_every_hotkey_with_help_text(qtbot, tmp_path) -> None:
+    window, _, _, _ = _window(qtbot, tmp_path)
+
+    assert set(window.hotkey_edits) == set(HotkeyAction)
+    assert window.hotkey_labels[HotkeyAction.FORCE_REQUEST].text() == (
+        "Отправить текущий контекст разговора"
+    )
+    assert "послед" in window.hotkey_help[HotkeyAction.FORCE_REQUEST].text().casefold()
+    assert "следующ" in window.hotkey_help[HotkeyAction.SCREENSHOT].text().casefold()
+
+
+def test_restore_default_hotkeys_updates_all_editors(qtbot, tmp_path) -> None:
+    window, _, _, _ = _window(qtbot, tmp_path)
+    window.hotkey_edits[HotkeyAction.SCREENSHOT].setKeySequence("Ctrl+Alt+F11")
+
+    window.restore_default_hotkeys()
+
+    assert _hotkey_text(window, HotkeyAction.SCREENSHOT) == "ctrl+shift+s"
+    assert _hotkey_text(window, HotkeyAction.OVERLAY_INTERACTION) == "ctrl+shift+i"
+
+
+def test_duplicate_hotkeys_are_named_and_not_saved(qtbot, tmp_path) -> None:
+    window, binding, _, _ = _window(qtbot, tmp_path)
+    window.hotkey_edits[HotkeyAction.FORCE_REQUEST].setKeySequence("Ctrl+Alt+F10")
+    window.hotkey_edits[HotkeyAction.SCREENSHOT].setKeySequence("Ctrl+Alt+F10")
+
+    assert not window.save()
+
+    assert "конфликт" in window.notification_label.text().casefold()
+    assert binding.config.hotkeys == HotkeysConfig()
+
+
+def test_valid_hotkeys_are_persisted_with_other_settings(qtbot, tmp_path) -> None:
+    window, binding, _, _ = _window(qtbot, tmp_path)
+    window.hotkey_edits[HotkeyAction.OVERLAY_VISIBILITY].setKeySequence("Ctrl+Alt+F9")
+
+    assert window.save()
+
+    assert binding.config.hotkeys.overlay_visibility == "ctrl+alt+f9"
+
+
 def test_same_model_can_be_selected_twice_and_is_annotated_as_shared(qtbot, tmp_path) -> None:
     config = AppConfig()
     config.lmstudio.text_model = "qwen-vl"
@@ -106,12 +158,8 @@ def test_same_model_can_be_selected_twice_and_is_annotated_as_shared(qtbot, tmp_
 def test_settings_save_updates_typed_config_and_never_persists_token(qtbot, tmp_path) -> None:
     sentinel = "TOKEN-MUST-NOT-ENTER-QSETTINGS"
     window, binding, secret_store, settings = _window(qtbot, tmp_path)
-    window.system_device_combo.setCurrentIndex(
-        window.system_device_combo.findData("system-1")
-    )
-    window.microphone_device_combo.setCurrentIndex(
-        window.microphone_device_combo.findData("mic-1")
-    )
+    window.system_device_combo.setCurrentIndex(window.system_device_combo.findData("system-1"))
+    window.microphone_device_combo.setCurrentIndex(window.microphone_device_combo.findData("mic-1"))
     window.language_combo.setCurrentIndex(window.language_combo.findData("ru"))
     window.text_model_combo.setCurrentIndex(window.text_model_combo.findData("qwen-vl"))
     window.vision_model_combo.setCurrentIndex(window.vision_model_combo.findData("gemma"))
@@ -135,10 +183,7 @@ def test_settings_save_updates_typed_config_and_never_persists_token(qtbot, tmp_
     assert secret_store.saved == [sentinel]
     assert window.token_edit.text() == ""
     assert sentinel.encode() not in (tmp_path / "settings.ini").read_bytes()
-    assert all(
-        sentinel not in str(settings.value(key))
-        for key in settings.allKeys()
-    )
+    assert all(sentinel not in str(settings.value(key)) for key in settings.allKeys())
     assert "api_token" not in binding.config.model_dump()
 
 
@@ -167,9 +212,7 @@ def test_readiness_failure_disables_start_but_warning_is_visible_and_permits_it(
     window.set_readiness_report(_report("failed"))
     assert not window.start_button.isEnabled()
     assert window.start_button.property("readyToStart") is False
-    assert window.readiness_status_label.text() == (
-        "Readiness: failed — 1 blocking check"
-    )
+    assert window.readiness_status_label.text() == ("Readiness: failed — 1 blocking check")
     assert "blocking" in window.start_button.toolTip().casefold()
     assert window.readiness_table.item(0, 2).text() == "Affinity result"
     assert window.readiness_table.item(0, 3).text() == "Enable capture exclusion"
@@ -177,9 +220,7 @@ def test_readiness_failure_disables_start_but_warning_is_visible_and_permits_it(
     window.set_readiness_report(_startable_warning_report())
     assert window.start_button.isEnabled()
     assert window.start_button.property("readyToStart") is True
-    assert window.readiness_status_label.text() == (
-        "Readiness: ready — 2 non-blocking warnings"
-    )
+    assert window.readiness_status_label.text() == ("Readiness: ready — 2 non-blocking warnings")
     assert "ready to start" in window.start_button.toolTip().casefold()
     assert "#343a40" in window.start_button.styleSheet().casefold()
     qtbot.mouseClick(window.start_button, Qt.MouseButton.LeftButton)
@@ -311,9 +352,7 @@ def test_successful_save_persists_config_then_requests_fresh_readiness(
     reruns: list[bool] = []
     window.settings_saved.connect(lambda: saved.append(True))
     window.readiness_requested.connect(lambda: reruns.append(True))
-    window.system_device_combo.setCurrentIndex(
-        window.system_device_combo.findData("system-1")
-    )
+    window.system_device_combo.setCurrentIndex(window.system_device_combo.findData("system-1"))
     window.text_model_combo.setCurrentIndex(window.text_model_combo.findData("qwen-vl"))
 
     window.save_button.click()

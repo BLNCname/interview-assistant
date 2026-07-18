@@ -1,18 +1,20 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from typing import Literal, Protocol, cast
 
 from PyQt6.QtCore import QByteArray, QSettings, Qt, pyqtSignal
-from PyQt6.QtGui import QCloseEvent
+from PyQt6.QtGui import QCloseEvent, QKeySequence
 from PyQt6.QtWidgets import (
     QComboBox,
     QDoubleSpinBox,
     QFormLayout,
+    QGridLayout,
     QGroupBox,
     QHBoxLayout,
     QHeaderView,
+    QKeySequenceEdit,
     QLabel,
     QLineEdit,
     QMainWindow,
@@ -27,11 +29,50 @@ from PyQt6.QtWidgets import (
 from interview_assistant.config import (
     AppConfig,
     AudioConfig,
+    HotkeysConfig,
     LMStudioConfig,
     OverlayConfig,
     SearchConfig,
 )
 from interview_assistant.diagnostics.readiness import ReadinessReport
+from interview_assistant.utils.hotkeys import (
+    DEFAULT_HOTKEY_BINDINGS,
+    HotkeyAction,
+    HotkeyChord,
+    normalize_bindings,
+)
+
+
+HOTKEY_COPY = {
+    HotkeyAction.FORCE_REQUEST: (
+        "Отправить текущий контекст разговора",
+        "Отправляет последнюю реплику преподавателя и недавний диалог обеих сторон.",
+    ),
+    HotkeyAction.SCREENSHOT: (
+        "Подготовить снимок для следующего запроса",
+        "Одноразово добавляет следующий пригодный снимок в контекст модели.",
+    ),
+    HotkeyAction.PAUSE: (
+        "Пауза или возобновление распознавания",
+        "Останавливает или продолжает обработку обоих аудиоисточников.",
+    ),
+    HotkeyAction.OVERLAY_VISIBILITY: (
+        "Показать или скрыть окно помощника",
+        "Временно скрывает Ribbon, не закрывая приложение.",
+    ),
+    HotkeyAction.OVERLAY_INTERACTION: (
+        "Изменить положение или размер окна",
+        "Переключает click-through и режим настройки Ribbon.",
+    ),
+    HotkeyAction.FORCED_WEB_SEARCH: (
+        "Включить поиск для следующего запроса",
+        "Принудительно разрешает web search только для следующего ответа.",
+    ),
+    HotkeyAction.CLEAR_ANSWER: (
+        "Очистить ответ и историю разговора",
+        "Удаляет текущий ответ и transcript history из памяти приложения.",
+    ),
+}
 
 
 class SecretStoreProtocol(Protocol):
@@ -92,6 +133,7 @@ class SettingsBinding:
         search_mode: Literal["off", "auto", "forced"],
         opacity: float,
         max_height: int,
+        hotkeys: Mapping[HotkeyAction | str, str],
         token: str,
     ) -> None:
         audio = AudioConfig.model_validate(
@@ -119,12 +161,17 @@ class SettingsBinding:
                 "max_height": max_height,
             }
         )
+        normalized_hotkeys = normalize_bindings(hotkeys)
+        hotkeys_config = HotkeysConfig.model_validate(
+            {action.value: chord.to_portable_text() for action, chord in normalized_hotkeys.items()}
+        )
 
         candidate = self.config.model_copy(deep=True)
         candidate.audio = audio
         candidate.lmstudio = lmstudio
         candidate.search = search
         candidate.overlay = overlay
+        candidate.hotkeys = hotkeys_config
         if token.strip():
             self._secret_store.set_lm_token(token)
         if self._persist is not None:
@@ -133,6 +180,7 @@ class SettingsBinding:
         self.config.lmstudio = candidate.lmstudio
         self.config.search = candidate.search
         self.config.overlay = candidate.overlay
+        self.config.hotkeys = candidate.hotkeys
 
 
 class SettingsWindow(QMainWindow):
@@ -194,7 +242,11 @@ class SettingsWindow(QMainWindow):
             empty_data=None,
         )
         self.language_combo = QComboBox(configuration)
-        for label, key in (("Auto (Russian / English)", "auto"), ("Russian", "ru"), ("English", "en")):
+        for label, key in (
+            ("Auto (Russian / English)", "auto"),
+            ("Russian", "ru"),
+            ("English", "en"),
+        ):
             self.language_combo.addItem(label, key)
         self._select_data(self.language_combo, self._binding.config.audio.language)
 
@@ -215,7 +267,11 @@ class SettingsWindow(QMainWindow):
         self._update_shared_instance_annotation()
 
         self.search_mode_combo = QComboBox(configuration)
-        for label, key in (("Off", "off"), ("Automatic", "auto"), ("Forced for next request", "forced")):
+        for label, key in (
+            ("Off", "off"),
+            ("Automatic", "auto"),
+            ("Forced for next request", "forced"),
+        ):
             self.search_mode_combo.addItem(label, key)
         self._select_data(self.search_mode_combo, self._binding.config.search.mode)
 
@@ -243,6 +299,8 @@ class SettingsWindow(QMainWindow):
         form.addRow("Overlay maximum height", self.max_height_spin)
         form.addRow("LM Studio token", self.token_edit)
         root.addWidget(configuration)
+
+        root.addWidget(self._build_hotkey_group(central))
 
         readiness = QGroupBox("Readiness", central)
         readiness_layout = QVBoxLayout(readiness)
@@ -300,6 +358,59 @@ class SettingsWindow(QMainWindow):
         self.save_button.clicked.connect(self.save)
         self.readiness_button.clicked.connect(self.save)
         self.start_button.clicked.connect(self._request_start)
+
+    def _build_hotkey_group(self, parent: QWidget) -> QGroupBox:
+        hotkeys = QGroupBox("Горячие клавиши", parent)
+        layout = QGridLayout(hotkeys)
+        layout.setColumnStretch(1, 1)
+        self.hotkey_edits: dict[HotkeyAction, QKeySequenceEdit] = {}
+        self.hotkey_labels: dict[HotkeyAction, QLabel] = {}
+        self.hotkey_help: dict[HotkeyAction, QLabel] = {}
+        bindings = self._binding.config.hotkeys.as_bindings()
+        for row, action in enumerate(HotkeyAction):
+            label_text, help_text = HOTKEY_COPY[action]
+            label = QLabel(label_text, hotkeys)
+            label.setWordWrap(True)
+            help_label = QLabel(help_text, hotkeys)
+            help_label.setWordWrap(True)
+            editor = QKeySequenceEdit(hotkeys)
+            editor.setMaximumSequenceLength(1)
+            editor.setKeySequence(
+                QKeySequence(
+                    bindings[action],
+                    QKeySequence.SequenceFormat.PortableText,
+                )
+            )
+            self.hotkey_labels[action] = label
+            self.hotkey_help[action] = help_label
+            self.hotkey_edits[action] = editor
+            layout.addWidget(label, row, 0)
+            layout.addWidget(help_label, row, 1)
+            layout.addWidget(editor, row, 2)
+
+        restore_defaults = QPushButton("Восстановить по умолчанию", hotkeys)
+        restore_defaults.clicked.connect(self.restore_default_hotkeys)
+        layout.addWidget(restore_defaults, len(HotkeyAction), 2)
+        return hotkeys
+
+    def restore_default_hotkeys(self) -> None:
+        for action, editor in self.hotkey_edits.items():
+            editor.setKeySequence(
+                QKeySequence(
+                    DEFAULT_HOTKEY_BINDINGS[action],
+                    QKeySequence.SequenceFormat.PortableText,
+                )
+            )
+
+    def _hotkey_bindings(self) -> dict[HotkeyAction, str]:
+        portable_bindings = {
+            action: HotkeyChord.parse(
+                editor.keySequence().toString(QKeySequence.SequenceFormat.PortableText)
+            ).to_portable_text()
+            for action, editor in self.hotkey_edits.items()
+        }
+        normalized = normalize_bindings(portable_bindings)
+        return {action: chord.to_portable_text() for action, chord in normalized.items()}
 
     @staticmethod
     def _choice_combo(
@@ -403,15 +514,13 @@ class SettingsWindow(QMainWindow):
         )
         for combo in combos:
             combo.currentIndexChanged.connect(self._invalidate_readiness)
-        self.text_model_combo.currentIndexChanged.connect(
-            self._update_shared_instance_annotation
-        )
-        self.vision_model_combo.currentIndexChanged.connect(
-            self._update_shared_instance_annotation
-        )
+        self.text_model_combo.currentIndexChanged.connect(self._update_shared_instance_annotation)
+        self.vision_model_combo.currentIndexChanged.connect(self._update_shared_instance_annotation)
         self.opacity_spin.valueChanged.connect(self._invalidate_readiness)
         self.max_height_spin.valueChanged.connect(self._invalidate_readiness)
         self.token_edit.textChanged.connect(self._invalidate_readiness)
+        for editor in self.hotkey_edits.values():
+            editor.keySequenceChanged.connect(self._invalidate_readiness)
 
     def _update_shared_instance_annotation(self, _value: int | None = None) -> None:
         text_key = str(self.text_model_combo.currentData() or "")
@@ -462,8 +571,7 @@ class SettingsWindow(QMainWindow):
                 self.readiness_table.setItem(row, column, item)
         if not report.can_start:
             blocking_count = sum(
-                result.required and result.status == "failed"
-                for result in report.checks
+                result.required and result.status == "failed" for result in report.checks
             )
             suffix = "check" if blocking_count == 1 else "checks"
             self.readiness_status_label.setText(
@@ -474,9 +582,7 @@ class SettingsWindow(QMainWindow):
                 f"Start is blocked by {blocking_count} blocking {suffix}.",
             )
         elif report.status == "warning":
-            warning_count = sum(
-                result.status != "ready" for result in report.checks
-            )
+            warning_count = sum(result.status != "ready" for result in report.checks)
             suffix = "warning" if warning_count == 1 else "warnings"
             self.readiness_status_label.setText(
                 f"Readiness: ready — {warning_count} non-blocking {suffix}"
@@ -496,6 +602,14 @@ class SettingsWindow(QMainWindow):
     def save(self) -> bool:
         token = self.token_edit.text()
         try:
+            hotkeys = self._hotkey_bindings()
+        except ValueError as error:
+            message = str(error)
+            if message.startswith("Duplicate hotkey"):
+                message = f"Конфликт горячих клавиш: {message}"
+            self.show_notification(message)
+            return False
+        try:
             self._binding.apply(
                 system_device_id=cast(str | None, self.system_device_combo.currentData()),
                 microphone_device_id=cast(str | None, self.microphone_device_combo.currentData()),
@@ -511,6 +625,7 @@ class SettingsWindow(QMainWindow):
                 ),
                 opacity=self.opacity_spin.value(),
                 max_height=self.max_height_spin.value(),
+                hotkeys=hotkeys,
                 token=token,
             )
         except Exception:
