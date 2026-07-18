@@ -234,6 +234,7 @@ class ApplicationRuntime(QObject):
         self._shutdown_completed: set[str] = set()
         self._action_tasks: set[asyncio.Task[None]] = set()
         self._manual_image_path: Path | None = None
+        self._manual_capture_generation = 0
         self._paused = False
         self._desired_state = ApplicationState.STARTING
         self._recovered_search_results: dict[int, str] = {}
@@ -705,6 +706,8 @@ class ApplicationRuntime(QObject):
     async def capture_manual_screenshot(self) -> None:
         if self._closing:
             return
+        self._manual_capture_generation += 1
+        generation = self._manual_capture_generation
         self._manual_image_path = None
         self.application.events.notification.emit("Снимок создаётся")
         try:
@@ -712,7 +715,11 @@ class ApplicationRuntime(QObject):
         except asyncio.CancelledError:
             raise
         except Exception:
+            if generation != self._manual_capture_generation:
+                return
             self.application.events.notification.emit("Снимок не создан: ошибка захвата")
+            return
+        if generation != self._manual_capture_generation:
             return
         if result.status != "captured" or result.path is None:
             self.application.events.notification.emit("Снимок не создан: снимок недоступен")
@@ -727,6 +734,7 @@ class ApplicationRuntime(QObject):
         task = self._shutdown_task
         if task is None:
             self._closing = True
+            self._manual_capture_generation += 1
             task = asyncio.create_task(
                 self._shutdown_once(),
                 name="interview-application-shutdown",

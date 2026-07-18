@@ -251,6 +251,32 @@ class _ReplacingFailureCapture(_ParityCapture):
         return await super().capture_for_event(kind, manual=manual)
 
 
+class _OverlappingManualCapture(_ParityCapture):
+    def __init__(self, first_path: Path, second_path: Path) -> None:
+        super().__init__(first_path)
+        self.first_path = first_path
+        self.second_path = second_path
+        self.first_started = asyncio.Event()
+        self.second_started = asyncio.Event()
+        self.release_first = asyncio.Event()
+        self.release_second = asyncio.Event()
+        self.first_error = False
+
+    async def capture_for_event(self, kind: str, *, manual: bool = False) -> CaptureResult:
+        if not manual:
+            return await super().capture_for_event(kind, manual=manual)
+        self.manual_count += 1
+        if self.manual_count == 1:
+            self.first_started.set()
+            await self.release_first.wait()
+            if self.first_error:
+                raise RuntimeError("sensitive first capture failure")
+            return CaptureResult("captured", self.first_path, None)
+        self.second_started.set()
+        await self.release_second.wait()
+        return CaptureResult("captured", self.second_path, None)
+
+
 class _FailingQuestionCapture(_ParityCapture):
     async def capture_for_event(self, kind: str, *, manual: bool = False) -> CaptureResult:
         if not manual:
@@ -764,6 +790,107 @@ async def test_failed_new_screenshot_clears_stale_pending_image(
 
     assert runtime.manual_image_path is None
     assert "Снимок не создан" in messages[-1]
+    await runtime.shutdown()
+
+
+async def test_newer_manual_capture_wins_when_older_capture_finishes_late(
+    qtbot,
+    tmp_path: Path,
+) -> None:
+    app = InterviewApplication.for_test()
+    qtbot.addWidget(app.ribbon)
+    messages: list[str] = []
+    app.events.notification.connect(messages.append)
+    first_path = tmp_path / "first.jpg"
+    second_path = tmp_path / "second.jpg"
+    first_path.write_bytes(b"first")
+    second_path.write_bytes(b"second")
+    capture = _OverlappingManualCapture(first_path, second_path)
+    runtime, _, client = _runtime(app, capture=capture)
+    await runtime.start()
+
+    first = asyncio.create_task(runtime.capture_manual_screenshot())
+    await capture.first_started.wait()
+    second = asyncio.create_task(runtime.capture_manual_screenshot())
+    await capture.second_started.wait()
+    capture.release_second.set()
+    await second
+    ready_messages = list(messages)
+
+    capture.release_first.set()
+    await first
+
+    assert runtime.manual_image_path == second_path
+    assert messages == ready_messages
+    await runtime.submit_hypothesis(_hypothesis("What is shown?"))
+
+    assert runtime.manual_image_path is None
+    assert "data:image/jpeg;base64,c2Vjb25k" in str(client.payloads[-1]["input"])
+    await runtime.shutdown()
+
+
+async def test_late_failed_manual_capture_does_not_replace_newer_ready_capture(
+    qtbot,
+    tmp_path: Path,
+) -> None:
+    app = InterviewApplication.for_test()
+    qtbot.addWidget(app.ribbon)
+    messages: list[str] = []
+    app.events.notification.connect(messages.append)
+    first_path = tmp_path / "first.jpg"
+    second_path = tmp_path / "second.jpg"
+    first_path.write_bytes(b"first")
+    second_path.write_bytes(b"second")
+    capture = _OverlappingManualCapture(first_path, second_path)
+    capture.first_error = True
+    runtime, _, _ = _runtime(app, capture=capture)
+    await runtime.start()
+
+    first = asyncio.create_task(runtime.capture_manual_screenshot())
+    await capture.first_started.wait()
+    second = asyncio.create_task(runtime.capture_manual_screenshot())
+    await capture.second_started.wait()
+    capture.release_second.set()
+    await second
+    ready_messages = list(messages)
+
+    capture.release_first.set()
+    await first
+
+    assert runtime.manual_image_path == second_path
+    assert messages == ready_messages
+    await runtime.shutdown()
+
+
+async def test_payload_build_failure_consumes_manual_image_without_attached_state(
+    qtbot,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import interview_assistant.runtime as runtime_module
+
+    app = InterviewApplication.for_test()
+    qtbot.addWidget(app.ribbon)
+    messages: list[str] = []
+    app.events.notification.connect(messages.append)
+    capture = _ParityCapture(tmp_path / "manual.jpg")
+    capture.path.write_bytes(b"manual image")
+    runtime, _, _ = _runtime(app, capture=capture)
+    await runtime.start()
+    await runtime.capture_manual_screenshot()
+
+    def fail_payload(*_args: object) -> dict[str, object]:
+        raise RuntimeError("sensitive payload failure")
+
+    monkeypatch.setattr(runtime_module, "build_chat_payload", fail_payload)
+    with pytest.raises(RuntimeError, match="sensitive payload failure"):
+        await runtime.submit_hypothesis(_hypothesis("What is shown?"))
+    await _wait_until(lambda: "Request processing failed." in messages)
+
+    assert runtime.manual_image_path is None
+    assert "Снимок добавлен в запрос" not in messages
+    assert str(capture.path) not in " ".join(messages)
+    assert "sensitive" not in " ".join(messages)
     await runtime.shutdown()
 
 
