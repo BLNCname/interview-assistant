@@ -17,3 +17,10 @@ screenshots/
 .superpowers/
 .worktrees/
 interview_assistant.log
+
+# Instructor delivery artifacts kept visibly at the repository root.
+/InterviewAssistant.exe
+/InterviewAssistant-Setup-*-win64.exe
+/InterviewAssistant-source-*.zip
+/SHA256SUMS.txt
+/_internal/
