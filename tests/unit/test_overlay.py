@@ -88,6 +88,18 @@ def test_markdown_fenced_code_and_inline_code_receive_monospace_format(qtbot) ->
     assert _cursor_at(ribbon.answer_browser, "print").charFormat().fontFixedPitch()
 
 
+@pytest.mark.parametrize("fence", ["```", "~~~"], ids=["backtick", "tilde"])
+def test_markdown_fenced_literal_content_is_not_rewritten(qtbot, fence: str) -> None:
+    markdown = f"{fence}python\na\nb\nvalue = first \\\n    + second\n{fence}"
+    ribbon = _rendered_ribbon(qtbot, markdown)
+    expected_code = "a\nb\nvalue = first \\\n    + second"
+
+    assert ribbon.answer_text == markdown
+    assert expected_code in ribbon.answer_browser.toPlainText()
+    assert "a  \n" not in ribbon.answer_browser.toPlainText()
+    assert _cursor_at(ribbon.answer_browser, "value").charFormat().fontFixedPitch()
+
+
 def test_model_markdown_cannot_load_resources_or_activate_links(qtbot) -> None:
     ribbon = _rendered_ribbon(
         qtbot,
@@ -113,8 +125,21 @@ def test_model_markdown_cannot_load_resources_or_activate_links(qtbot) -> None:
     assert "href=" not in browser.toHtml()
 
 
+def test_markdown_reference_images_are_neutralized_to_alt_text(qtbot) -> None:
+    markdown = "![Reference alt][asset]\n\n![Collapsed alt][]\n\n[asset]: file:///private.txt"
+    ribbon = _rendered_ribbon(qtbot, markdown)
+    plain_text = ribbon.answer_browser.toPlainText()
+
+    assert ribbon.answer_text == markdown
+    assert ribbon.answer_browser.resource_requests == ()
+    assert "Reference alt" in plain_text
+    assert "Collapsed alt" in plain_text
+    assert "\ufffc" not in plain_text
+    assert "private.txt" not in plain_text
+
+
 def test_stream_rerender_preserves_manual_scroll_position(qtbot) -> None:
-    ribbon = _rendered_ribbon(qtbot, "line\n" * 100)
+    ribbon = _rendered_ribbon(qtbot, "line\n\n" * 100)
     ribbon.set_edit_mode(True)
     ribbon.show()
     qtbot.waitExposed(ribbon)
@@ -138,7 +163,7 @@ def test_stream_scroll_restore_uses_final_range_after_ribbon_growth(qtbot) -> No
     )
     qtbot.addWidget(ribbon)
     bus.answer_reset.emit(2)
-    bus.answer_delta.emit(2, "line\n" * 120)
+    bus.answer_delta.emit(2, "line\n\n" * 120)
     ribbon.show()
     qtbot.waitExposed(ribbon)
     ribbon.resize(ribbon.width(), 150)
@@ -629,7 +654,7 @@ def test_long_answer_grows_only_to_configured_maximum(qtbot) -> None:
     qtbot.waitExposed(ribbon)
     bus.answer_reset.emit(11)
 
-    bus.answer_delta.emit(11, "line\n" * 200)
+    bus.answer_delta.emit(11, "line\n\n" * 200)
     qtbot.waitUntil(lambda: ribbon.height() == 220)
 
     assert ribbon.height() == ribbon.maximumHeight() == 220

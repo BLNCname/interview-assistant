@@ -10,6 +10,7 @@ from PyQt6.QtWidgets import QTextBrowser
 _IMAGE = re.compile(
     r"!\[([^\]\r\n]*)\]\(\s*(?:<[^>\r\n]*>|[^)\r\n]*)\s*\)",
 )
+_REFERENCE_IMAGE = re.compile(r"!\[([^\]\r\n]*)\]\[[^\]\r\n]*\]")
 _MARKDOWN_FEATURES = (
     QTextDocument.MarkdownFeature.MarkdownDialectGitHub
     | QTextDocument.MarkdownFeature.MarkdownNoHTML
@@ -66,8 +67,8 @@ def restore_scroll_state(browser: QTextBrowser, state: ScrollState) -> None:
 
 
 def _neutralize_images(markdown: str) -> str:
-    without_images = _IMAGE.sub(lambda match: match.group(1), markdown)
-    return re.sub(r"(?<!\n)\n(?!\n)", "  \n", without_images)
+    without_inline_images = _IMAGE.sub(lambda match: match.group(1), markdown)
+    return _REFERENCE_IMAGE.sub(lambda match: match.group(1), without_inline_images)
 
 
 def _remove_anchors(document: QTextDocument) -> None:
