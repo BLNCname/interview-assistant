@@ -41,6 +41,7 @@ class DetectedQuestion:
     ]
     text: str
     detected_at: float
+    trigger_source: AudioSource | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -80,6 +81,20 @@ _EXPLICIT_REQUEST = re.compile(
     r"спроектируйте|спроектировать|разработайте\s+архитектуру|масштабируйте|"
     r"реализуйте|реализовать|напишите|закодируйте|отладьте|оптимизируйте|решите"
     r")\b",
+    re.IGNORECASE,
+)
+_INDIRECT_REQUEST = re.compile(
+    r"^(?:(?:please|пожалуйста)[,\s]+)?(?:"
+    r"i(?:'d|\s+would)\s+like\s+to\s+hear\s+your\s+opinion\s+(?:on|about)\b.+|"
+    r"what(?:'s|\s+is)\s+your\s+view\s+(?:on|about)\b.+|"
+    r"could\s+you\s+elaborate\s+(?:on|about)\b.+|"
+    r"walk\s+me\s+through\b.+|"
+    r"хотелось\s+бы\s+услышать\s+(?:(?:ваше|вашу)\s+)?мнение\s+(?:о|про)\b.+|"
+    r"как\s+вы\s+считаете\b.+|"
+    r"что\s+вы\s+думаете\s+(?:о|про)\b.+|"
+    r"раскройте\s+тему\b.+|"
+    r"можете\s+подробнее\s+рассказать\s+(?:о|про)\b.+"
+    r")$",
     re.IGNORECASE,
 )
 _SCREEN_OBJECT = re.compile(
@@ -203,7 +218,7 @@ class QuestionDetector:
         *,
         is_final: bool = True,
     ) -> DetectedQuestion | None:
-        if source != AudioSource.SYSTEM or not is_final:
+        if not is_final:
             return None
 
         normalized = _normalize(text)
@@ -223,7 +238,13 @@ class QuestionDetector:
                 for recent in self._recent
             ):
                 return None
-            question = DetectedQuestion(self._allocate_id(), kind, normalized, now)
+            question = DetectedQuestion(
+                self._allocate_id(),
+                kind,
+                normalized,
+                now,
+                source,
+            )
             self._recent.append(_RecentQuestion(now, canonical, semantic_tokens))
             return question
 
@@ -278,7 +299,9 @@ def _normalize(text: str) -> str:
 
 
 def _canonicalize(text: str) -> str:
-    return _WHITESPACE.sub(" ", _CANONICAL_PUNCTUATION.sub(" ", text.casefold().replace("ё", "е"))).strip()
+    return _WHITESPACE.sub(
+        " ", _CANONICAL_PUNCTUATION.sub(" ", text.casefold().replace("ё", "е"))
+    ).strip()
 
 
 def _semantic_tokens(text: str) -> frozenset[str]:
@@ -307,20 +330,19 @@ def _stem_english(token: str) -> str:
 
 def _classify(text: str) -> AutoQuestionKind | None:
     question_like = "?" in text or bool(_INTERROGATIVE.search(text))
-    if not question_like and not _EXPLICIT_REQUEST.search(text):
+    indirect_request = bool(_INDIRECT_REQUEST.search(text))
+    if not question_like and not _EXPLICIT_REQUEST.search(text) and not indirect_request:
         return None
     if _SCREEN_OBJECT.search(text) and (question_like or _SCREEN_ACTION.search(text)):
         return "screen_analysis"
     if _BEHAVIORAL.search(text):
         return "behavioral"
-    if _SYSTEM_PHRASE.search(text) or (
-        _SYSTEM_ACTION.search(text) and _SYSTEM_OBJECT.search(text)
-    ):
+    if _SYSTEM_PHRASE.search(text) or (_SYSTEM_ACTION.search(text) and _SYSTEM_OBJECT.search(text)):
         return "system_design"
     if _CODING_ACTION.search(text) and (
         _CODING_OBJECT.search(text) or question_like or _CODING_IMPERATIVE.search(text)
     ):
         return "coding"
-    if question_like or _THEORY_IMPERATIVE.search(text):
+    if question_like or indirect_request or _THEORY_IMPERATIVE.search(text):
         return "theory"
     return None

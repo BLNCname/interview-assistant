@@ -119,28 +119,28 @@ class ContextBuilder:
         requested_budget = _validate_budget(max_tokens)
         budget = min(requested_budget, RECOVERY_MAX_TOKENS)
         question = latest_question or self._latest_question
-        candidates = [
+        candidates: list[_Candidate] = [
             _Candidate(
                 ContextItem("system", "System", self._recovery_system_prompt),
                 None,
                 0,
             ),
             _Candidate(ContextItem("task", "Task kind", question.kind), None, 1),
-            _Candidate(
-                ContextItem("question", "Latest question", _question_text(question)),
-                None,
-                2,
-            ),
         ]
+        candidates.extend(self._required_request_candidates(question, start_sequence=2))
         sequence = len(candidates)
 
-        clarification = self._transcript_store.latest(AudioSource.MICROPHONE)
+        clarification = (
+            None
+            if question.trigger_source is AudioSource.MICROPHONE
+            else self._transcript_store.latest(AudioSource.MICROPHONE)
+        )
         if clarification is not None and (text := _optional_text(clarification.text)):
             candidates.append(
                 _Candidate(
                     ContextItem(
                         "clarification",
-                        "Latest clarification from You",
+                        "Candidate clarification trigger",
                         text,
                         source=AudioSource.MICROPHONE,
                         timestamp=clarification.ended_at,
@@ -172,12 +172,11 @@ class ContextBuilder:
         search_results: tuple[str, ...],
         previous_answer: str | None,
     ) -> list[_Candidate]:
-        question_text = _question_text(question)
-        candidates = [
+        candidates: list[_Candidate] = [
             _Candidate(ContextItem("system", "System", self._system_prompt), None, 0),
             _Candidate(ContextItem("task", "Task kind", question.kind), None, 1),
-            _Candidate(ContextItem("question", "Latest question", question_text), None, 2),
         ]
+        candidates.extend(self._required_request_candidates(question, start_sequence=2))
         sequence = len(candidates)
 
         profile_items: tuple[tuple[ContextItemKind, str, str | None], ...] = (
@@ -195,9 +194,14 @@ class ContextBuilder:
             transcript = ()
         else:
             transcript = transcript[-self._history_limit :]
+        required_source_text = {
+            (candidate.item.source, candidate.item.text)
+            for candidate in candidates
+            if candidate.drop_priority is None and candidate.item.source is not None
+        }
         for entry in transcript:
             text = _optional_text(entry.text)
-            if not text or (entry.source == AudioSource.SYSTEM and text == question_text):
+            if not text or (entry.source, text) in required_source_text:
                 continue
             label = "Interviewer" if entry.source == AudioSource.SYSTEM else "You"
             candidates.append(
@@ -239,6 +243,48 @@ class ContextBuilder:
             )
         return candidates
 
+    def _required_request_candidates(
+        self,
+        question: DetectedQuestion,
+        *,
+        start_sequence: int,
+    ) -> list[_Candidate]:
+        question_text = _question_text(question)
+        if question.trigger_source is AudioSource.MICROPHONE:
+            items = [
+                ContextItem(
+                    "clarification",
+                    "Candidate clarification trigger",
+                    question_text,
+                    source=AudioSource.MICROPHONE,
+                    timestamp=question.detected_at,
+                )
+            ]
+            latest_interviewer = self._transcript_store.latest(AudioSource.SYSTEM)
+            if latest_interviewer is not None and (text := _optional_text(latest_interviewer.text)):
+                items.append(
+                    ContextItem(
+                        "question",
+                        "Latest interviewer request",
+                        text,
+                        source=AudioSource.SYSTEM,
+                        timestamp=latest_interviewer.ended_at,
+                    )
+                )
+        else:
+            items = [
+                ContextItem(
+                    "question",
+                    "Latest interviewer request",
+                    question_text,
+                    source=AudioSource.SYSTEM,
+                    timestamp=question.detected_at,
+                )
+            ]
+        return [
+            _Candidate(item, None, start_sequence + offset) for offset, item in enumerate(items)
+        ]
+
 
 def _bounded_snapshot(
     question: DetectedQuestion,
@@ -256,9 +302,7 @@ def _bounded_snapshot(
             removable,
             key=lambda candidate: (
                 candidate.drop_priority,
-                candidate.item.timestamp
-                if candidate.item.timestamp is not None
-                else float("inf"),
+                candidate.item.timestamp if candidate.item.timestamp is not None else float("inf"),
                 candidate.sequence,
             ),
         )

@@ -18,10 +18,17 @@ class ManualClock:
         self.now += seconds
 
 
-def test_microphone_never_auto_triggers() -> None:
-    detector = QuestionDetector()
+@pytest.mark.parametrize("source", [AudioSource.SYSTEM, AudioSource.MICROPHONE])
+def test_final_question_from_either_source_preserves_trigger_source(
+    source: AudioSource,
+) -> None:
+    result = QuestionDetector(cooldown_seconds=0).detect(
+        source,
+        "Как работает B-tree?",
+    )
 
-    assert detector.detect(AudioSource.MICROPHONE, "Как работает B-tree?") is None
+    assert result is not None
+    assert result.trigger_source is source
 
 
 def test_partial_system_hypothesis_never_auto_triggers() -> None:
@@ -96,6 +103,38 @@ def test_intent_keywords_in_declarative_text_do_not_auto_trigger(text: str) -> N
     assert detector.detect(AudioSource.SYSTEM, text) is None
 
 
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Хотелось бы услышать ваше мнение о CAP theorem",
+        "Как вы считаете, когда нужна eventual consistency",
+        "Что вы думаете о микросервисах",
+        "Раскройте тему индексов в PostgreSQL",
+        "Можете подробнее рассказать про optimistic locking",
+        "I'd like to hear your opinion on eventual consistency",
+        "What's your view on microservices",
+        "Could you elaborate on optimistic locking",
+        "Walk me through a B-tree lookup",
+    ],
+)
+def test_indirect_ru_en_interview_requests_trigger(text: str) -> None:
+    assert QuestionDetector(cooldown_seconds=0).detect(AudioSource.SYSTEM, text)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "У него интересное мнение о микросервисах",
+        "В документации встречается фраза как вы считаете",
+        "My opinion on caching changed last year",
+        "The guide contains the phrase walk me through",
+        "Я использовал Redis в прошлом проекте",
+    ],
+)
+def test_indirect_keywords_inside_narration_do_not_trigger(text: str) -> None:
+    assert QuestionDetector().detect(AudioSource.MICROPHONE, text) is None
+
+
 def test_polite_anchored_question_is_classified() -> None:
     detector = QuestionDetector()
 
@@ -143,9 +182,28 @@ def test_exact_duplicate_is_suppressed_until_cooldown_expires() -> None:
     clock.advance(0.1)
     after_cooldown = detector.detect(AudioSource.SYSTEM, "How does a B-tree work?")
 
-    assert first == DetectedQuestion(1, "theory", "How does a B-tree work?", 10.0)
+    assert first == DetectedQuestion(
+        1,
+        "theory",
+        "How does a B-tree work?",
+        10.0,
+        AudioSource.SYSTEM,
+    )
     assert duplicate is None
-    assert after_cooldown == DetectedQuestion(2, "theory", "How does a B-tree work?", 15.0)
+    assert after_cooldown == DetectedQuestion(
+        2,
+        "theory",
+        "How does a B-tree work?",
+        15.0,
+        AudioSource.SYSTEM,
+    )
+
+
+def test_same_question_from_both_sources_is_suppressed() -> None:
+    detector = QuestionDetector(cooldown_seconds=15)
+
+    assert detector.detect(AudioSource.SYSTEM, "What is a B-tree?") is not None
+    assert detector.detect(AudioSource.MICROPHONE, "What is a B-tree?") is None
 
 
 def test_semantic_near_duplicate_is_suppressed_during_cooldown() -> None:
@@ -201,28 +259,32 @@ def test_strong_coding_imperative_without_question_mark_is_classified() -> None:
     assert result.kind == "coding"
 
 
-def test_manual_force_bypasses_audio_role_and_deduplication() -> None:
+def test_manual_force_bypasses_intent_and_deduplication() -> None:
     clock = ManualClock(30.0)
     detector = QuestionDetector(clock=clock)
 
-    assert detector.detect(AudioSource.MICROPHONE, "Explain the code") is None
     first = detector.force("  Explain\n the code  ")
     second = detector.force("Explain the code")
 
     assert first == DetectedQuestion(1, "manual", "Explain the code", 30.0)
     assert second == DetectedQuestion(2, "manual", "Explain the code", 30.0)
+    assert first.trigger_source is None
+    assert second.trigger_source is None
 
 
 def test_detected_question_has_exact_frozen_typed_contract() -> None:
     question = DetectedQuestion(1, "coding", "Implement a queue", 1.0)
 
-    assert get_type_hints(DetectedQuestion)["kind"] == Literal[
-        "theory",
-        "coding",
-        "system_design",
-        "behavioral",
-        "screen_analysis",
-        "manual",
-    ]
+    assert (
+        get_type_hints(DetectedQuestion)["kind"]
+        == Literal[
+            "theory",
+            "coding",
+            "system_design",
+            "behavioral",
+            "screen_analysis",
+            "manual",
+        ]
+    )
     with pytest.raises(FrozenInstanceError):
         question.text = "changed"  # type: ignore[misc]

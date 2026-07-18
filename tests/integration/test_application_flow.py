@@ -258,7 +258,7 @@ async def test_question_to_streaming_overlay_loads_shared_model_once(
     await runtime.shutdown()
 
 
-async def test_microphone_final_is_context_only_and_never_generates(
+async def test_microphone_clarification_generates_with_both_roles_in_context(
     qtbot,
     tmp_path: Path,
 ) -> None:
@@ -299,13 +299,17 @@ async def test_microphone_final_is_context_only_and_never_generates(
     runtime = ApplicationRuntime(app, config, services)
 
     await runtime.start()
+    await runtime.handle_hypothesis(_final(AudioSource.SYSTEM, "Тема интервью — CAP theorem"))
     await runtime.handle_hypothesis(
-        _final(AudioSource.MICROPHONE, "Спроектируйте сервис коротких ссылок")
+        _final(AudioSource.MICROPHONE, "То есть про consistency trade-offs?")
     )
 
-    assert len(services.transcript_store) == 1
-    assert capture.capture_count == 0
-    assert client.payloads == []
+    assert len(services.transcript_store) == 2
+    assert capture.capture_count == 1
+    assert len(client.payloads) == 1
+    prompt = str(client.payloads[0]["input"][0]["content"])
+    assert "Latest interviewer request:\nТема интервью — CAP theorem" in prompt
+    assert "Candidate clarification trigger:\nТо есть про consistency trade-offs?" in prompt
 
     await runtime.shutdown()
 
@@ -656,9 +660,7 @@ async def test_unusable_capture_never_leaks_a_path_or_fake_image_to_lm_studio(
     )
 
     await runtime.start()
-    await runtime.handle_hypothesis(
-        _final(AudioSource.SYSTEM, "Design a scalable chat service")
-    )
+    await runtime.handle_hypothesis(_final(AudioSource.SYSTEM, "Design a scalable chat service"))
 
     assert capture.capture_count == 1
     assert isinstance(client.payloads[0]["input"], str)

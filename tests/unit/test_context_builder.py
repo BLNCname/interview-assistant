@@ -79,6 +79,69 @@ def test_normal_context_is_deterministic_and_includes_supplied_fields(
     assert "old assistant answer" in first.prompt
 
 
+def test_microphone_trigger_keeps_candidate_and_interviewer_roles() -> None:
+    store = TranscriptStore(clock=lambda: 11.5)
+    add_final(store, AudioSource.SYSTEM, "Хотелось бы услышать мнение о CAP", 10.0)
+    add_final(
+        store,
+        AudioSource.MICROPHONE,
+        "То есть про consistency trade-offs?",
+        11.0,
+    )
+    question = DetectedQuestion(
+        1,
+        "theory",
+        "То есть про consistency trade-offs?",
+        11.0,
+        AudioSource.MICROPHONE,
+    )
+
+    snapshot = ContextBuilder(store, latest_question=question).normal()
+
+    assert "Latest interviewer request:\nХотелось бы услышать мнение о CAP" in snapshot.prompt
+    assert (
+        "Candidate clarification trigger:\nТо есть про consistency trade-offs?" in snapshot.prompt
+    )
+    assert snapshot.items[2].source is AudioSource.MICROPHONE
+    assert snapshot.prompt.count("То есть про consistency trade-offs?") == 1
+    assert snapshot.prompt.count("Хотелось бы услышать мнение о CAP") == 1
+
+
+def test_system_trigger_is_labelled_as_interviewer_request() -> None:
+    question = DetectedQuestion(
+        1,
+        "theory",
+        "Что такое CAP?",
+        1.0,
+        AudioSource.SYSTEM,
+    )
+
+    snapshot = ContextBuilder(
+        TranscriptStore(),
+        latest_question=question,
+    ).normal()
+
+    assert "Latest interviewer request:\nЧто такое CAP?" in snapshot.prompt
+    assert "Candidate clarification trigger" not in snapshot.prompt
+
+
+def test_recovery_context_uses_role_aware_request_labels() -> None:
+    store = TranscriptStore(clock=lambda: 11.5)
+    add_final(store, AudioSource.SYSTEM, "Расскажите о CAP", 10.0)
+    question = DetectedQuestion(
+        1,
+        "theory",
+        "То есть про consistency?",
+        11.0,
+        AudioSource.MICROPHONE,
+    )
+
+    snapshot = ContextBuilder(store, latest_question=question).recovery()
+
+    assert "Latest interviewer request:\nРасскажите о CAP" in snapshot.prompt
+    assert "Candidate clarification trigger:\nТо есть про consistency?" in snapshot.prompt
+
+
 def test_normal_context_drops_oldest_low_priority_history_first() -> None:
     full_store = TranscriptStore(clock=lambda: 100.0)
     add_final(full_store, AudioSource.SYSTEM, "oldest history " * 12, 10.0)
