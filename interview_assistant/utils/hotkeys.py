@@ -16,8 +16,22 @@ class HotkeyAction(StrEnum):
     SCREENSHOT = "screenshot"
     PAUSE = "pause"
     OVERLAY_VISIBILITY = "overlay_visibility"
+    OVERLAY_INTERACTION = "overlay_interaction"
     FORCED_WEB_SEARCH = "forced_web_search"
     CLEAR_ANSWER = "clear_answer"
+
+
+DEFAULT_HOTKEY_BINDINGS = MappingProxyType(
+    {
+        HotkeyAction.FORCE_REQUEST: "ctrl+shift+space",
+        HotkeyAction.SCREENSHOT: "ctrl+shift+s",
+        HotkeyAction.PAUSE: "ctrl+shift+p",
+        HotkeyAction.OVERLAY_VISIBILITY: "ctrl+shift+o",
+        HotkeyAction.OVERLAY_INTERACTION: "ctrl+shift+i",
+        HotkeyAction.FORCED_WEB_SEARCH: "ctrl+shift+w",
+        HotkeyAction.CLEAR_ANSWER: "ctrl+shift+c",
+    }
+)
 
 
 _MODIFIER_ALIASES = {
@@ -42,6 +56,7 @@ _MODIFIER_ALIASES = {
     "windows": "win",
 }
 _FUNCTION_KEY = re.compile(r"f(?:[1-9]|1[0-9]|2[0-4])\Z")
+_MODIFIER_ORDER = ("ctrl", "shift", "alt", "win")
 _NAMED_FINAL_KEYS = frozenset(
     {
         "backspace",
@@ -142,6 +157,27 @@ class HotkeyChord:
             raise ValueError("Global hotkey chord must include a modifier")
         return cls(frozenset(modifiers), final_keys[0])
 
+    def to_portable_text(self) -> str:
+        ordered = [name for name in _MODIFIER_ORDER if name in self.modifiers]
+        return "+".join((*ordered, self.key))
+
+
+def normalize_bindings(
+    bindings: Mapping[HotkeyAction | str, str | HotkeyChord],
+) -> dict[HotkeyAction, HotkeyChord]:
+    normalized: dict[HotkeyAction, HotkeyChord] = {}
+    reverse: dict[HotkeyChord, HotkeyAction] = {}
+    for raw_action, raw_chord in bindings.items():
+        action = HotkeyAction(raw_action)
+        chord = HotkeyChord.parse(raw_chord)
+        if previous := reverse.get(chord):
+            raise ValueError(
+                f"Duplicate hotkey for {previous.value} and {action.value}"
+            )
+        normalized[action] = chord
+        reverse[chord] = action
+    return normalized
+
 
 class Listener(Protocol):
     def start(self) -> object: ...
@@ -218,21 +254,7 @@ class HotkeyManager:
         self,
         bindings: Mapping[HotkeyAction | str, str | HotkeyChord],
     ) -> None:
-        normalized: dict[HotkeyAction, HotkeyChord] = {}
-        reverse: dict[HotkeyChord, HotkeyAction] = {}
-        for raw_action, raw_chord in bindings.items():
-            try:
-                action = HotkeyAction(raw_action)
-            except ValueError as error:
-                raise ValueError(f"Unsupported hotkey action: {raw_action}") from error
-            chord = HotkeyChord.parse(raw_chord)
-            duplicate = reverse.get(chord)
-            if duplicate is not None:
-                raise ValueError(
-                    f"Duplicate hotkey for {duplicate.value} and {action.value}: {chord}"
-                )
-            normalized[action] = chord
-            reverse[chord] = action
+        normalized = normalize_bindings(bindings)
 
         with self._lock:
             self._bindings = normalized

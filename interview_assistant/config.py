@@ -8,6 +8,12 @@ import keyring
 import yaml  # type: ignore[import-untyped]
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from interview_assistant.utils.hotkeys import (
+    DEFAULT_HOTKEY_BINDINGS,
+    HotkeyAction,
+    normalize_bindings,
+)
+
 
 class AudioConfig(BaseModel):
     system_device_id: str | None = None
@@ -47,12 +53,58 @@ class OverlayConfig(BaseModel):
     max_height: int = Field(default=360, ge=120, le=900)
 
 
+class HotkeysConfig(BaseModel):
+    force_request: str = DEFAULT_HOTKEY_BINDINGS[HotkeyAction.FORCE_REQUEST]
+    screenshot: str = DEFAULT_HOTKEY_BINDINGS[HotkeyAction.SCREENSHOT]
+    pause: str = DEFAULT_HOTKEY_BINDINGS[HotkeyAction.PAUSE]
+    overlay_visibility: str = DEFAULT_HOTKEY_BINDINGS[
+        HotkeyAction.OVERLAY_VISIBILITY
+    ]
+    overlay_interaction: str = DEFAULT_HOTKEY_BINDINGS[
+        HotkeyAction.OVERLAY_INTERACTION
+    ]
+    forced_web_search: str = DEFAULT_HOTKEY_BINDINGS[HotkeyAction.FORCED_WEB_SEARCH]
+    clear_answer: str = DEFAULT_HOTKEY_BINDINGS[HotkeyAction.CLEAR_ANSWER]
+
+    @model_validator(mode="after")
+    def validate_bindings(self) -> "HotkeysConfig":
+        normalize_bindings(
+            {
+                HotkeyAction.FORCE_REQUEST: self.force_request,
+                HotkeyAction.SCREENSHOT: self.screenshot,
+                HotkeyAction.PAUSE: self.pause,
+                HotkeyAction.OVERLAY_VISIBILITY: self.overlay_visibility,
+                HotkeyAction.OVERLAY_INTERACTION: self.overlay_interaction,
+                HotkeyAction.FORCED_WEB_SEARCH: self.forced_web_search,
+                HotkeyAction.CLEAR_ANSWER: self.clear_answer,
+            }
+        )
+        return self
+
+    def as_bindings(self) -> dict[HotkeyAction, str]:
+        bindings = normalize_bindings(
+            {
+                HotkeyAction.FORCE_REQUEST: self.force_request,
+                HotkeyAction.SCREENSHOT: self.screenshot,
+                HotkeyAction.PAUSE: self.pause,
+                HotkeyAction.OVERLAY_VISIBILITY: self.overlay_visibility,
+                HotkeyAction.OVERLAY_INTERACTION: self.overlay_interaction,
+                HotkeyAction.FORCED_WEB_SEARCH: self.forced_web_search,
+                HotkeyAction.CLEAR_ANSWER: self.clear_answer,
+            }
+        )
+        return {
+            action: chord.to_portable_text() for action, chord in bindings.items()
+        }
+
+
 class AppConfig(BaseModel):
     audio: AudioConfig = AudioConfig()
     lmstudio: LMStudioConfig = LMStudioConfig()
     capture: CaptureConfig = CaptureConfig()
     search: SearchConfig = SearchConfig()
     overlay: OverlayConfig = OverlayConfig()
+    hotkeys: HotkeysConfig = HotkeysConfig()
 
     @model_validator(mode="before")
     @classmethod

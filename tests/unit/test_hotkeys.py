@@ -7,9 +7,11 @@ import pytest
 
 from interview_assistant.events import EventBus
 from interview_assistant.utils.hotkeys import (
+    DEFAULT_HOTKEY_BINDINGS,
     HotkeyAction,
     HotkeyChord,
     HotkeyManager,
+    normalize_bindings,
 )
 
 
@@ -49,6 +51,28 @@ class ListenerFactory:
         listener = FakeListener(on_press, on_release)
         self.listeners.append(listener)
         return listener
+
+
+def test_default_hotkeys_cover_every_action_once() -> None:
+    assert set(DEFAULT_HOTKEY_BINDINGS) == set(HotkeyAction)
+    assert len(set(DEFAULT_HOTKEY_BINDINGS.values())) == len(HotkeyAction)
+    assert DEFAULT_HOTKEY_BINDINGS[HotkeyAction.OVERLAY_INTERACTION] == "ctrl+shift+i"
+
+
+def test_chord_has_stable_portable_text() -> None:
+    chord = HotkeyChord.parse("Shift + Control + I")
+
+    assert chord.to_portable_text() == "ctrl+shift+i"
+
+
+def test_normalize_bindings_rejects_cross_action_collision() -> None:
+    with pytest.raises(ValueError, match="Duplicate hotkey"):
+        normalize_bindings(
+            {
+                HotkeyAction.FORCE_REQUEST: "ctrl+shift+x",
+                HotkeyAction.SCREENSHOT: "control+shift+x",
+            }
+        )
 
 
 def test_chord_normalizes_left_right_modifiers_and_distinguishes_function_keys() -> None:

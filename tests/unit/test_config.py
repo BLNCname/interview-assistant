@@ -5,6 +5,28 @@ from pydantic import ValidationError
 
 from interview_assistant.config import AppConfig
 from interview_assistant import config as config_module
+from interview_assistant.utils.hotkeys import DEFAULT_HOTKEY_BINDINGS
+
+
+def test_config_without_hotkeys_uses_complete_defaults(tmp_path: Path) -> None:
+    path = tmp_path / "config.yaml"
+    path.write_text("audio: {}\n", encoding="utf-8")
+
+    config = AppConfig.load(path)
+
+    assert config.hotkeys.as_bindings() == dict(DEFAULT_HOTKEY_BINDINGS)
+
+
+def test_config_rejects_duplicate_hotkeys() -> None:
+    with pytest.raises(ValidationError, match="Duplicate hotkey"):
+        AppConfig.model_validate(
+            {
+                "hotkeys": {
+                    "force_request": "ctrl+shift+x",
+                    "screenshot": "control+shift+x",
+                }
+            }
+        )
 
 
 def test_same_model_can_fill_both_roles(tmp_path: Path) -> None:
