@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import time
+import uuid
 import wave
 from collections.abc import Callable, Iterable, Sequence
 from pathlib import Path
@@ -150,7 +152,25 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--config", type=Path, default=default_config_path())
     parser.add_argument("--fixture", type=Path, default=repository_fixture_path())
     parser.add_argument("--bundle-root", type=Path, action="append")
+    parser.add_argument("--output", type=Path)
     return parser
+
+
+def _write_report(path: Path, report: dict[str, Any]) -> None:
+    destination = path.expanduser().resolve()
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    temporary = destination.with_name(f".{destination.name}.{uuid.uuid4().hex}.tmp")
+    encoded = (json.dumps(report, ensure_ascii=True, sort_keys=True) + "\n").encode(
+        "utf-8"
+    )
+    try:
+        with temporary.open("xb") as handle:
+            handle.write(encoded)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, destination)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -177,7 +197,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         exit_code = 1
     else:
         exit_code = 0
-    if sys.stdout is not None:
+    if args.output is not None:
+        _write_report(args.output, report)
+    elif sys.stdout is not None:
         sys.stdout.write(json.dumps(report, ensure_ascii=True, sort_keys=True) + "\n")
         sys.stdout.flush()
     return exit_code

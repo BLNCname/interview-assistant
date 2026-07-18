@@ -647,6 +647,40 @@ def test_cuda_verifier_cli_returns_nonzero_and_sanitized_json_when_unavailable(
     assert "secret" not in json.dumps(payload)
 
 
+def test_cuda_verifier_cli_writes_report_to_requested_output(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    module = _load_cuda_module()
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("audio:\n  stt_model: test-model\n", encoding="utf-8")
+    output_path = tmp_path / "reports" / "cuda-stt.json"
+    report = {
+        "status": "ok",
+        "device": "cuda",
+        "model_source": "bundled",
+        "text_characters": 12,
+    }
+    monkeypatch.setattr(module, "run_verification", lambda *_args, **_kwargs: report)
+
+    exit_code = module.main(
+        [
+            "--config",
+            str(config_path),
+            "--fixture",
+            str(FIXTURE_PATH),
+            "--output",
+            str(output_path),
+        ]
+    )
+
+    assert exit_code == 0
+    assert capsys.readouterr().out == ""
+    assert json.loads(output_path.read_text(encoding="utf-8")) == report
+    assert not tuple(output_path.parent.glob(".*.tmp"))
+
+
 @pytest.mark.parametrize("document", ["README.md", "OPTIMIZATIONS.md", "PROJECT_ANALYSIS_REPORT.md"])
 def test_primary_documents_do_not_claim_stealth_or_capture_bypass(document: str) -> None:
     text = (ROOT / document).read_text(encoding="utf-8").casefold()
