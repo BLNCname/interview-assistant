@@ -19,6 +19,16 @@ PORTABLE_DOC_PATH = ROOT / "docs" / "portable-release.md"
 APP_ID = "9CE7901A-56E8-49CB-A8ED-8D5CF4F97C7D"
 
 
+def test_release_source_content_includes_updated_prompt_and_config() -> None:
+    prompt = ROOT / "prompts" / "interview_system.md"
+    config = ROOT / "config.yaml"
+
+    assert prompt.is_file()
+    assert config.is_file()
+    assert "120" in prompt.read_text(encoding="utf-8")
+    assert "hotkeys:" in config.read_text(encoding="utf-8")
+
+
 def _powershell() -> str:
     executable = shutil.which("powershell.exe") or shutil.which("pwsh.exe")
     if executable is None:
@@ -260,10 +270,7 @@ def test_inno_setup_is_per_user_versioned_and_deletes_only_owned_upgrade_files()
     assert "OutputBaseFilename=InterviewAssistant-Setup-{#AppVersion}-win64" in source
     assert "Compression=lzma2/ultra64" in source
     assert "SolidCompression=yes" in source
-    assert (
-        "SetupIconFile={#SourcePath}\\..\\assets\\branding\\"
-        "interview-assistant.ico"
-    ) in source
+    assert ("SetupIconFile={#SourcePath}\\..\\assets\\branding\\interview-assistant.ico") in source
     assert 'Source: "{#DistPath}\\*"; DestDir: "{app}"' in source
     assert "recursesubdirs" in source
     assert "createallsubdirs" in source

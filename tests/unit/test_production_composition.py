@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 from threading import Event
 
 import numpy as np
@@ -17,7 +18,12 @@ from interview_assistant.config import AppConfig
 from interview_assistant.diagnostics.readiness import READINESS_CHECK_NAMES
 from interview_assistant.stt.engine import TranscriptionResult
 from interview_assistant.stt.worker import StreamingSTTWorker
-from interview_assistant.utils.hotkeys import HotkeyAction, HotkeyChord, HotkeyManager
+from interview_assistant.utils.hotkeys import (
+    DEFAULT_HOTKEY_BINDINGS,
+    HotkeyAction,
+    HotkeyChord,
+    HotkeyManager,
+)
 
 
 def _config() -> AppConfig:
@@ -36,6 +42,13 @@ def _config() -> AppConfig:
             "search": {"mode": "auto", "provider": "duckduckgo"},
         }
     )
+
+
+def test_example_config_documents_all_hotkeys() -> None:
+    config = AppConfig.load(Path("config.yaml"))
+
+    assert "hotkeys:" in Path("config.yaml").read_text(encoding="utf-8")
+    assert config.hotkeys.as_bindings() == dict(DEFAULT_HOTKEY_BINDINGS)
 
 
 async def test_real_production_factory_wires_workers_without_starting_hardware(qtbot) -> None:
@@ -177,9 +190,12 @@ async def test_unsupported_searxng_provider_is_disabled_and_reported_as_warning(
         lmlink_status=lambda: "{}",
     )
 
-    assert components.runtime.services.search_policy.integrations_for(
-        "What is the latest Python release?"
-    ) == []
+    assert (
+        components.runtime.services.search_policy.integrations_for(
+            "What is the latest Python release?"
+        )
+        == []
+    )
     outcome = await components.probes.as_mapping()["duckduckgo_mcp"]()
     assert outcome.status == "warning"
     assert "searxng" in outcome.message.casefold()

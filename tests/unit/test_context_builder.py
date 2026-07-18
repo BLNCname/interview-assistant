@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import pytest
 
 from interview_assistant.audio.models import AudioSource
@@ -50,6 +52,18 @@ def test_recovery_context_drops_old_answers(context_builder: ContextBuilder) -> 
     assert snapshot.question == "latest question"
     assert "old assistant answer" not in snapshot.prompt
     assert snapshot.estimated_tokens <= 2_000
+
+
+def test_packaged_prompt_defines_concise_candidate_style_and_exception() -> None:
+    prompt = Path("prompts/interview_system.md").read_text(encoding="utf-8")
+    lowered = prompt.casefold()
+
+    assert "120" in prompt
+    assert "3–6" in prompt or "3-6" in prompt
+    assert "candidate clarification trigger" in lowered
+    assert "код" in lowered and "system design" in lowered
+    assert "ограничение" in lowered and "не применяется" in lowered
+    assert "как ии" in lowered
 
 
 def test_normal_context_is_deterministic_and_includes_supplied_fields(

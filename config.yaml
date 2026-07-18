@@ -21,3 +21,11 @@ search:
 overlay:
   opacity: 0.88
   max_height: 360
+hotkeys:
+  force_request: ctrl+shift+space
+  screenshot: ctrl+shift+s
+  pause: ctrl+shift+p
+  overlay_visibility: ctrl+shift+o
+  overlay_interaction: ctrl+shift+i
+  forced_web_search: ctrl+shift+w
+  clear_answer: ctrl+shift+c
