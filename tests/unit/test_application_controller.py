@@ -744,7 +744,7 @@ async def test_active_rebuild_clears_session_ui_and_applies_saved_overlay_config
     app.events.state_changed.emit(ApplicationState.LISTENING.value)
     assert app.ribbon.isVisible()
     assert app.states.state.value == "listening"
-    old_alpha = app.ribbon.surface.background_alpha
+    old_effective_opacity = app.ribbon.effective_window_opacity
     config.overlay.opacity = 0.2
     config.overlay.max_height = 222
 
@@ -758,7 +758,7 @@ async def test_active_rebuild_clears_session_ui_and_applies_saved_overlay_config
     assert app.readiness_report is None
     assert settings.readiness_report is None
     assert app.ribbon.maximumHeight() == 222
-    assert app.ribbon.surface.background_alpha != old_alpha
+    assert app.ribbon.effective_window_opacity != old_effective_opacity
 
     rebuild.cancel()
     await asyncio.gather(rebuild, return_exceptions=True)
