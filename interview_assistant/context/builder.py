@@ -140,7 +140,7 @@ class ContextBuilder:
                 _Candidate(
                     ContextItem(
                         "clarification",
-                        "Candidate clarification trigger",
+                        "Latest clarification from You",
                         text,
                         source=AudioSource.MICROPHONE,
                         timestamp=clarification.ended_at,

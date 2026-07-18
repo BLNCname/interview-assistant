@@ -54,6 +54,7 @@ class _RecentQuestion:
 _WHITESPACE = re.compile(r"\s+")
 _CANONICAL_PUNCTUATION = re.compile(r"[^\w]+", re.UNICODE)
 _TOKEN = re.compile(r"\w+", re.UNICODE)
+_LEXICAL_TOKEN = re.compile(r"[^\W_]+", re.UNICODE)
 
 _INTERROGATIVE = re.compile(
     r"^(?:(?:please|пожалуйста)[,\s]+)?(?:"
@@ -83,18 +84,18 @@ _EXPLICIT_REQUEST = re.compile(
     r")\b",
     re.IGNORECASE,
 )
-_INDIRECT_REQUEST = re.compile(
+_INDIRECT_REQUEST_PREFIX = re.compile(
     r"^(?:(?:please|пожалуйста)[,\s]+)?(?:"
-    r"i(?:'d|\s+would)\s+like\s+to\s+hear\s+your\s+opinion\s+(?:on|about)\b.+|"
-    r"what(?:'s|\s+is)\s+your\s+view\s+(?:on|about)\b.+|"
-    r"could\s+you\s+elaborate\s+(?:on|about)\b.+|"
-    r"walk\s+me\s+through\b.+|"
-    r"хотелось\s+бы\s+услышать\s+(?:(?:ваше|вашу)\s+)?мнение\s+(?:о|про)\b.+|"
-    r"как\s+вы\s+считаете\b.+|"
-    r"что\s+вы\s+думаете\s+(?:о|про)\b.+|"
-    r"раскройте\s+тему\b.+|"
-    r"можете\s+подробнее\s+рассказать\s+(?:о|про)\b.+"
-    r")$",
+    r"i(?:'d|\s+would)\s+like\s+to\s+hear\s+your\s+opinion\s+(?:on|about)\b|"
+    r"what(?:'s|\s+is)\s+your\s+view\s+(?:on|about)\b|"
+    r"could\s+you\s+elaborate\s+(?:on|about)\b|"
+    r"walk\s+me\s+through\b|"
+    r"хотелось\s+бы\s+услышать\s+(?:(?:ваше|вашу)\s+)?мнение\s+(?:о|про)\b|"
+    r"как\s+вы\s+считаете\b|"
+    r"что\s+вы\s+думаете\s+(?:о|про)\b|"
+    r"раскройте\s+тему\b|"
+    r"можете\s+подробнее\s+рассказать\s+(?:о|про)\b"
+    r")",
     re.IGNORECASE,
 )
 _SCREEN_OBJECT = re.compile(
@@ -191,7 +192,7 @@ _SEMANTIC_STOPWORDS = frozenset(
 
 
 class QuestionDetector:
-    """Classify final interviewer utterances and suppress recent repetitions."""
+    """Classify final utterances from both audio sources and suppress repetitions."""
 
     def __init__(
         self,
@@ -330,7 +331,10 @@ def _stem_english(token: str) -> str:
 
 def _classify(text: str) -> AutoQuestionKind | None:
     question_like = "?" in text or bool(_INTERROGATIVE.search(text))
-    indirect_request = bool(_INDIRECT_REQUEST.search(text))
+    indirect_prefix = _INDIRECT_REQUEST_PREFIX.search(text)
+    indirect_request = bool(indirect_prefix and _LEXICAL_TOKEN.search(text, indirect_prefix.end()))
+    if indirect_prefix is not None and not indirect_request:
+        return None
     if not question_like and not _EXPLICIT_REQUEST.search(text) and not indirect_request:
         return None
     if _SCREEN_OBJECT.search(text) and (question_like or _SCREEN_ACTION.search(text)):

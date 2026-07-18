@@ -142,6 +142,34 @@ def test_recovery_context_uses_role_aware_request_labels() -> None:
     assert "Candidate clarification trigger:\nТо есть про consistency?" in snapshot.prompt
 
 
+def test_recovery_system_trigger_keeps_microphone_history_non_trigger_label() -> None:
+    store = TranscriptStore(clock=lambda: 11.0)
+    add_final(store, AudioSource.MICROPHONE, "Уточняю детали CAP", 10.0)
+    question = DetectedQuestion(
+        1,
+        "theory",
+        "Что такое CAP?",
+        11.0,
+        AudioSource.SYSTEM,
+    )
+
+    snapshot = ContextBuilder(store, latest_question=question).recovery()
+
+    assert "Latest clarification from You:\nУточняю детали CAP" in snapshot.prompt
+    assert "Candidate clarification trigger" not in snapshot.prompt
+
+
+def test_recovery_source_less_question_keeps_microphone_history_non_trigger_label() -> None:
+    store = TranscriptStore(clock=lambda: 11.0)
+    add_final(store, AudioSource.MICROPHONE, "Уточняю детали CAP", 10.0)
+    question = DetectedQuestion(1, "manual", "Объясни CAP", 11.0)
+
+    snapshot = ContextBuilder(store, latest_question=question).recovery()
+
+    assert "Latest clarification from You:\nУточняю детали CAP" in snapshot.prompt
+    assert "Candidate clarification trigger" not in snapshot.prompt
+
+
 def test_normal_context_drops_oldest_low_priority_history_first() -> None:
     full_store = TranscriptStore(clock=lambda: 100.0)
     add_final(full_store, AudioSource.SYSTEM, "oldest history " * 12, 10.0)

@@ -135,6 +135,23 @@ def test_indirect_keywords_inside_narration_do_not_trigger(text: str) -> None:
     assert QuestionDetector().detect(AudioSource.MICROPHONE, text) is None
 
 
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Walk me through.",
+        "Walk me through !?!",
+        "Walk me through   ... ",
+        "Walk me through ___",
+        "Хотелось бы услышать ваше мнение о...",
+        "Хотелось бы услышать ваше мнение о   ?!",
+        "Хотелось бы услышать ваше мнение о \t...",
+        "Хотелось бы услышать ваше мнение о ___",
+    ],
+)
+def test_indirect_request_without_lexical_topic_does_not_trigger(text: str) -> None:
+    assert QuestionDetector().detect(AudioSource.SYSTEM, text) is None
+
+
 def test_polite_anchored_question_is_classified() -> None:
     detector = QuestionDetector()
 
