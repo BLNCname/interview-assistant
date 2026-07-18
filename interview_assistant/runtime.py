@@ -270,9 +270,7 @@ class ApplicationRuntime(QObject):
         events.screenshot_requested.connect(self._on_screenshot_requested)
         events.pause_toggled.connect(self._on_pause_toggled)
         events.overlay_visibility_toggled.connect(self._on_overlay_visibility_toggled)
-        events.overlay_interaction_toggled.connect(
-            self._on_overlay_interaction_toggled
-        )
+        events.overlay_interaction_toggled.connect(self._on_overlay_interaction_toggled)
         events.forced_search_requested.connect(self._on_forced_search_requested)
         events.answer_clear_requested.connect(self._on_answer_clear_requested)
         self._actions_connected = True
@@ -440,8 +438,9 @@ class ApplicationRuntime(QObject):
     async def _answer(self, question: DetectedQuestion) -> None:
         self.application.ribbon.set_question(question.text)
         self._set_state(ApplicationState.TRANSCRIBING)
-        image_path = self._manual_image_path
+        manual_image_path = self._manual_image_path
         self._manual_image_path = None
+        image_path = manual_image_path
         if image_path is None:
             capture = await self.services.capture.capture_for_event(question.kind)
             image_path = self._usable_image(capture)
@@ -462,10 +461,7 @@ class ApplicationRuntime(QObject):
                 retrieval_id,
                 self.config.search.timeout_seconds,
             )
-            if (
-                retrieval.status == "failed"
-                and retrieval.error_type == "model_not_found"
-            ):
+            if retrieval.status == "failed" and retrieval.error_type == "model_not_found":
                 await self._model_lifecycle.recover(
                     text_model_key,
                     RecoveryRequest(
@@ -490,9 +486,7 @@ class ApplicationRuntime(QObject):
                 )
             if retrieval.status == "completed" and retrieval.text.strip():
                 search_results = (retrieval.text,)
-                self.application.ribbon.set_sources(
-                    integration.id for integration in integrations
-                )
+                self.application.ribbon.set_sources(integration.id for integration in integrations)
             else:
                 self.application.events.notification.emit(
                     "Web retrieval unavailable; continuing without it."
@@ -520,6 +514,8 @@ class ApplicationRuntime(QObject):
             context.prompt,
             image_path,
         )
+        if manual_image_path is not None:
+            self.application.events.notification.emit("Снимок добавлен в запрос")
         self._set_state(ApplicationState.GENERATING)
         request_id = self.services.coordinator.submit(payload)
         outcome = await self.services.coordinator.wait(request_id)
@@ -674,6 +670,7 @@ class ApplicationRuntime(QObject):
                 "Too many assistant actions are already running."
             )
             return
+
         async def invoke_action() -> None:
             await operation()
 
@@ -708,13 +705,20 @@ class ApplicationRuntime(QObject):
     async def capture_manual_screenshot(self) -> None:
         if self._closing:
             return
-        result = await self.services.capture.capture_for_event("manual", manual=True)
-        path = self._usable_image(result)
-        if path is not None:
-            self._manual_image_path = path
-            self.application.events.notification.emit(
-                "Screenshot is ready for the next request."
-            )
+        self._manual_image_path = None
+        self.application.events.notification.emit("Снимок создаётся")
+        try:
+            result = await self.services.capture.capture_for_event("manual", manual=True)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            self.application.events.notification.emit("Снимок не создан: ошибка захвата")
+            return
+        if result.status != "captured" or result.path is None:
+            self.application.events.notification.emit("Снимок не создан: снимок недоступен")
+            return
+        self._manual_image_path = result.path
+        self.application.events.notification.emit("Снимок готов для следующего запроса")
 
     def clear_history(self) -> None:
         self.services.transcript_store.clear()

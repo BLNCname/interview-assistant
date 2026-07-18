@@ -239,6 +239,18 @@ class _FailingActionCapture(_ParityCapture):
         return await super().capture_for_event(kind, manual=manual)
 
 
+class _ReplacingFailureCapture(_ParityCapture):
+    def __init__(self, path: Path) -> None:
+        super().__init__(path)
+        self.fail_next = False
+
+    async def capture_for_event(self, kind: str, *, manual: bool = False) -> CaptureResult:
+        if manual and self.fail_next:
+            self.manual_count += 1
+            return CaptureResult("disallowed", None, None)
+        return await super().capture_for_event(kind, manual=manual)
+
+
 class _FailingQuestionCapture(_ParityCapture):
     async def capture_for_event(self, kind: str, *, manual: bool = False) -> CaptureResult:
         if not manual:
@@ -613,10 +625,7 @@ async def test_hotkey_actions_cover_pause_overlay_capture_search_clear_and_histo
     )
     assert len(services.transcript_store) == 1
     app.events.answer_clear_requested.emit()
-    qtbot.waitUntil(
-        lambda: app.ribbon.answer_text == ""
-        and len(services.transcript_store) == 0
-    )
+    qtbot.waitUntil(lambda: app.ribbon.answer_text == "" and len(services.transcript_store) == 0)
 
     await runtime.shutdown()
     app.events.screenshot_requested.emit()
@@ -689,6 +698,75 @@ async def test_manual_screenshot_is_consumed_once_without_redundant_capture(
     await runtime.shutdown()
 
 
+async def test_manual_screenshot_emits_creating_ready_and_attached_states(
+    qtbot,
+    tmp_path: Path,
+) -> None:
+    app = InterviewApplication.for_test()
+    qtbot.addWidget(app.ribbon)
+    messages: list[str] = []
+    app.events.notification.connect(messages.append)
+    capture = _ParityCapture(tmp_path / "manual.jpg")
+    capture.path.write_bytes(b"manual image")
+    runtime, _, client = _runtime(app, capture=capture)
+    await runtime.start()
+
+    await runtime.capture_manual_screenshot()
+
+    assert messages[-2:] == [
+        "Снимок создаётся",
+        "Снимок готов для следующего запроса",
+    ]
+    await runtime.submit_hypothesis(_hypothesis("Explain a binary search tree"))
+
+    assert "Снимок добавлен в запрос" in messages
+    assert runtime.manual_image_path is None
+    assert "data:image/jpeg;base64," in str(client.payloads[-1]["input"])
+    await runtime.shutdown()
+
+
+async def test_pending_screenshot_is_consumed_only_once(
+    qtbot,
+    tmp_path: Path,
+) -> None:
+    app = InterviewApplication.for_test()
+    qtbot.addWidget(app.ribbon)
+    capture = _ParityCapture(tmp_path / "manual.jpg")
+    capture.path.write_bytes(b"manual image")
+    runtime, _, client = _runtime(app, capture=capture)
+    await runtime.start()
+
+    await runtime.capture_manual_screenshot()
+    await runtime.submit_hypothesis(_hypothesis("What is shown?"))
+    await runtime.submit_hypothesis(_hypothesis("Explain it again"))
+
+    assert "data:image/jpeg;base64," in str(client.payloads[-2]["input"])
+    assert "data:image/jpeg;base64," not in str(client.payloads[-1]["input"])
+    await runtime.shutdown()
+
+
+async def test_failed_new_screenshot_clears_stale_pending_image(
+    qtbot,
+    tmp_path: Path,
+) -> None:
+    app = InterviewApplication.for_test()
+    qtbot.addWidget(app.ribbon)
+    messages: list[str] = []
+    app.events.notification.connect(messages.append)
+    capture = _ReplacingFailureCapture(tmp_path / "manual.jpg")
+    capture.path.write_bytes(b"manual image")
+    runtime, _, _ = _runtime(app, capture=capture)
+    await runtime.start()
+
+    await runtime.capture_manual_screenshot()
+    capture.fail_next = True
+    await runtime.capture_manual_screenshot()
+
+    assert runtime.manual_image_path is None
+    assert "Снимок не создан" in messages[-1]
+    await runtime.shutdown()
+
+
 async def test_action_failure_is_visible_without_leaking_backend_details(
     qtbot,
     tmp_path: Path,
@@ -706,7 +784,10 @@ async def test_action_failure_is_visible_without_leaking_backend_details(
     app.events.screenshot_requested.emit()
     await _wait_until(lambda: bool(notifications))
 
-    assert notifications == ["Assistant action failed."]
+    assert notifications == [
+        "Снимок создаётся",
+        "Снимок не создан: ошибка захвата",
+    ]
     assert "sensitive" not in " ".join(notifications)
     await runtime.shutdown()
 

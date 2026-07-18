@@ -258,6 +258,63 @@ async def test_question_to_streaming_overlay_loads_shared_model_once(
     await runtime.shutdown()
 
 
+async def test_manual_screenshot_lifecycle_is_visible_and_attaches_once(
+    qtbot,
+    tmp_path: Path,
+) -> None:
+    from interview_assistant.runtime import ApplicationRuntime, RuntimeServices
+
+    frame = tmp_path / "manual.jpg"
+    frame.write_bytes(b"jpeg-fixture")
+    app = InterviewApplication.for_test()
+    qtbot.addWidget(app.ribbon)
+    notifications: list[str] = []
+    app.events.notification.connect(notifications.append)
+    config = AppConfig.model_validate(
+        {
+            "audio": {
+                "system_device_id": "system",
+                "microphone_device_id": "microphone",
+            },
+            "lmstudio": {
+                "text_model": "qwen-vl",
+                "vision_model": "qwen-vl",
+            },
+            "search": {"mode": "off"},
+        }
+    )
+    client = _FakeLMStudioClient()
+    runtime = ApplicationRuntime(
+        app,
+        config,
+        RuntimeServices(
+            audio=_LifecycleService(),
+            stt=_FakeSTT(),
+            hotkeys=_LifecycleService(),
+            capture=_FakeCapture(frame),
+            registry=_FakeRegistry(),
+            client=client,
+            coordinator=RequestCoordinator(app.events, client),
+            transcript_store=TranscriptStore(),
+            question_detector=QuestionDetector(cooldown_seconds=0),
+            search_policy=SearchPolicy("off"),
+        ),
+    )
+
+    await runtime.start()
+    await runtime.capture_manual_screenshot()
+    await runtime.handle_hypothesis(_final(AudioSource.SYSTEM, "Describe this screen"))
+
+    assert notifications == [
+        "Снимок создаётся",
+        "Снимок готов для следующего запроса",
+        "Снимок добавлен в запрос",
+    ]
+    assert runtime.manual_image_path is None
+    assert "data:image/jpeg;base64," in str(client.payloads[0]["input"])
+    await runtime.shutdown()
+
+
 async def test_microphone_clarification_generates_with_both_roles_in_context(
     qtbot,
     tmp_path: Path,
