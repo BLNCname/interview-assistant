@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 
 from PyQt6.QtCore import QUrl
 from PyQt6.QtGui import QFont, QTextCharFormat, QTextCursor, QTextDocument, QTextFormat
@@ -27,13 +28,41 @@ class SafeMarkdownBrowser(QTextBrowser):
     """A text browser that never resolves model-provided resources."""
 
     def __init__(self, *args: object, **kwargs: object) -> None:
+        self._resource_requests: list[tuple[int, QUrl]] = []
         super().__init__(*args, **kwargs)
         self.setOpenLinks(False)
         self.setOpenExternalLinks(False)
 
+    @property
+    def resource_requests(self) -> tuple[tuple[int, QUrl], ...]:
+        return tuple((resource_type, QUrl(name)) for resource_type, name in self._resource_requests)
+
     def loadResource(self, resource_type: int, name: QUrl) -> object:
-        del resource_type, name
+        self._resource_requests.append((resource_type, QUrl(name)))
         return None
+
+
+@dataclass(frozen=True)
+class ScrollState:
+    was_at_bottom: bool
+    relative_position: float
+
+
+def capture_scroll_state(browser: QTextBrowser) -> ScrollState:
+    scrollbar = browser.verticalScrollBar()
+    maximum = scrollbar.maximum()
+    return ScrollState(
+        was_at_bottom=scrollbar.value() >= maximum,
+        relative_position=scrollbar.value() / maximum if maximum else 0.0,
+    )
+
+
+def restore_scroll_state(browser: QTextBrowser, state: ScrollState) -> None:
+    scrollbar = browser.verticalScrollBar()
+    if state.was_at_bottom:
+        scrollbar.setValue(scrollbar.maximum())
+    else:
+        scrollbar.setValue(round(state.relative_position * scrollbar.maximum()))
 
 
 def _neutralize_images(markdown: str) -> str:
@@ -99,10 +128,7 @@ def render_safe_markdown(
 
     browser.setOpenLinks(False)
     browser.setOpenExternalLinks(False)
-    scrollbar = browser.verticalScrollBar()
-    old_maximum = scrollbar.maximum()
-    was_at_bottom = scrollbar.value() >= old_maximum
-    relative_position = scrollbar.value() / old_maximum if old_maximum else 0.0
+    scroll_state = capture_scroll_state(browser)
 
     document = browser.document()
     document.setDefaultStyleSheet(_COMPACT_STYLESHEET)
@@ -113,7 +139,4 @@ def render_safe_markdown(
 
     if not preserve_scroll:
         return
-    if was_at_bottom:
-        scrollbar.setValue(scrollbar.maximum())
-    else:
-        scrollbar.setValue(round(relative_position * scrollbar.maximum()))
+    restore_scroll_state(browser, scroll_state)

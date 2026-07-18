@@ -47,7 +47,12 @@ from PyQt6.QtWidgets import (
 
 from interview_assistant.config import OverlayConfig
 from interview_assistant.events import EventBus
-from interview_assistant.ui.markdown import SafeMarkdownBrowser, render_safe_markdown
+from interview_assistant.ui.markdown import (
+    SafeMarkdownBrowser,
+    capture_scroll_state,
+    render_safe_markdown,
+    restore_scroll_state,
+)
 from interview_assistant.ui.windows_affinity import (
     AffinityApplier,
     AffinityResult,
@@ -69,6 +74,18 @@ _ANSWER_BACKGROUND_ALPHA = 112
 _WHITE_RGB: _RGB = (255, 255, 255)
 _WCAG_AA_CONTRAST = 4.5
 _MINIMUM_EFFECTIVE_WINDOW_OPACITY = 0.75
+_MINIMUM_CONFIGURED_OPACITY = 0.2
+_DEFAULT_CONFIGURED_OPACITY = 0.88
+
+
+def _effective_window_opacity(configured_opacity: float) -> float:
+    bounded = min(1.0, max(_MINIMUM_CONFIGURED_OPACITY, configured_opacity))
+    if bounded >= _DEFAULT_CONFIGURED_OPACITY:
+        return bounded
+    configured_span = _DEFAULT_CONFIGURED_OPACITY - _MINIMUM_CONFIGURED_OPACITY
+    effective_span = _DEFAULT_CONFIGURED_OPACITY - _MINIMUM_EFFECTIVE_WINDOW_OPACITY
+    progress = (bounded - _MINIMUM_CONFIGURED_OPACITY) / configured_span
+    return _MINIMUM_EFFECTIVE_WINDOW_OPACITY + (progress * effective_span)
 
 
 def _composite_rgb(
@@ -300,10 +317,7 @@ class LiquidRibbon(QMainWindow):
         self._geometry_timer.timeout.connect(self._persist_geometry)
 
         self.setWindowTitle("Interview Assistant")
-        self.effective_window_opacity = max(
-            _MINIMUM_EFFECTIVE_WINDOW_OPACITY,
-            self._config.opacity,
-        )
+        self.effective_window_opacity = _effective_window_opacity(self._config.opacity)
         self.setWindowOpacity(math.ceil(self.effective_window_opacity * 255) / 255)
         self.setMinimumHeight(self._minimum_expanded_height)
         self.setMaximumHeight(self._config.max_height)
@@ -345,10 +359,7 @@ class LiquidRibbon(QMainWindow):
         """Apply saved visual settings to the existing native overlay window."""
 
         self._config = config
-        self.effective_window_opacity = max(
-            _MINIMUM_EFFECTIVE_WINDOW_OPACITY,
-            config.opacity,
-        )
+        self.effective_window_opacity = _effective_window_opacity(config.opacity)
         self.setWindowOpacity(math.ceil(self.effective_window_opacity * 255) / 255)
         self.surface.set_opacity(config.opacity)
         self._minimum_expanded_height = min(120, config.max_height)
@@ -780,12 +791,14 @@ class LiquidRibbon(QMainWindow):
         if request_id != self._active_request_id:
             return
         self.answer_text += delta
+        scroll_state = capture_scroll_state(self.answer_browser)
         render_safe_markdown(
             self.answer_browser,
             self.answer_text,
-            preserve_scroll=True,
+            preserve_scroll=False,
         )
         self._adjust_height()
+        restore_scroll_state(self.answer_browser, scroll_state)
 
     def toggle_collapsed(self) -> None:
         if self.is_collapsed:

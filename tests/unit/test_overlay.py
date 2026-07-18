@@ -88,25 +88,7 @@ def test_markdown_fenced_code_and_inline_code_receive_monospace_format(qtbot) ->
     assert _cursor_at(ribbon.answer_browser, "print").charFormat().fontFixedPitch()
 
 
-def test_model_markdown_cannot_load_resources_or_activate_links(
-    qtbot, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    browser_base = getattr(overlay_module, "SafeMarkdownBrowser", QTextBrowser)
-
-    class ResourceSpyBrowser(browser_base):
-        def __init__(self, *args: object, **kwargs: object) -> None:
-            super().__init__(*args, **kwargs)
-            self.resource_requests: list[QUrl] = []
-
-        def loadResource(self, resource_type: int, name: QUrl) -> object:
-            self.resource_requests.append(name)
-            return super().loadResource(resource_type, name)
-
-    monkeypatch.setattr(
-        overlay_module,
-        browser_base.__name__,
-        ResourceSpyBrowser,
-    )
+def test_model_markdown_cannot_load_resources_or_activate_links(qtbot) -> None:
     ribbon = _rendered_ribbon(
         qtbot,
         "![x](file:///private.txt) [open](https://evil.invalid) "
@@ -114,15 +96,17 @@ def test_model_markdown_cannot_load_resources_or_activate_links(
     )
     browser = ribbon.answer_browser
 
-    assert any(base.__name__ == "SafeMarkdownBrowser" for base in type(browser).__mro__)
-    assert browser.resource_requests == []
+    assert browser.resource_requests == ()
+    resource_type = QTextDocument.ResourceType.ImageResource.value
+    resource_url = QUrl("file:///private.txt")
     assert (
         browser.loadResource(
-            QTextDocument.ResourceType.ImageResource.value,
-            QUrl("file:///private.txt"),
+            resource_type,
+            resource_url,
         )
         is None
     )
+    assert browser.resource_requests == ((resource_type, resource_url),)
     assert not browser.openLinks()
     assert not browser.openExternalLinks()
     assert "private.txt" not in browser.toPlainText()
@@ -143,6 +127,35 @@ def test_stream_rerender_preserves_manual_scroll_position(qtbot) -> None:
 
     after = bar.value() / bar.maximum()
     assert after == pytest.approx(before, abs=0.08)
+
+
+def test_stream_scroll_restore_uses_final_range_after_ribbon_growth(qtbot) -> None:
+    bus = EventBus()
+    ribbon = LiquidRibbon(
+        bus,
+        config=OverlayConfig(max_height=420),
+        settings=None,
+    )
+    qtbot.addWidget(ribbon)
+    bus.answer_reset.emit(2)
+    bus.answer_delta.emit(2, "line\n" * 120)
+    ribbon.show()
+    qtbot.waitExposed(ribbon)
+    ribbon.resize(ribbon.width(), 150)
+    QApplication.processEvents()
+    initial_height = ribbon.height()
+    bar = ribbon.answer_browser.verticalScrollBar()
+    assert initial_height < 420
+    assert bar.maximum() > 0
+    bar.setValue(bar.maximum() // 3)
+    before = bar.value() / bar.maximum()
+
+    ribbon.append_delta(2, "tail")
+    QApplication.processEvents()
+
+    assert ribbon.height() > initial_height
+    after = bar.value() / bar.maximum()
+    assert after == pytest.approx(before, abs=0.01)
 
 
 def test_stale_delta_is_ignored(qtbot) -> None:
@@ -185,6 +198,25 @@ def test_default_ribbon_uses_approved_graphite_palette(qtbot) -> None:
     assert ribbon.effective_window_opacity == 0.88
     assert ribbon.surface.gradient_top_rgb == (52, 54, 58)
     assert ribbon.surface.gradient_bottom_rgb == (37, 38, 42)
+
+
+def test_settings_opacity_maps_to_distinct_monotonic_effective_values(qtbot) -> None:
+    configured_values = (0.2, 0.5, 0.88, 1.0)
+    effective_values: list[float] = []
+
+    for configured in configured_values:
+        ribbon = LiquidRibbon(
+            EventBus(),
+            config=OverlayConfig(opacity=configured),
+            settings=None,
+        )
+        qtbot.addWidget(ribbon)
+        effective_values.append(ribbon.effective_window_opacity)
+
+    assert effective_values == sorted(set(effective_values))
+    assert effective_values[0] == pytest.approx(0.75)
+    assert effective_values[2] == pytest.approx(0.88)
+    assert effective_values[3] == pytest.approx(1.0)
 
 
 def test_window_mask_tracks_resize(qtbot) -> None:
