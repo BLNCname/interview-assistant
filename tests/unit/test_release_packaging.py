@@ -5,19 +5,37 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import zipfile
 from pathlib import Path
 
 import pytest
+import yaml
 
 
 ROOT = Path(__file__).parents[2]
 ISS_PATH = ROOT / "packaging" / "interview_assistant.iss"
 INSTALLER_SCRIPT_PATH = ROOT / "scripts" / "build_installer.ps1"
 ARCHIVE_SCRIPT_PATH = ROOT / "scripts" / "create_source_archive.ps1"
+ARCHIVE_INSPECTOR_PATH = ROOT / "scripts" / "inspect_source_archive.py"
+DIST_VALIDATOR_PATH = ROOT / "scripts" / "validate_release_dist.py"
+DIST_INVENTORY_PATH = ROOT / "packaging" / "dist_inventory.json"
+HISTORY_SCANNER_PATH = ROOT / "scripts" / "scan_release_git_history.py"
+INSTALLER_SMOKE_PATH = ROOT / "scripts" / "smoke_installer.ps1"
 PORTABLE_DOC_PATH = ROOT / "docs" / "portable-release.md"
+RELEASE_CONFIG_PATH = ROOT / "packaging" / "source_release_config.yaml"
 SPEC_PATH = ROOT / "packaging" / "interview_assistant.spec"
 APP_ID = "9CE7901A-56E8-49CB-A8ED-8D5CF4F97C7D"
+
+EXPECTED_RELEASE_HOTKEYS = {
+    "force_request": "ctrl+shift+space",
+    "screenshot": "ctrl+shift+s",
+    "pause": "ctrl+shift+p",
+    "overlay_visibility": "ctrl+shift+o",
+    "overlay_interaction": "ctrl+shift+i",
+    "forced_web_search": "ctrl+shift+w",
+    "clear_answer": "ctrl+shift+c",
+}
 
 
 def test_frozen_bundle_includes_prompt_but_not_machine_config() -> None:
@@ -87,6 +105,9 @@ def _create_source_repository(
         "tests/test_fixture.py": "def test_fixture():\n    assert True\n",
         "assets/icon.txt": "asset\n",
         "config.yaml": "machine: checked-in-runtime-value\n",
+        "packaging/source_release_config.yaml": RELEASE_CONFIG_PATH.read_text(
+            encoding="utf-8"
+        ),
         "prompts/interview_system.md": "Candidate release prompt\n",
         ".gitignore": (
             ".venv/\n"
@@ -221,6 +242,7 @@ def _run_archive_script(
     model_path: Path,
     output_path: Path,
     *,
+    source_commit: str | None = None,
     temporary_directory: Path | None = None,
 ) -> subprocess.CompletedProcess[str]:
     if temporary_directory is None:
@@ -228,6 +250,8 @@ def _run_archive_script(
     os.makedirs(_extended_windows_path(temporary_directory), exist_ok=True)
     environment = os.environ.copy()
     environment["INTERVIEW_ASSISTANT_ARCHIVE_TEMP"] = str(temporary_directory)
+    if source_commit is None:
+        source_commit = _git("rev-parse", "HEAD", cwd=repository).stdout.strip()
     return subprocess.run(
         [
             _powershell(),
@@ -246,6 +270,8 @@ def _run_archive_script(
             "9.8.7-test",
             "-RepositoryPath",
             str(repository),
+            "-SourceCommit",
+            source_commit,
         ],
         cwd=ROOT,
         check=False,
@@ -312,8 +338,19 @@ def test_installer_builder_validates_dist_bundle_and_invokes_supplied_iscc() -> 
     assert '"/DOutputPath=' in source
     assert ".ExitCode" in source
     assert "InterviewAssistant-Setup-$Version-win64.exe" in source
+    assert "validate_release_dist.py" in source
+    assert "dist_inventory.json" in source
     for downloader in ("Invoke-WebRequest", "Start-BitsTransfer", "winget", "choco"):
         assert downloader not in source
+
+
+def test_installer_smoke_rechecks_installed_model_hashes() -> None:
+    source = INSTALLER_SMOKE_PATH.read_text(encoding="utf-8")
+
+    assert "validate_release_dist.py" in source
+    assert '"--installed"' in source
+    assert "stt_model_manifest.json" in source
+    assert "dist_inventory.json" in source
 
 
 def test_source_archive_script_declares_fail_closed_git_and_zip_contract() -> None:
@@ -323,7 +360,13 @@ def test_source_archive_script_declares_fail_closed_git_and_zip_contract() -> No
     assert '$ErrorActionPreference = "Stop"' in source
     assert "Set-StrictMode -Version Latest" in source
     assert "[Parameter(Mandatory" in source
-    for parameter in ("$SttModelPath", "$OutputPath", "$Version", "$RepositoryPath"):
+    for parameter in (
+        "$SttModelPath",
+        "$OutputPath",
+        "$Version",
+        "$RepositoryPath",
+        "$SourceCommit",
+    ):
         assert parameter in source
     assert "stt_model_manifest.json" in source
     assert "ConvertFrom-Json" in source
@@ -356,6 +399,7 @@ def test_source_archive_script_declares_fail_closed_git_and_zip_contract() -> No
     assert "fsck" in source
     assert "--no-reflogs" in source
     assert "--unreachable" in source
+    assert "scan_release_git_history.py" in source
     assert '".git\\logs"' in source
     assert "FETCH_HEAD" in source
     assert "ORIG_HEAD" in source
@@ -429,7 +473,18 @@ def test_source_archive_is_standalone_sanitized_and_model_overlay_is_exact(
         assert [entry["path"] for entry in archived_manifest["files"]] == list(model_files)
         assert prefix + "scripts/build.ps1" in normalized
         assert prefix + "prompts/interview_system.md" in normalized
-        assert prefix + "config.yaml" not in normalized
+        assert prefix + "config.yaml" in normalized
+        config_name = names[normalized.index(prefix + "config.yaml")]
+        archived_config_text = archive.read(config_name).decode("utf-8")
+        archived_config = yaml.safe_load(archived_config_text)
+        assert archived_config["audio"]["system_device_id"] is None
+        assert archived_config["audio"]["microphone_device_id"] is None
+        assert archived_config["lmstudio"]["host"] == "127.0.0.1"
+        assert archived_config["lmstudio"]["text_model"] == ""
+        assert archived_config["lmstudio"]["vision_model"] == ""
+        assert archived_config["hotkeys"] == EXPECTED_RELEASE_HOTKEYS
+        assert "checked-in-runtime-value" not in archived_config_text
+        assert "uncommitted-runtime-secret" not in archived_config_text
         for forbidden in (
             ".venv/",
             "build/",
@@ -513,6 +568,218 @@ def test_source_archive_is_standalone_sanitized_and_model_overlay_is_exact(
     assert not (extracted_repository / ".git" / "logs").exists()
     assert not (extracted_repository / ".git" / "FETCH_HEAD").exists()
     assert not (extracted_repository / ".git" / "ORIG_HEAD").exists()
+
+
+def test_reachable_history_scanner_rejects_deleted_credential_without_echoing_it(
+    tmp_path: Path,
+) -> None:
+    repository = tmp_path / "history"
+    repository.mkdir()
+    _git("init", "-b", "main", cwd=repository)
+    _git("config", "user.name", "Release Test", cwd=repository)
+    _git("config", "user.email", "release-test@example.invalid", cwd=repository)
+    (repository / "README.md").write_text("clean\n", encoding="utf-8")
+    _git("add", ".", cwd=repository)
+    _git("commit", "-m", "clean", cwd=repository)
+    fake_credential = "sk-" + ("A" * 32)
+    (repository / "deleted.txt").write_text(fake_credential, encoding="utf-8")
+    _git("add", "deleted.txt", cwd=repository)
+    _git("commit", "-m", "temporary file", cwd=repository)
+    _git("rm", "deleted.txt", cwd=repository)
+    _git("commit", "-m", "delete temporary file", cwd=repository)
+
+    result = subprocess.run(
+        [sys.executable, str(HISTORY_SCANNER_PATH), "--repository", str(repository)],
+        cwd=ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+    assert result.returncode != 0
+    assert fake_credential not in result.stdout + result.stderr
+    assert "reachable Git history failed the release privacy scan" in result.stderr
+
+
+def test_source_archive_rejects_credential_in_reachable_history(tmp_path: Path) -> None:
+    repository, model_path, _files, _head, _secret_commit, _secret_blob = (
+        _create_source_repository(tmp_path)
+    )
+    _git("restore", "config.yaml", "interview_assistant/app.py", cwd=repository)
+    fake_credential = "sk-" + ("B" * 32)
+    (repository / "historic-data.txt").write_text(fake_credential, encoding="utf-8")
+    _git("add", "historic-data.txt", cwd=repository)
+    _git("commit", "-m", "temporary credential fixture", cwd=repository)
+    _git("rm", "historic-data.txt", cwd=repository)
+    _git("commit", "-m", "remove credential fixture", cwd=repository)
+    source_commit = _git("rev-parse", "HEAD", cwd=repository).stdout.strip()
+    output_path = tmp_path / "must-not-exist.zip"
+
+    result = _run_archive_script(
+        repository,
+        model_path,
+        output_path,
+        source_commit=source_commit,
+    )
+
+    assert result.returncode != 0
+    assert not output_path.exists()
+    assert fake_credential not in result.stdout + result.stderr
+
+
+def test_source_archive_uses_explicit_pinned_ancestor_commit(tmp_path: Path) -> None:
+    repository, model_path, _files, source_commit, _secret_commit, _secret_blob = (
+        _create_source_repository(tmp_path)
+    )
+    _git("restore", "config.yaml", "interview_assistant/app.py", cwd=repository)
+    (repository / "docs" / "after-release.md").write_text(
+        "metadata after pinned release\n",
+        encoding="utf-8",
+    )
+    _git("add", "docs/after-release.md", cwd=repository)
+    _git("commit", "-m", "metadata after release", cwd=repository)
+    output_path = tmp_path / "pinned.zip"
+
+    result = _run_archive_script(
+        repository,
+        model_path,
+        output_path,
+        source_commit=source_commit,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    extracted = tmp_path / "pinned-extracted"
+    with zipfile.ZipFile(output_path) as archive:
+        archive.extractall(extracted)
+    archived_repository = extracted / "InterviewAssistant-source-9.8.7-test"
+    assert _git("rev-parse", "HEAD", cwd=archived_repository).stdout.strip() == source_commit
+    assert not (archived_repository / "docs" / "after-release.md").exists()
+    inspection = subprocess.run(
+        [
+            sys.executable,
+            str(ARCHIVE_INSPECTOR_PATH),
+            "--archive",
+            str(output_path),
+            "--manifest",
+            str(repository / "packaging" / "stt_model_manifest.json"),
+            "--expected-commit",
+            source_commit,
+            "--expected-top",
+            "InterviewAssistant-source-9.8.7-test",
+        ],
+        cwd=ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert inspection.returncode == 0, inspection.stdout + inspection.stderr
+    assert json.loads(inspection.stdout)["git_head"] == source_commit
+
+
+def _write_dist_fixture(tmp_path: Path) -> tuple[Path, Path, Path, dict[str, bytes]]:
+    dist = tmp_path / "InterviewAssistant"
+    model_dir = dist / "_internal" / "models" / "stt" / "large-v3-turbo"
+    model_dir.mkdir(parents=True)
+    (dist / "InterviewAssistant.exe").write_bytes(b"fixture executable")
+    model_files = {
+        "config.json": b"{}\n",
+        "model.bin": b"fixture-model",
+        "README.md": b"fixture readme\n",
+    }
+    for name, content in model_files.items():
+        (model_dir / name).write_bytes(content)
+    manifest = {
+        "schema_version": 1,
+        "bundle_subdirectory": "models/stt/large-v3-turbo",
+        "files": [
+            _model_entry(name, content, runtime_required=name != "README.md")
+            for name, content in model_files.items()
+        ],
+    }
+    manifest_path = tmp_path / "manifest.json"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    inventory = {
+        "schema_version": 1,
+        "application": "InterviewAssistant",
+        "files": [
+            {
+                "path": path.relative_to(dist).as_posix(),
+                "size": path.stat().st_size,
+                "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+            }
+            for path in sorted(item for item in dist.rglob("*") if item.is_file())
+        ],
+    }
+    inventory_path = tmp_path / "dist-inventory.json"
+    inventory_path.write_text(json.dumps(inventory), encoding="utf-8")
+    return dist, manifest_path, inventory_path, model_files
+
+
+def _run_dist_validator(
+    dist: Path,
+    manifest: Path,
+    inventory: Path,
+) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [
+            sys.executable,
+            str(DIST_VALIDATOR_PATH),
+            "--dist",
+            str(dist),
+            "--manifest",
+            str(manifest),
+            "--inventory",
+            str(inventory),
+        ],
+        cwd=ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+
+def test_installer_dist_validator_rejects_modified_model(tmp_path: Path) -> None:
+    dist, manifest, inventory, _files = _write_dist_fixture(tmp_path)
+    (dist / "_internal" / "models" / "stt" / "large-v3-turbo" / "model.bin").write_bytes(
+        b"modified-model"
+    )
+
+    result = _run_dist_validator(dist, manifest, inventory)
+
+    assert result.returncode != 0
+    assert "distribution failed release validation" in result.stderr
+
+
+def test_installer_dist_validator_rejects_extra_suspicious_file(tmp_path: Path) -> None:
+    dist, manifest, inventory, _files = _write_dist_fixture(tmp_path)
+    (dist / "_internal" / "config.yaml").write_text("machine: private\n", encoding="utf-8")
+
+    result = _run_dist_validator(dist, manifest, inventory)
+
+    assert result.returncode != 0
+    assert "distribution failed release validation" in result.stderr
+
+
+def test_installer_dist_validator_rejects_extra_stt_file(tmp_path: Path) -> None:
+    dist, manifest, inventory, _files = _write_dist_fixture(tmp_path)
+    model_dir = dist / "_internal" / "models" / "stt" / "large-v3-turbo"
+    (model_dir / "extra.bin").write_bytes(b"extra model")
+
+    result = _run_dist_validator(dist, manifest, inventory)
+
+    assert result.returncode != 0
+    assert "distribution failed release validation" in result.stderr
+
+
+def test_release_archive_inspector_requires_pinned_expected_commit() -> None:
+    source = ARCHIVE_INSPECTOR_PATH.read_text(encoding="utf-8")
+
+    assert "--expected-commit" in source
+    assert "required=True" in source
+    assert "git rev-parse HEAD" not in source
 
 
 def test_source_archive_rejects_unsupported_long_staging_without_leaking_staging(

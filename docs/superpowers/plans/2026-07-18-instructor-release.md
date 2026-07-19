@@ -153,18 +153,19 @@ Run the generated uninstaller silently, require its exit code to be 0, and verif
   -SttModelPath "$PWD\build\release-stt-model" `
   -OutputPath "$PWD\dist\release\InterviewAssistant-source-0.1.0.zip" `
   -Version 0.1.0 `
-  -RepositoryPath "$PWD"
+  -RepositoryPath "$PWD" `
+  -SourceCommit (git rev-parse HEAD)
 ```
 
 Expected: the ZIP exists and contains one top-level directory.
 
 - [ ] **Step 2: Inspect exclusions and Git state**
 
-Extract to a verified temporary directory. Require no `origin`, no remote refs, no reflogs, no `config.yaml`, no `.venv`, no Hugging Face cache metadata, and all six manifest-listed model files.
+Extract to a verified temporary directory. Require no `origin`, no remote refs, no reflogs, no `.venv`, no Hugging Face cache metadata, and all six manifest-listed model files. Require a generated sanitized `config.yaml` with null audio devices, loopback host, empty model keys, and all seven default hotkeys; reject the live machine config.
 
 - [ ] **Step 3: Scan committed blobs and extracted files for credentials**
 
-Check every reachable Git blob and regular extracted file for LM Studio/Context7 key prefixes and private-key markers. Print filenames only on failure; never print matching bytes.
+Check every reachable Git blob plus commit/tag object and every regular extracted file for token prefixes and private-key markers. Never print matching bytes. Pass the explicitly pinned source commit to the archive inspector instead of deriving the current repository `HEAD`.
 
 - [ ] **Step 4: Generate checksums**
 

@@ -163,15 +163,15 @@ Run `scripts/build_installer.ps1` with Inno Setup 6.7.2 and version `0.1.0`. Req
 
 - [ ] **Step 3: Repeat isolated installer smoke testing**
 
-Install silently into the verified workspace-contained `build/installer-smoke` path. Validate the bundled STT manifest, run installed frozen diagnostics with a missing config, require `status=ok` and `frozen=true`, then silently uninstall and require installer-owned EXE/runtime files to be removed.
+Install silently into the verified workspace-contained `build/installer-smoke` path. Revalidate exact installed inventory and every STT size/SHA-256 against the manifest, run installed frozen diagnostics with a missing config, require `status=ok` and `frozen=true`, then silently uninstall and require installer-owned EXE/runtime files to be removed.
 
 - [ ] **Step 4: Create and inspect the source archive**
 
-Run `scripts/create_source_archive.ps1` from committed HEAD with the validated STT model. Extract to a verified temporary directory and require one top-level folder, all six STT files, standalone clean Git history, no remotes/reflogs, and no config, cache, venv, or user data.
+Run `scripts/create_source_archive.ps1` with an explicit pinned source commit and the validated STT model. Extract to a verified temporary directory and require one top-level folder, all six STT files, a generated sanitized `config.yaml` with all seven hotkeys, standalone clean Git history, no remotes/reflogs, and no live machine config, cache, venv, or user data.
 
 - [ ] **Step 5: Scan for credential material**
 
-Scan reachable Git blobs and extracted regular files for LM Studio and Context7 key prefixes plus private-key markers. Print filenames only on failure and never print matching values.
+Scan all reachable Git blobs and commit/tag objects plus extracted regular files for token prefixes and private-key markers. Never print matching values. Require the inspector's explicit expected commit to equal the archived `HEAD`.
 
 - [ ] **Step 6: Generate and verify checksums**
 

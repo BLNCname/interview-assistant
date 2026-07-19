@@ -920,7 +920,7 @@ git commit -m "feat: tune candidate responses and document controls"
 **Interfaces:**
 - Consumes: all prior task contracts.
 - Produces: fresh test, lint, CUDA, affinity, portable, installer, archive, and checksum evidence.
-- Preserves: source archive has one top-level directory, no Git remotes/reflogs, bundled STT exactly once, and no credentials.
+- Preserves: source archive has one top-level directory, no Git remotes/reflogs, bundled STT exactly once, a generated sanitized `config.yaml`, and no credentials or live machine configuration.
 
 - [ ] **Step 1: Run the complete quality suite**
 
@@ -964,17 +964,19 @@ Expected: exit 0, `status=ok`, `frozen=true`. Start the GUI, require it to remai
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\scripts\build_installer.ps1
+powershell -ExecutionPolicy Bypass -File .\scripts\smoke_installer.ps1 -InstallerPath .\dist\installer\InterviewAssistant-Setup-0.1.0-win64.exe
 ```
 
-Install silently into the verified workspace-contained smoke path, run installed frozen diagnostics, verify bundled STT and branding, then silently uninstall. Expected: install/diagnostics/uninstall exit 0 and installer-owned runtime files are removed.
+Install silently into the verified workspace-contained smoke path, revalidate the exact installed inventory and every STT file size/SHA-256 against the manifest, run installed frozen diagnostics, then silently uninstall. Expected: validation/install/diagnostics/uninstall exit 0 and installer-owned runtime files are removed.
 
 - [ ] **Step 7: Rebuild and inspect the instructor source archive**
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\create_source_archive.ps1
+$sourceCommit = git rev-parse HEAD
+powershell -ExecutionPolicy Bypass -File .\scripts\create_source_archive.ps1 -SourceCommit $sourceCommit
 ```
 
-Inspect the ZIP before replacement. Expected: one top-level directory; `START_HERE.md`, updated prompt/config/docs, branding, source/tests, and six STT files including one `model.bin`; no `_internal`, build caches, Credential Manager data, token-shaped values, private keys, remotes, reflogs, or unreachable Git objects.
+Inspect the ZIP with the same explicit source commit before replacement. Expected: one top-level directory; `START_HERE.md`, updated prompt/docs, generated sanitized `config.yaml` with all seven hotkeys, branding, source/tests, and six STT files including one `model.bin`; no live machine config, `_internal`, build caches, Credential Manager data, token-shaped values, private keys, remotes, reflogs, or unreachable Git objects. Scan every reachable Git blob and commit/tag object, not only unreachable objects.
 
 - [ ] **Step 8: Replace root artifacts and regenerate checksums**
 

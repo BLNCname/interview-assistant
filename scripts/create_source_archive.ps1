@@ -9,7 +9,11 @@ param(
     [ValidatePattern("^[0-9A-Za-z][0-9A-Za-z._+-]*$")]
     [string]$Version = "0.1.0",
 
-    [string]$RepositoryPath = (Join-Path $PSScriptRoot "..")
+    [string]$RepositoryPath = (Join-Path $PSScriptRoot ".."),
+
+    [Parameter(Mandatory = $true)]
+    [ValidatePattern("^[0-9a-fA-F]{40,64}$")]
+    [string]$SourceCommit
 )
 
 $ErrorActionPreference = "Stop"
@@ -152,6 +156,32 @@ function Remove-VerifiedFile {
     }
 }
 
+function Invoke-ReleasePython {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$PythonPath,
+
+        [Parameter(Mandatory = $true)]
+        [string]$ScriptPath,
+
+        [Parameter(Mandatory = $true)]
+        [string[]]$Arguments
+    )
+
+    $previousErrorActionPreference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = "Continue"
+        $validatorOutput = @(& $PythonPath $ScriptPath @Arguments 2>&1)
+        $validatorExitCode = $LASTEXITCODE
+    }
+    finally {
+        $ErrorActionPreference = $previousErrorActionPreference
+    }
+    if ($validatorExitCode -ne 0) {
+        throw "A release privacy validator failed."
+    }
+}
+
 $git = Get-Command git.exe -CommandType Application -ErrorAction SilentlyContinue | `
     Select-Object -First 1
 if ($null -eq $git) {
@@ -161,6 +191,22 @@ $tar = Get-Command tar.exe -CommandType Application -ErrorAction SilentlyContinu
     Select-Object -First 1
 if ($null -eq $tar) {
     throw "Windows tar.exe is required to create the ZIP archive."
+}
+$releasePython = Join-Path (Join-Path $PSScriptRoot "..") ".venv\Scripts\python.exe"
+if (-not (Test-Path -LiteralPath $releasePython -PathType Leaf)) {
+    $pythonCommand = Get-Command python.exe -CommandType Application `
+        -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($null -eq $pythonCommand) {
+        throw "Python is required to validate release privacy."
+    }
+    $releasePython = $pythonCommand.Source
+}
+$historyScanner = Join-Path $PSScriptRoot "scan_release_git_history.py"
+$configValidator = Join-Path $PSScriptRoot "validate_source_release_config.py"
+foreach ($validatorPath in @($historyScanner, $configValidator)) {
+    if (-not (Test-Path -LiteralPath $validatorPath -PathType Leaf)) {
+        throw "A required release privacy validator is missing."
+    }
 }
 
 if (-not (Test-Path -LiteralPath $RepositoryPath -PathType Container)) {
@@ -183,11 +229,14 @@ $headOutput = Invoke-GitCommand -GitPath $git.Source -Arguments @(
     $resolvedRepository,
     "rev-parse",
     "--verify",
-    "HEAD"
+    "${SourceCommit}^{commit}"
 )
 $sourceHead = ([string]($headOutput | Select-Object -Last 1)).Trim()
-if ($sourceHead -notmatch "^[0-9a-fA-F]{40,64}$") {
-    throw "Unable to resolve the current Git HEAD."
+if (
+    $sourceHead -notmatch "^[0-9a-fA-F]{40,64}$" -or
+    $sourceHead -ne $SourceCommit.ToLowerInvariant()
+) {
+    throw "Unable to resolve the pinned source commit."
 }
 $branchOutput = Invoke-GitCommand -GitPath $git.Source -Arguments @(
     "-C",
@@ -201,17 +250,14 @@ $sourceBranch = ([string]($branchOutput | Select-Object -Last 1)).Trim()
 if ([string]::IsNullOrWhiteSpace($sourceBranch)) {
     throw "The source HEAD must be attached to a local branch."
 }
-$branchHeadOutput = Invoke-GitCommand -GitPath $git.Source -Arguments @(
+[void](Invoke-GitCommand -GitPath $git.Source -Arguments @(
     "-C",
     $resolvedRepository,
-    "rev-parse",
-    "--verify",
+    "merge-base",
+    "--is-ancestor",
+    $sourceHead,
     "refs/heads/$sourceBranch"
-)
-$branchHead = ([string]($branchHeadOutput | Select-Object -Last 1)).Trim()
-if ($branchHead -ne $sourceHead) {
-    throw "The source branch changed while release inputs were captured."
-}
+))
 
 $manifestObject = "${sourceHead}:packaging/stt_model_manifest.json"
 $manifestOutput = Invoke-GitCommand -GitPath $git.Source -Arguments @(
@@ -441,6 +487,15 @@ try {
     if ($unexpectedFsckOutput.Count -ne 0) {
         throw "The standalone clone retains unreachable Git objects."
     }
+    Invoke-ReleasePython `
+        -PythonPath $releasePython `
+        -ScriptPath $historyScanner `
+        -Arguments @(
+            "--repository",
+            $checkoutPath,
+            "--expected-commit",
+            $sourceHead
+        )
 
     if (-not (Test-Path -LiteralPath $SttModelPath -PathType Container)) {
         throw "The supplied STT model directory does not exist."
@@ -501,6 +556,17 @@ try {
         ))
         Remove-Item -LiteralPath $runtimeConfig -Force
     }
+    $sanitizedConfigTemplate = Join-Path (
+        Join-Path $checkoutPath "packaging"
+    ) "source_release_config.yaml"
+    if (-not (Test-Path -LiteralPath $sanitizedConfigTemplate -PathType Leaf)) {
+        throw "The pinned source commit is missing the sanitized config template."
+    }
+    Copy-Item -LiteralPath $sanitizedConfigTemplate -Destination $runtimeConfig
+    Invoke-ReleasePython `
+        -PythonPath $releasePython `
+        -ScriptPath $configValidator `
+        -Arguments @("--config", $runtimeConfig)
 
     $bundleRelativePath = ([string]$manifest.bundle_subdirectory).Replace(
         "/",
@@ -559,6 +625,9 @@ try {
     }
     if ($normalizedEntries -notcontains "$expectedPrefix.git/HEAD") {
         throw "The source ZIP archive is missing standalone Git history."
+    }
+    if ($normalizedEntries -notcontains "${expectedPrefix}config.yaml") {
+        throw "The source ZIP archive is missing the sanitized config."
     }
     foreach ($modelFile in $validatedModelFiles) {
         $expectedModelEntry = (

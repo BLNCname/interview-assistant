@@ -2,13 +2,13 @@
 
 ## Evidence
 
-- Source visual truth: `C:\Users\temab\interview-assistant\.superpowers\brainstorm\119-1783842418\content\overlay-layout-options-v2.html`, variant B.
-- Source capture: `C:\Users\temab\interview-assistant\.worktrees\feature-interview-assistant\.superpowers\sdd\task-10-reference-ribbon.png` (`1872×117`).
-- Rendered implementation: `C:\Users\temab\interview-assistant\.worktrees\feature-interview-assistant\.superpowers\sdd\task-10-overlay-windows-final.png` (`1888×142`).
-- Full-view comparison: `C:\Users\temab\interview-assistant\.worktrees\feature-interview-assistant\.superpowers\sdd\task-10-comparison-native-final.png`.
+- Source visual truth: historical `.superpowers/brainstorm/.../overlay-layout-options-v2.html`, variant B.
+- Source capture: historical `.superpowers/sdd/task-10-reference-ribbon.png` (`1872×117`).
+- Rendered implementation: historical `.superpowers/sdd/task-10-overlay-windows-final.png` (`1888×142`).
+- Full-view comparison: historical `.superpowers/sdd/task-10-comparison-native-final.png`.
 - Focused comparisons:
-  - `C:\Users\temab\interview-assistant\.worktrees\feature-interview-assistant\.superpowers\sdd\task-10-comparison-focused-left-final.png`;
-  - `C:\Users\temab\interview-assistant\.worktrees\feature-interview-assistant\.superpowers\sdd\task-10-comparison-focused-answer-final.png`.
+  - historical `.superpowers/sdd/task-10-comparison-focused-left-final.png`;
+  - historical `.superpowers/sdd/task-10-comparison-focused-answer-final.png`.
 - Viewport: Windows desktop at `1920×1080`; Ribbon uses the available width minus the specified 16 px side insets.
 - State: dark theme, expanded Ribbon, opacity `0.88`, status/model chips, one Russian question, a three-line streamed answer, and two sources.
 

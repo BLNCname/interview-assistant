@@ -18,6 +18,9 @@ Set-StrictMode -Version Latest
 $root = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot "..")).Path
 $issPath = Join-Path $root "packaging\interview_assistant.iss"
 $manifestPath = Join-Path $root "packaging\stt_model_manifest.json"
+$distInventoryPath = Join-Path $root "packaging\dist_inventory.json"
+$distValidatorPath = Join-Path $root "scripts\validate_release_dist.py"
+$releasePython = Join-Path $root ".venv\Scripts\python.exe"
 
 if (-not (Test-Path -LiteralPath $IsccPath -PathType Leaf)) {
     throw "The supplied Inno Setup compiler does not exist."
@@ -28,6 +31,20 @@ if (-not (Test-Path -LiteralPath $issPath -PathType Leaf)) {
 }
 if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) {
     throw "The tracked STT model manifest is missing."
+}
+if (-not (Test-Path -LiteralPath $distInventoryPath -PathType Leaf)) {
+    throw "The tracked distribution inventory is missing."
+}
+if (-not (Test-Path -LiteralPath $distValidatorPath -PathType Leaf)) {
+    throw "The release distribution validator is missing."
+}
+if (-not (Test-Path -LiteralPath $releasePython -PathType Leaf)) {
+    $pythonCommand = Get-Command python.exe -CommandType Application `
+        -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($null -eq $pythonCommand) {
+        throw "Python is required to validate the release distribution."
+    }
+    $releasePython = $pythonCommand.Source
 }
 
 if ([string]::IsNullOrWhiteSpace($DistPath)) {
@@ -82,6 +99,22 @@ foreach ($entry in @($manifest.files)) {
     if (-not (Test-Path -LiteralPath $bundledFile -PathType Leaf)) {
         throw "The PyInstaller distribution has an incomplete STT model bundle."
     }
+}
+
+$previousErrorActionPreference = $ErrorActionPreference
+try {
+    $ErrorActionPreference = "Continue"
+    $validationOutput = @(& $releasePython $distValidatorPath `
+        "--dist" $resolvedDist `
+        "--manifest" $manifestPath `
+        "--inventory" $distInventoryPath 2>&1)
+    $validationExitCode = $LASTEXITCODE
+}
+finally {
+    $ErrorActionPreference = $previousErrorActionPreference
+}
+if ($validationExitCode -ne 0) {
+    throw "The PyInstaller distribution failed release validation."
 }
 
 if ([string]::IsNullOrWhiteSpace($OutputPath)) {
