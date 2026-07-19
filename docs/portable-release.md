@@ -38,6 +38,14 @@ unreachable Git objects. Every reachable blob and commit/tag object is scanned f
 private-key patterns during both archive creation and inspection. Add the intended remote
 explicitly before pushing any commits.
 
+The retained history is academic provenance, not a promise that old non-secret prose has been
+rewritten: reachable historical blobs may contain obsolete machine path strings. Live branch
+history is not rewritten merely to remove that non-secret provenance. Credential and private-key
+signatures still fail the release scan across every reachable object and every regular archive
+file. If a future approved release policy requires sanitized history, create that derived history
+only inside archive staging, record its source commit for traceability, and leave the live public
+branch unchanged.
+
 ## Trust and hardware verification
 
 The application binaries and installer are unsigned unless a real code-signing certificate is

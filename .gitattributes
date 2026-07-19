@@ -1,0 +1,10 @@
+* text=auto eol=lf
+
+*.bin binary
+*.dll binary
+*.exe binary
+*.ico binary
+*.png binary
+*.pyd binary
+*.wav binary
+*.zip binary

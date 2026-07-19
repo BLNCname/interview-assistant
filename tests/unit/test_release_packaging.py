@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import shutil
+import stat
 import subprocess
 import sys
 import zipfile
@@ -18,6 +19,7 @@ ISS_PATH = ROOT / "packaging" / "interview_assistant.iss"
 INSTALLER_SCRIPT_PATH = ROOT / "scripts" / "build_installer.ps1"
 ARCHIVE_SCRIPT_PATH = ROOT / "scripts" / "create_source_archive.ps1"
 ARCHIVE_INSPECTOR_PATH = ROOT / "scripts" / "inspect_source_archive.py"
+GITATTRIBUTES_PATH = ROOT / ".gitattributes"
 DIST_VALIDATOR_PATH = ROOT / "scripts" / "validate_release_dist.py"
 DIST_INVENTORY_PATH = ROOT / "packaging" / "dist_inventory.json"
 HISTORY_SCANNER_PATH = ROOT / "scripts" / "scan_release_git_history.py"
@@ -74,6 +76,8 @@ def _model_entry(path: str, content: bytes, *, runtime_required: bool) -> dict[s
 
 def _create_source_repository(
     tmp_path: Path,
+    *,
+    include_gitattributes: bool = True,
 ) -> tuple[Path, Path, dict[str, bytes], str, str, str]:
     repository_store = tmp_path / "repository store"
     repository_store.mkdir()
@@ -121,7 +125,20 @@ def _create_source_repository(
             "*.reg\n"
             "*token*\n"
         ),
+        ".gitattributes": (
+            "* text=auto eol=lf\n"
+            "*.bin binary\n"
+            "*.dll binary\n"
+            "*.exe binary\n"
+            "*.ico binary\n"
+            "*.png binary\n"
+            "*.pyd binary\n"
+            "*.wav binary\n"
+            "*.zip binary\n"
+        ),
     }
+    if not include_gitattributes:
+        tracked.pop(".gitattributes")
     for relative_path, tracked_content in tracked.items():
         path = repository_store / relative_path
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -280,6 +297,80 @@ def _run_archive_script(
         env=environment,
         timeout=60,
     )
+
+
+def _run_archive_inspector(
+    archive: Path,
+    manifest: Path,
+    source_commit: str,
+    *,
+    top: str = "InterviewAssistant-source-9.8.7-test",
+) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [
+            sys.executable,
+            str(ARCHIVE_INSPECTOR_PATH),
+            "--archive",
+            str(archive),
+            "--manifest",
+            str(manifest),
+            "--expected-commit",
+            source_commit,
+            "--expected-top",
+            top,
+        ],
+        cwd=ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+
+
+@pytest.fixture(scope="module")
+def inspectable_source_archive(tmp_path_factory: pytest.TempPathFactory) -> dict[str, object]:
+    tmp_path = tmp_path_factory.mktemp("inspectable-source-archive")
+    repository, model_path, _files, source_commit, _secret_commit, _secret_blob = (
+        _create_source_repository(tmp_path)
+    )
+    output_path = tmp_path / "inspectable.zip"
+    result = _run_archive_script(
+        repository,
+        model_path,
+        output_path,
+        source_commit=source_commit,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    return {
+        "archive": output_path,
+        "manifest": repository / "packaging" / "stt_model_manifest.json",
+        "source_commit": source_commit,
+        "top": "InterviewAssistant-source-9.8.7-test",
+    }
+
+
+def _rewrite_archive(
+    source: Path,
+    destination: Path,
+    *,
+    omit: frozenset[str] = frozenset(),
+    replacements: dict[str, bytes] | None = None,
+    additions: tuple[tuple[zipfile.ZipInfo | str, bytes], ...] = (),
+) -> None:
+    replacements = replacements or {}
+    with zipfile.ZipFile(source) as incoming, zipfile.ZipFile(
+        destination,
+        "w",
+        compression=zipfile.ZIP_DEFLATED,
+    ) as outgoing:
+        for entry in incoming.infolist():
+            normalized = entry.filename.replace("\\", "/")
+            if normalized in omit:
+                continue
+            payload = replacements.get(normalized, incoming.read(entry))
+            outgoing.writestr(entry, payload)
+        for name, payload in additions:
+            outgoing.writestr(name, payload)
 
 
 def test_inno_setup_is_per_user_versioned_and_deletes_only_owned_upgrade_files() -> None:
@@ -780,6 +871,188 @@ def test_release_archive_inspector_requires_pinned_expected_commit() -> None:
     assert "--expected-commit" in source
     assert "required=True" in source
     assert "git rev-parse HEAD" not in source
+
+
+def test_release_secret_stream_scanner_detects_binary_private_key_across_chunks() -> None:
+    import scripts.scan_release_git_history as release_security
+
+    private_key_marker = b"-----BEGIN " + b"PRIVATE KEY-----"
+    payload = b"\x00\xffprefix" + private_key_marker + b"suffix\x00"
+
+    assert release_security.stream_contains_release_secret(
+        payload,
+        chunk_size=7,
+    )
+
+
+def test_archive_inspector_scans_every_regular_file(
+    inspectable_source_archive: dict[str, object],
+) -> None:
+    result = _run_archive_inspector(
+        inspectable_source_archive["archive"],  # type: ignore[arg-type]
+        inspectable_source_archive["manifest"],  # type: ignore[arg-type]
+        inspectable_source_archive["source_commit"],  # type: ignore[arg-type]
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    report = json.loads(result.stdout)
+    with zipfile.ZipFile(inspectable_source_archive["archive"]) as archive:  # type: ignore[arg-type]
+        expected_regular_files = sum(not entry.is_dir() for entry in archive.infolist())
+    assert report["regular_files_scanned"] == expected_regular_files
+    assert report["tracked_files_verified"] > 0
+
+
+def test_archive_inspector_rejects_extra_credential_without_echoing_it(
+    tmp_path: Path,
+    inspectable_source_archive: dict[str, object],
+) -> None:
+    fake_credential = "sk-" + ("C" * 32)
+    top = inspectable_source_archive["top"]
+    tampered = tmp_path / "extra-credential.zip"
+    _rewrite_archive(
+        inspectable_source_archive["archive"],  # type: ignore[arg-type]
+        tampered,
+        additions=((f"{top}/extra-data.txt", fake_credential.encode("ascii")),),
+    )
+
+    result = _run_archive_inspector(
+        tampered,
+        inspectable_source_archive["manifest"],  # type: ignore[arg-type]
+        inspectable_source_archive["source_commit"],  # type: ignore[arg-type]
+    )
+
+    assert result.returncode != 0
+    assert fake_credential not in result.stdout + result.stderr
+
+
+def test_archive_inspector_rejects_missing_tracked_file(
+    tmp_path: Path,
+    inspectable_source_archive: dict[str, object],
+) -> None:
+    top = inspectable_source_archive["top"]
+    tampered = tmp_path / "missing-tracked.zip"
+    _rewrite_archive(
+        inspectable_source_archive["archive"],  # type: ignore[arg-type]
+        tampered,
+        omit=frozenset({f"{top}/docs/guide.md"}),
+    )
+
+    result = _run_archive_inspector(
+        tampered,
+        inspectable_source_archive["manifest"],  # type: ignore[arg-type]
+        inspectable_source_archive["source_commit"],  # type: ignore[arg-type]
+    )
+
+    assert result.returncode != 0
+
+
+def test_archive_inspector_rejects_replaced_tracked_file(
+    tmp_path: Path,
+    inspectable_source_archive: dict[str, object],
+) -> None:
+    top = inspectable_source_archive["top"]
+    tampered = tmp_path / "replaced-tracked.zip"
+    tracked_name = f"{top}/interview_assistant/app.py"
+    _rewrite_archive(
+        inspectable_source_archive["archive"],  # type: ignore[arg-type]
+        tampered,
+        replacements={tracked_name: b"VALUE = 'replaced'\n"},
+    )
+
+    result = _run_archive_inspector(
+        tampered,
+        inspectable_source_archive["manifest"],  # type: ignore[arg-type]
+        inspectable_source_archive["source_commit"],  # type: ignore[arg-type]
+    )
+
+    assert result.returncode != 0
+
+
+def test_archive_inspector_accepts_legacy_checkout_eol_conversion(
+    tmp_path: Path,
+) -> None:
+    repository, model_path, _files, source_commit, _secret_commit, _secret_blob = (
+        _create_source_repository(tmp_path, include_gitattributes=False)
+    )
+    original_archive = tmp_path / "legacy-original.zip"
+    build_result = _run_archive_script(
+        repository,
+        model_path,
+        original_archive,
+        source_commit=source_commit,
+    )
+    assert build_result.returncode == 0, build_result.stdout + build_result.stderr
+    top = "InterviewAssistant-source-9.8.7-test"
+    tracked_name = f"{top}/interview_assistant/app.py"
+    with zipfile.ZipFile(original_archive) as archive:
+        original = archive.read(tracked_name)
+    normalized = original.replace(b"\r\n", b"\n")
+    legacy_archive = tmp_path / "legacy-checkout-eol.zip"
+    _rewrite_archive(
+        original_archive,
+        legacy_archive,
+        replacements={tracked_name: normalized.replace(b"\n", b"\r\n")},
+    )
+
+    result = _run_archive_inspector(
+        legacy_archive,
+        repository / "packaging" / "stt_model_manifest.json",
+        source_commit,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+@pytest.mark.parametrize("unsafe_kind", ["symlink", "traversal"])
+def test_archive_inspector_rejects_unsafe_entries(
+    tmp_path: Path,
+    inspectable_source_archive: dict[str, object],
+    unsafe_kind: str,
+) -> None:
+    top = inspectable_source_archive["top"]
+    if unsafe_kind == "symlink":
+        name: zipfile.ZipInfo | str = zipfile.ZipInfo(f"{top}/unsafe-link")
+        name.create_system = 3
+        name.external_attr = (stat.S_IFLNK | 0o777) << 16
+        payload = b"README.md"
+    else:
+        name = f"{top}/../escaped.txt"
+        payload = b"escape"
+    tampered = tmp_path / f"unsafe-{unsafe_kind}.zip"
+    _rewrite_archive(
+        inspectable_source_archive["archive"],  # type: ignore[arg-type]
+        tampered,
+        additions=((name, payload),),
+    )
+
+    result = _run_archive_inspector(
+        tampered,
+        inspectable_source_archive["manifest"],  # type: ignore[arg-type]
+        inspectable_source_archive["source_commit"],  # type: ignore[arg-type]
+    )
+
+    assert result.returncode != 0
+
+
+def test_extracted_archive_checkout_is_clean_for_all_autocrlf_modes(
+    tmp_path: Path,
+    inspectable_source_archive: dict[str, object],
+) -> None:
+    for mode in ("false", "true", "input"):
+        extracted = tmp_path / mode
+        with zipfile.ZipFile(inspectable_source_archive["archive"]) as archive:  # type: ignore[arg-type]
+            archive.extractall(extracted)
+        repository = extracted / str(inspectable_source_archive["top"])
+        _git("config", "core.autocrlf", mode, cwd=repository)
+        assert _git("status", "--porcelain=v1", cwd=repository).stdout == ""
+
+
+def test_release_gitattributes_make_text_checkout_deterministic() -> None:
+    source = GITATTRIBUTES_PATH.read_text(encoding="utf-8")
+
+    assert "* text=auto eol=lf" in source
+    for pattern in ("*.bin", "*.dll", "*.exe", "*.ico", "*.png", "*.pyd", "*.wav", "*.zip"):
+        assert f"{pattern} binary" in source
 
 
 def test_source_archive_rejects_unsupported_long_staging_without_leaking_staging(

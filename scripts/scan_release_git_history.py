@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import argparse
+import io
 import re
 import subprocess
 import sys
 from pathlib import Path
+from typing import BinaryIO
 
 
 PRIVATE_KEY_PATTERN = re.compile(
@@ -43,10 +45,27 @@ def _git(repository: Path, *arguments: str, text: bool = False) -> bytes | str:
     return process.stdout
 
 
-def _contains_secret(payload: bytes) -> bool:
+def contains_release_secret(payload: bytes) -> bool:
     return PRIVATE_KEY_PATTERN.search(payload) is not None or any(
         pattern.search(payload) is not None for pattern in TOKEN_PATTERNS
     )
+
+
+def stream_contains_release_secret(
+    source: bytes | BinaryIO,
+    *,
+    chunk_size: int = 1024 * 1024,
+) -> bool:
+    if chunk_size < 1:
+        raise ValueError("chunk_size must be positive")
+    stream = io.BytesIO(source) if isinstance(source, bytes) else source
+    overlap = b""
+    while chunk := stream.read(chunk_size):
+        payload = overlap + chunk
+        if contains_release_secret(payload):
+            return True
+        overlap = payload[-256:]
+    return False
 
 
 def _run_batch(repository: Path, arguments: list[str], payload: bytes) -> bytes:
@@ -122,7 +141,7 @@ def _scan_batch_contents(
         end = start + expected_size
         if end >= len(raw) or raw[end : end + 1] != b"\n":
             raise HistoryScanError
-        if _contains_secret(raw[start:end]):
+        if contains_release_secret(raw[start:end]):
             raise HistoryScanError
         offset = end + 1
     if offset != len(raw):

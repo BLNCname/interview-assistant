@@ -11,7 +11,7 @@
 ## Global Constraints
 
 - Installer contents are limited to the application runtime and manifest-pinned `large-v3-turbo` STT bundle.
-- Source ZIP is built from committed HEAD and includes standalone Git history and the same STT bundle.
+- Source ZIP is built from an explicit pinned commit and includes standalone Git history and the same STT bundle.
 - LM Studio, LM Link, LLM weights, MCP installation/configuration, tokens, and machine-specific settings are excluded.
 - No API key or credential value may be printed, archived, or committed.
 - Both artifacts use version `0.1.0`.
@@ -21,8 +21,8 @@
 ### Task 1: Verify permanent MCP services
 
 **Files:**
-- Read: `C:\Users\BLNCname\.lmstudio\mcp.json`
-- Read: `C:\Users\BLNCname\.local\bin\duckduckgo-mcp-server.exe`
+- Read: `%USERPROFILE%\.lmstudio\mcp.json`
+- Read: `%USERPROFILE%\.local\bin\duckduckgo-mcp-server.exe`
 
 **Interfaces:**
 - Consumes: sanitized `mcpServers.context7` URL/headers and `mcpServers.duckduckgo.command`.
