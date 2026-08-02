@@ -15,6 +15,7 @@ import pytest
 from PIL import Image
 
 from interview_assistant.windows_cuda import CudaRuntimeStatus
+from scripts.generate_brand_assets import FRAME_SIZES, build_brand_assets
 
 
 ROOT = Path(__file__).parents[2]
@@ -33,22 +34,43 @@ UV_LOCK_PATH = ROOT / "uv.lock"
 
 def test_liquid_glass_branding_assets_are_release_ready() -> None:
     with Image.open(BRAND_PNG_PATH) as logo:
-        assert logo.width == logo.height
-        assert logo.width >= 1024
-        assert not getattr(logo, "text", {})
+        assert logo.mode == "RGBA"
+        assert logo.width == logo.height == 935
+        assert logo.getchannel("A").getextrema() == (0, 255)
 
     with Image.open(BRAND_ICO_PATH) as icon:
-        frame_sizes = set(icon.ico.sizes())
+        assert set(icon.ico.sizes()) == {
+            (16, 16),
+            (24, 24),
+            (32, 32),
+            (48, 48),
+            (64, 64),
+            (128, 128),
+            (256, 256),
+        }
 
-    assert {
-        (16, 16),
-        (24, 24),
-        (32, 32),
-        (48, 48),
-        (64, 64),
-        (128, 128),
-        (256, 256),
-    } <= frame_sizes
+
+def test_brand_generator_preserves_transparency_and_writes_all_ico_frames(
+    tmp_path: Path,
+) -> None:
+    png_output = tmp_path / "logo.png"
+    ico_output = tmp_path / "logo.ico"
+    brand_cutout_path = (
+        ROOT / "assets" / "branding" / "interview-assistant-logo-cutout.png"
+    )
+
+    build_brand_assets(brand_cutout_path, png_output, ico_output)
+
+    with Image.open(png_output) as logo:
+        assert logo.mode == "RGBA"
+        assert logo.size == (935, 935)
+        assert logo.getchannel("A").getextrema() == (0, 255)
+        assert all(
+            logo.getchannel("A").getpixel(point) == 0
+            for point in ((0, 0), (934, 0), (0, 934), (934, 934))
+        )
+    with Image.open(ico_output) as icon:
+        assert set(icon.ico.sizes()) == {(size, size) for size in FRAME_SIZES}
 
 
 def test_stt_model_manifest_pins_exact_offline_bundle_metadata() -> None:
