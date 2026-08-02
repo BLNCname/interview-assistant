@@ -18,9 +18,5 @@ screenshots/
 .worktrees/
 interview_assistant.log
 
-# Instructor delivery artifacts kept visibly at the repository root.
-/InterviewAssistant.exe
+# Instructor delivery installer: visible in the folder, intentionally untracked.
 /InterviewAssistant-Setup-*-win64.exe
-/InterviewAssistant-source-*.zip
-/SHA256SUMS.txt
-/_internal/

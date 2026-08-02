@@ -1,76 +1,42 @@
-# Interview Assistant — начало проверки
+# Interview Assistant — Instructor Quick Start
 
-Это учебный проект по кибербезопасности. Готовые файлы для проверки лежат в
-корне репозитория, чтобы их не приходилось искать в каталогах сборки.
+This folder is the instructor handoff for an educational cybersecurity coursework project. Use
+the application only with informed participant consent.
 
-## Быстрый запуск
+## Install and run
 
-1. Рекомендуемый вариант: запустите
-   `InterviewAssistant-Setup-0.1.0-win64.exe`.
-2. Portable-вариант: запустите `InterviewAssistant.exe` прямо из этой папки.
-   Каталог `_internal` является обязательной частью portable-приложения и
-   должен оставаться рядом с EXE.
-3. Контрольные суммы установщика и исходного архива находятся в
-   `SHA256SUMS.txt`.
+1. Verify the installer before running it:
 
-Установщик и portable-копия содержат приложение, CUDA/cuDNN runtime и
-закреплённую STT-модель `large-v3-turbo`. Установщик не содержит LM Studio,
-LLM-модель, LM Link, MCP-серверы, API-токены или пользовательские настройки.
+   ```powershell
+   $expected = (Get-Content .\SHA256SUMS.txt).Split()[0]
+   $actual = (Get-FileHash .\InterviewAssistant-Setup-0.1.0-win64.exe -Algorithm SHA256).Hash
+   if ($actual -ne $expected) { throw "Installer checksum mismatch" }
+   ```
 
-## Исходный код
+2. Run `InterviewAssistant-Setup-0.1.0-win64.exe`.
+3. Windows SmartScreen may warn that the publisher is unknown because the academic installer is
+   not commercially signed. Continue only after the checksum matches.
+4. Install LM Studio 0.4 or newer separately, start its server on `127.0.0.1:1234`, and load a
+   compatible model. LM Link is optional and is needed only for inference on another computer.
+5. Start Interview Assistant, select the loopback device, microphone, and model, enter an LM Studio
+   token if authentication is enabled, and select **Run checks** before **Start**.
 
-Текущая папка является обычным Git-репозиторием с исходным кодом и тестами.
-Дополнительно рядом лежит автономный архив
-`InterviewAssistant-source-0.1.0.zip`: в нём сохранена очищенная Git-история и
-та же STT-модель. Корневой `config.yaml` в архиве — специально созданный
-безопасный шаблон с `null` вместо идентификаторов аудиоустройств, loopback-адресом
-LM Studio, пустыми полями моделей и всеми семью стандартными сочетаниями клавиш.
-Рабочая конфигурация машины, виртуальное окружение, кеши, логи и секреты в архив
-не копируются.
+The installer includes the application, dependencies, CUDA/cuDNN user-space runtime, and pinned
+STT model. It does not include the NVIDIA driver, LM Studio, LLM weights, MCP configuration, API
+tokens, or machine-specific settings.
 
-Для развёртывания среды разработки используйте команды из `README.md`:
+## Review or build the source
+
+Read [`README.md`](README.md) for complete system requirements, source setup, model download,
+tests, diagnostics, portable build, installer build, privacy boundaries, and troubleshooting.
+
+The reproducible source environment starts with:
 
 ```powershell
+uv lock --check
 uv sync --extra dev --extra cuda --frozen
-.venv\Scripts\python.exe -m pytest -q
+.\.venv\Scripts\python.exe -m pytest -q
 ```
 
-Для полноценной работы приложения проверяющий самостоятельно устанавливает и
-настраивает LM Studio/LM Link, загружает совместимую LLM и при необходимости
-добавляет MCP. LM Studio API-токен вводится в окне настроек и хранится в Windows
-Credential Manager.
-
-## Управление во время интервью
-
-Настраивайте все семь сочетаний в Settings → `Горячие клавиши`, а не редактируя
-YAML: форма проверяет комбинации и дубликаты, применяет корректные изменения
-без перезапуска и позволяет восстановить стандартные значения. Значения ниже —
-только видимые fallback-значения; после изменения используйте отображение в
-Settings.
-
-| Действие | Стандартное сочетание |
-|---|---|
-| Отправить текущий контекст | `Ctrl+Shift+Space` |
-| Подготовить снимок | `Ctrl+Shift+S` |
-| Пауза/возобновление распознавания | `Ctrl+Shift+P` |
-| Показать/скрыть Ribbon | `Ctrl+Shift+O` |
-| Изменить положение или размер Ribbon | `Ctrl+Shift+I` |
-| Включить поиск для следующего запроса | `Ctrl+Shift+W` |
-| Очистить ответ и историю | `Ctrl+Shift+C` |
-
-Ribbon по умолчанию пассивен и click-through: он не перехватывает мышь у окна
-под ним. Нажмите `Ctrl+Shift+I`, чтобы включить режим настройки и перемещать,
-менять размер, прокручивать или выделять текст; повторное нажатие возвращает
-пассивный режим. Скрытие Ribbon не останавливает аудио, распознавание или
-запросы.
-
-После снимка интерфейс показывает `Снимок создаётся`, затем `Снимок готов для
-следующего запроса`; при успешной отправке — `Снимок добавлен в запрос`.
-Непригодный или защищённый кадр не прикрепляется, а отправленный снимок
-одноразовый. Вопросы обнаруживаются по финальным фразам и из системного звука
-`Interviewer`, и с микрофона `You`; роли сохраняются, а общий дубль запускает
-один запрос. Микрофонное уточнение связывается с последним вопросом
-интервьюера, чтобы сформировать ответ кандидата по текущей теме.
-
-Сборки не подписаны коммерческим сертификатом, поэтому Windows SmartScreen
-может показать стандартное предупреждение для неизвестного издателя.
+`uv.lock` is the canonical dependency resolution. The ready-to-use installer is intentionally
+visible in the repository root but is not stored in Git history.
