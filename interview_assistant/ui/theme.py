@@ -31,6 +31,7 @@ def status_color(status: str) -> str:
     return {
         "ready": GRAPHITE.accent,
         "warning": GRAPHITE.warning,
+        "failed": GRAPHITE.error,
         "error": GRAPHITE.error,
     }.get(status, GRAPHITE.text_primary)
 
