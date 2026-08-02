@@ -937,6 +937,24 @@ def test_inventory_generator_requires_the_reviewed_top_level_node_types(tmp_path
         build_inventory(dist)
 
 
+@pytest.mark.parametrize(("empty_directory",), [("_internal",), ("_internal/empty",)])
+def test_inventory_generator_rejects_empty_directories(
+    tmp_path: Path,
+    empty_directory: str,
+) -> None:
+    from scripts.generate_release_inventory import build_inventory
+
+    dist = _write_inventory_generator_fixture(tmp_path)
+    empty_path = dist.joinpath(*empty_directory.split("/"))
+    if empty_path == dist / "_internal":
+        (empty_path / "runtime.dll").unlink()
+    else:
+        empty_path.mkdir()
+
+    with pytest.raises(ValueError, match="empty directory"):
+        build_inventory(dist)
+
+
 def test_inventory_generator_rejects_symbolic_links(tmp_path: Path) -> None:
     from scripts.generate_release_inventory import build_inventory
 
@@ -982,6 +1000,65 @@ def test_inventory_generator_rejects_symbolic_link_outputs(tmp_path: Path) -> No
     assert result.returncode != 0
     assert "symbolic links" in result.stderr
     assert not target.exists()
+
+
+def test_inventory_generator_rejects_reparse_point_output_ancestors(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import scripts.generate_release_inventory as release_inventory
+
+    output_parent = tmp_path / "output"
+    output_parent.mkdir()
+    output = output_parent / "inventory.json"
+    original_lstat = Path.lstat
+
+    class ReparsePoint:
+        st_file_attributes = stat.FILE_ATTRIBUTE_REPARSE_POINT
+        st_mode = stat.S_IFDIR
+
+    def lstat_with_reparse_point(path: Path) -> os.stat_result | ReparsePoint:
+        if path == output_parent:
+            return ReparsePoint()
+        return original_lstat(path)
+
+    monkeypatch.setattr(Path, "lstat", lstat_with_reparse_point)
+
+    with pytest.raises(ValueError, match="ancestors"):
+        release_inventory._check_existing_output_ancestors(output)
+
+
+def test_inventory_generator_rejects_symbolic_link_output_ancestors(tmp_path: Path) -> None:
+    dist = _write_inventory_generator_fixture(tmp_path)
+    target = tmp_path / "target"
+    target.mkdir()
+    output_parent = tmp_path / "output"
+    try:
+        output_parent.symlink_to(target, target_is_directory=True)
+    except OSError as error:
+        pytest.skip(f"Windows does not permit test symbolic links: {error}")
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(INVENTORY_GENERATOR_PATH),
+            "--dist",
+            str(dist),
+            "--output",
+            str(output_parent / "inventory.json"),
+            "--application",
+            "InterviewAssistant",
+        ],
+        cwd=ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+    assert result.returncode != 0
+    assert "ancestors" in result.stderr
+    assert not (target / "inventory.json").exists()
 
 
 def test_inventory_generator_cli_requires_reviewed_arguments_and_safe_output(tmp_path: Path) -> None:
@@ -1048,6 +1125,29 @@ def test_inventory_generator_cli_requires_reviewed_arguments_and_safe_output(tmp
     assert overwrite.returncode != 0
 
 
+def test_inventory_generator_exclusive_creation_does_not_clobber_a_racing_output(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import scripts.generate_release_inventory as release_inventory
+
+    dist = _write_inventory_generator_fixture(tmp_path)
+    output = tmp_path / "inventory.json"
+    original_open = os.open
+
+    def create_competing_output(path: str, flags: int, mode: int = 0o777) -> int:
+        if Path(path) == output:
+            output.write_bytes(b"competing inventory")
+        return original_open(path, flags, mode)
+
+    monkeypatch.setattr(release_inventory.os, "open", create_competing_output)
+
+    with pytest.raises(ValueError, match="already exists"):
+        release_inventory.write_inventory(dist, output, replace=False)
+
+    assert output.read_bytes() == b"competing inventory"
+
+
 def test_inventory_generator_cli_replaces_only_when_explicitly_requested(tmp_path: Path) -> None:
     dist = _write_inventory_generator_fixture(tmp_path)
     output = tmp_path / "inventory.json"
@@ -1074,6 +1174,7 @@ def test_inventory_generator_cli_replaces_only_when_explicitly_requested(tmp_pat
 
     assert result.returncode == 0, result.stdout + result.stderr
     assert output.read_text(encoding="utf-8").endswith("\n")
+    assert b"\r\n" not in output.read_bytes()
 
 
 def _run_dist_validator(

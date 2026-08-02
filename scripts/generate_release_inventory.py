@@ -6,6 +6,7 @@ import json
 import os
 import stat
 import sys
+import tempfile
 from pathlib import Path, PurePosixPath
 
 
@@ -80,6 +81,8 @@ def _walk_distribution(root: Path) -> list[Path]:
             entries = list(os.scandir(current))
         except OSError as error:
             raise ValueError("Distribution contains an unreadable directory") from error
+        if not entries:
+            raise ValueError("Distribution contains an empty directory")
         for entry in entries:
             path = Path(entry.path)
             info = _check_node(path)
@@ -121,6 +124,7 @@ def build_inventory(dist: Path) -> dict[str, object]:
 
 
 def _resolve_output(output: Path, root: Path) -> Path:
+    _check_existing_output_ancestors(output)
     try:
         resolved = output.resolve(strict=False)
     except OSError as error:
@@ -128,6 +132,28 @@ def _resolve_output(output: Path, root: Path) -> Path:
     if resolved.is_relative_to(root):
         raise ValueError("Inventory output must not be inside the distribution")
     return resolved
+
+
+def _check_existing_output_ancestors(output: Path) -> None:
+    current = output.absolute().parent
+    while True:
+        try:
+            info = current.lstat()
+        except FileNotFoundError:
+            pass
+        except OSError as error:
+            raise ValueError("Inventory output ancestors are not accessible") from error
+        else:
+            if current.is_symlink() or _is_reparse(info):
+                raise ValueError(
+                    "Inventory output refuses symbolic links or reparse points in its ancestors"
+                )
+            if not stat.S_ISDIR(info.st_mode):
+                raise ValueError("Inventory output ancestors must be directories")
+        parent = current.parent
+        if parent == current:
+            return
+        current = parent
 
 
 def _output_exists_and_is_safe(output: Path) -> bool:
@@ -144,23 +170,77 @@ def _output_exists_and_is_safe(output: Path) -> bool:
     return True
 
 
+def _inventory_bytes(inventory: dict[str, object]) -> bytes:
+    return (json.dumps(inventory, indent=2, ensure_ascii=False) + "\n").encode("utf-8")
+
+
+def _write_exclusively(output: Path, content: bytes) -> None:
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0)
+    try:
+        descriptor = os.open(str(output), flags, 0o666)
+    except FileExistsError as error:
+        raise ValueError("Inventory output already exists; pass --replace to overwrite it") from error
+    try:
+        with os.fdopen(descriptor, "wb") as destination:
+            destination.write(content)
+    except OSError as error:
+        raise ValueError("Inventory output could not be written") from error
+
+
+def _write_atomically(
+    output: Path,
+    resolved_output: Path,
+    root: Path,
+    content: bytes,
+) -> None:
+    temporary_path: Path | None = None
+    try:
+        descriptor, temporary_name = tempfile.mkstemp(
+            dir=resolved_output.parent,
+            prefix=f".{resolved_output.name}.",
+            suffix=".tmp",
+        )
+        temporary_path = Path(temporary_name)
+        with os.fdopen(descriptor, "wb") as destination:
+            destination.write(content)
+
+        revalidated_output = _resolve_output(output, root)
+        if revalidated_output != resolved_output:
+            raise ValueError("Inventory output changed during generation")
+        _output_exists_and_is_safe(output)
+        os.replace(temporary_path, resolved_output)
+        temporary_path = None
+    except OSError as error:
+        raise ValueError("Inventory output could not be written") from error
+    finally:
+        if temporary_path is not None:
+            try:
+                temporary_path.unlink()
+            except FileNotFoundError:
+                pass
+            except OSError:
+                pass
+
+
 def write_inventory(dist: Path, output: Path, *, replace: bool) -> None:
     root = _resolve_distribution_root(dist)
-    output_exists = _output_exists_and_is_safe(output)
     resolved_output = _resolve_output(output, root)
+    output_exists = _output_exists_and_is_safe(output)
     if output_exists:
         if not replace:
             raise ValueError("Inventory output already exists; pass --replace to overwrite it")
     elif not resolved_output.parent.is_dir():
         raise ValueError("Inventory output parent directory does not exist")
     inventory = build_inventory(root)
-    try:
-        resolved_output.write_text(
-            json.dumps(inventory, indent=2, ensure_ascii=False) + "\n",
-            encoding="utf-8",
-        )
-    except OSError as error:
-        raise ValueError("Inventory output could not be written") from error
+    content = _inventory_bytes(inventory)
+    if replace:
+        _write_atomically(output, resolved_output, root, content)
+        return
+
+    revalidated_output = _resolve_output(output, root)
+    if revalidated_output != resolved_output or _output_exists_and_is_safe(output):
+        raise ValueError("Inventory output already exists; pass --replace to overwrite it")
+    _write_exclusively(resolved_output, content)
 
 
 def main() -> int:
