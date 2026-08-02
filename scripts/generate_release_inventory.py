@@ -1,13 +1,17 @@
 from __future__ import annotations
 
 import argparse
+import ctypes
 import hashlib
 import json
 import os
+import secrets
 import stat
 import sys
 import tempfile
+from contextlib import contextmanager
 from pathlib import Path, PurePosixPath
+from typing import Iterator
 
 
 APPLICATION = "InterviewAssistant"
@@ -174,17 +178,176 @@ def _inventory_bytes(inventory: dict[str, object]) -> bytes:
     return (json.dumps(inventory, indent=2, ensure_ascii=False) + "\n").encode("utf-8")
 
 
+def _windows_parent_open_parameters() -> tuple[int, int, int, int]:
+    file_list_directory = 0x0001
+    file_share_read = 0x0001
+    file_share_write = 0x0002
+    open_existing = 3
+    file_flag_backup_semantics = 0x02000000
+    file_flag_open_reparse_point = 0x00200000
+    return (
+        file_list_directory,
+        file_share_read | file_share_write,
+        open_existing,
+        file_flag_backup_semantics | file_flag_open_reparse_point,
+    )
+
+
+def _open_windows_output_parent(directory: Path) -> int:
+    from ctypes import wintypes
+
+    class ByHandleFileInformation(ctypes.Structure):
+        _fields_ = [
+            ("dwFileAttributes", wintypes.DWORD),
+            ("ftCreationTime", wintypes.FILETIME),
+            ("ftLastAccessTime", wintypes.FILETIME),
+            ("ftLastWriteTime", wintypes.FILETIME),
+            ("dwVolumeSerialNumber", wintypes.DWORD),
+            ("nFileSizeHigh", wintypes.DWORD),
+            ("nFileSizeLow", wintypes.DWORD),
+            ("nNumberOfLinks", wintypes.DWORD),
+            ("nFileIndexHigh", wintypes.DWORD),
+            ("nFileIndexLow", wintypes.DWORD),
+        ]
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    create_file = kernel32.CreateFileW
+    create_file.argtypes = [
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        ctypes.c_void_p,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.HANDLE,
+    ]
+    create_file.restype = wintypes.HANDLE
+    access, sharing, creation, flags = _windows_parent_open_parameters()
+    handle = create_file(str(directory), access, sharing, None, creation, flags, None)
+    invalid_handle = ctypes.c_void_p(-1).value
+    if handle == invalid_handle:
+        raise ValueError("Inventory output parent cannot be locked")
+
+    close_handle = kernel32.CloseHandle
+    close_handle.argtypes = [wintypes.HANDLE]
+    close_handle.restype = wintypes.BOOL
+    try:
+        get_information = kernel32.GetFileInformationByHandle
+        get_information.argtypes = [wintypes.HANDLE, ctypes.POINTER(ByHandleFileInformation)]
+        get_information.restype = wintypes.BOOL
+        information = ByHandleFileInformation()
+        if not get_information(handle, ctypes.byref(information)):
+            raise ValueError("Inventory output parent cannot be inspected")
+        file_attribute_directory = 0x0010
+        file_attribute_reparse_point = 0x0400
+        if (
+            not information.dwFileAttributes & file_attribute_directory
+            or information.dwFileAttributes & file_attribute_reparse_point
+        ):
+            raise ValueError("Inventory output parent is unsafe")
+        return handle
+    except BaseException:
+        close_handle(handle)
+        raise
+
+
+def _close_windows_handle(handle: int) -> None:
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    close_handle = kernel32.CloseHandle
+    close_handle.argtypes = [wintypes.HANDLE]
+    close_handle.restype = wintypes.BOOL
+    if not close_handle(handle):
+        raise ValueError("Inventory output parent could not be unlocked")
+
+
+@contextmanager
+def _stable_output_parent(directory: Path) -> Iterator[int | None]:
+    if os.name == "nt":
+        handle = _open_windows_output_parent(directory)
+        try:
+            yield None
+        finally:
+            _close_windows_handle(handle)
+        return
+
+    required_flags = ("O_DIRECTORY", "O_NOFOLLOW")
+    if any(not hasattr(os, flag) for flag in required_flags):
+        raise ValueError("Inventory output parent cannot be locked safely")
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    try:
+        descriptor = os.open(str(directory), flags)
+    except OSError as error:
+        raise ValueError("Inventory output parent cannot be locked") from error
+    try:
+        if not stat.S_ISDIR(os.fstat(descriptor).st_mode):
+            raise ValueError("Inventory output parent is unsafe")
+        yield descriptor
+    finally:
+        os.close(descriptor)
+
+
+def _replace_file_windows(output: Path, replacement: Path) -> None:
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    replace_file = kernel32.ReplaceFileW
+    replace_file.argtypes = [
+        wintypes.LPCWSTR,
+        wintypes.LPCWSTR,
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+    ]
+    replace_file.restype = wintypes.BOOL
+    if not replace_file(str(output), str(replacement), None, 0, None, None):
+        error = ctypes.get_last_error()
+        raise OSError(error, "ReplaceFileW failed")
+
+
 def _write_exclusively(output: Path, content: bytes) -> None:
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0)
     try:
-        descriptor = os.open(str(output), flags, 0o666)
+        with _stable_output_parent(output.parent) as parent_descriptor:
+            if parent_descriptor is None:
+                descriptor = os.open(str(output), flags, 0o666)
+            else:
+                descriptor = os.open(output.name, flags, 0o666, dir_fd=parent_descriptor)
+            with os.fdopen(descriptor, "wb") as destination:
+                destination.write(content)
     except FileExistsError as error:
         raise ValueError("Inventory output already exists; pass --replace to overwrite it") from error
-    try:
-        with os.fdopen(descriptor, "wb") as destination:
-            destination.write(content)
     except OSError as error:
         raise ValueError("Inventory output could not be written") from error
+
+
+def _open_posix_temporary(parent_descriptor: int, output_name: str, mode: int) -> tuple[int, str]:
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    for _attempt in range(10):
+        temporary_name = f".{output_name}.{secrets.token_hex(16)}.tmp"
+        try:
+            descriptor = os.open(
+                temporary_name,
+                flags,
+                mode,
+                dir_fd=parent_descriptor,
+            )
+        except FileExistsError:
+            continue
+        return descriptor, temporary_name
+    raise ValueError("Inventory output temporary path could not be created")
+
+
+def _posix_target_mode(parent_descriptor: int, output_name: str) -> int | None:
+    try:
+        info = os.stat(output_name, dir_fd=parent_descriptor, follow_symlinks=False)
+    except FileNotFoundError:
+        return None
+    if not stat.S_ISREG(info.st_mode):
+        raise ValueError("Inventory output must be a regular file")
+    return stat.S_IMODE(info.st_mode)
 
 
 def _write_atomically(
@@ -194,28 +357,56 @@ def _write_atomically(
     content: bytes,
 ) -> None:
     temporary_path: Path | None = None
+    temporary_name: str | None = None
+    parent_descriptor: int | None = None
     try:
-        descriptor, temporary_name = tempfile.mkstemp(
-            dir=resolved_output.parent,
-            prefix=f".{resolved_output.name}.",
-            suffix=".tmp",
-        )
-        temporary_path = Path(temporary_name)
-        with os.fdopen(descriptor, "wb") as destination:
-            destination.write(content)
-
-        revalidated_output = _resolve_output(output, root)
-        if revalidated_output != resolved_output:
-            raise ValueError("Inventory output changed during generation")
-        _output_exists_and_is_safe(output)
-        os.replace(temporary_path, resolved_output)
-        temporary_path = None
+        with _stable_output_parent(resolved_output.parent) as parent_descriptor:
+            if parent_descriptor is None:
+                descriptor, temporary_name = tempfile.mkstemp(
+                    dir=resolved_output.parent,
+                    prefix=f".{resolved_output.name}.",
+                    suffix=".tmp",
+                )
+                temporary_path = Path(temporary_name)
+                with os.fdopen(descriptor, "wb") as destination:
+                    destination.write(content)
+                output_exists = _output_exists_and_is_safe(output)
+                if output_exists:
+                    _replace_file_windows(resolved_output, temporary_path)
+                else:
+                    os.replace(temporary_path, resolved_output)
+                temporary_path = None
+            else:
+                mode = _posix_target_mode(parent_descriptor, resolved_output.name)
+                descriptor, temporary_name = _open_posix_temporary(
+                    parent_descriptor,
+                    resolved_output.name,
+                    mode if mode is not None else 0o666,
+                )
+                with os.fdopen(descriptor, "wb") as destination:
+                    destination.write(content)
+                if mode is not None:
+                    os.chmod(temporary_name, mode, dir_fd=parent_descriptor)
+                os.replace(
+                    temporary_name,
+                    resolved_output.name,
+                    src_dir_fd=parent_descriptor,
+                    dst_dir_fd=parent_descriptor,
+                )
+                temporary_name = None
     except OSError as error:
         raise ValueError("Inventory output could not be written") from error
     finally:
         if temporary_path is not None:
             try:
                 temporary_path.unlink()
+            except FileNotFoundError:
+                pass
+            except OSError:
+                pass
+        if temporary_name is not None and os.name != "nt":
+            try:
+                os.unlink(temporary_name, dir_fd=parent_descriptor)
             except FileNotFoundError:
                 pass
             except OSError:

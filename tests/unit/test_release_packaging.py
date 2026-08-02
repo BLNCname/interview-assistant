@@ -1148,6 +1148,51 @@ def test_inventory_generator_exclusive_creation_does_not_clobber_a_racing_output
     assert output.read_bytes() == b"competing inventory"
 
 
+@pytest.mark.skipif(os.name != "nt", reason="requires Windows directory-handle semantics")
+def test_inventory_generator_windows_parent_handle_prevents_ancestor_swap(tmp_path: Path) -> None:
+    import scripts.generate_release_inventory as release_inventory
+
+    parent = tmp_path / "stable-output-parent"
+    parent.mkdir()
+    moved_parent = tmp_path / "moved-output-parent"
+
+    with release_inventory._stable_output_parent(parent):
+        with pytest.raises(PermissionError):
+            parent.rename(moved_parent)
+
+    parent.rename(moved_parent)
+    assert moved_parent.is_dir()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="requires Windows ReplaceFileW semantics")
+def test_inventory_generator_windows_replacement_helper_replaces_an_existing_file(tmp_path: Path) -> None:
+    import scripts.generate_release_inventory as release_inventory
+
+    output = tmp_path / "inventory.json"
+    replacement = tmp_path / "replacement.tmp"
+    output.write_bytes(b"reviewed inventory")
+    replacement.write_bytes(b"replacement inventory")
+
+    release_inventory._replace_file_windows(output, replacement)
+
+    assert output.read_bytes() == b"replacement inventory"
+    assert not replacement.exists()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX mode bits are not Windows ACLs")
+def test_inventory_generator_replacement_preserves_existing_posix_mode(tmp_path: Path) -> None:
+    import scripts.generate_release_inventory as release_inventory
+
+    dist = _write_inventory_generator_fixture(tmp_path)
+    output = tmp_path / "inventory.json"
+    output.write_bytes(b"reviewed inventory")
+    output.chmod(0o640)
+
+    release_inventory.write_inventory(dist, output, replace=True)
+
+    assert stat.S_IMODE(output.stat().st_mode) == 0o640
+
+
 def test_inventory_generator_cli_replaces_only_when_explicitly_requested(tmp_path: Path) -> None:
     dist = _write_inventory_generator_fixture(tmp_path)
     output = tmp_path / "inventory.json"
