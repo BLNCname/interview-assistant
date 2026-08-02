@@ -1,5 +1,11 @@
 # Release verification — 2026-08-02
 
+> **Instructor handoff note:** this report preserves historical evidence from the
+> original three-artifact release verification. The cleaned repository handoff
+> intentionally retains only `InterviewAssistant-Setup-0.1.0-win64.exe` as a
+> distributable binary. The current root `SHA256SUMS.txt` is authoritative for
+> the files delivered to the instructor.
+
 ## Scope and pinned source
 
 - Hotkey/question implementation commit: `bf09ca0724fd2becd0716c32ed74e5e10dd8addb`.
@@ -55,7 +61,7 @@
 - Sanitized release configuration, complete archive contents, history privacy,
   forbidden paths, secret patterns, and model hashes passed inspection.
 
-## Root handoff SHA-256
+## Historical three-artifact SHA-256 evidence
 
 | Artifact | Bytes | SHA-256 |
 |---|---:|---|
@@ -63,8 +69,9 @@
 | `InterviewAssistant-Setup-0.1.0-win64.exe` | 2,439,087,289 | `1FF2929C390880B911D92E3AC452E908A7DEEF9AE89CC43D9EFF43647F151E64` |
 | `InterviewAssistant-source-0.1.0.zip` | 1,495,506,423 | `9434F3EB4A28A635D7179D4C8FACCAB2BC93FD8E33FFA23ACD360C61763C1185` |
 
-`SHA256SUMS.txt` contains these three values and an independent recalculation
-verified all three lines.
+At the time of this verification, `SHA256SUMS.txt` contained these three values
+and an independent recalculation verified all three lines. The cleaned instructor
+handoff subsequently replaced that manifest with the installer-only checksum.
 
 ## Remaining acceptance boundary
 
