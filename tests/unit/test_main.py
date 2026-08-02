@@ -9,13 +9,18 @@ import main as main_module
 class _QtApplication:
     created_argv: list[str] | None = None
     window_icon: object | None = None
+    stylesheet: str | None = None
 
     def __init__(self, argv: list[str]) -> None:
         type(self).created_argv = argv
         type(self).window_icon = None
+        type(self).stylesheet = None
 
     def setWindowIcon(self, icon: object) -> None:
         type(self).window_icon = icon
+
+    def setStyleSheet(self, stylesheet: str) -> None:
+        type(self).stylesheet = stylesheet
 
 
 class _Icon:
@@ -191,6 +196,9 @@ def test_main_applies_project_branding_to_qapplication(
         / "branding"
         / "interview-assistant.ico"
     )
+    from interview_assistant.ui.theme import graphite_stylesheet
+
+    assert _QtApplication.stylesheet == graphite_stylesheet()
 
 
 class _SlowController(_Controller):

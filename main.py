@@ -15,6 +15,7 @@ from interview_assistant.composition import (
     default_config_path,
 )
 from interview_assistant.diagnostics.cli import run_no_gui_diagnostics
+from interview_assistant.ui.theme import graphite_stylesheet
 
 
 QEventLoop = cast(
@@ -89,6 +90,7 @@ def main(
     if icon.isNull():
         raise RuntimeError("Application branding icon could not be loaded")
     qt_app.setWindowIcon(icon)
+    qt_app.setStyleSheet(graphite_stylesheet())
     loop = QEventLoop(qt_app)
     asyncio.set_event_loop(loop)
     controller = create_production_controller(
