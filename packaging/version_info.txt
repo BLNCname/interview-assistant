@@ -17,11 +17,11 @@ VSVersionInfo(
           [
             StringStruct(u'CompanyName', u'Interview Assistant'),
             StringStruct(u'FileDescription', u'Consent-based local interview assistant'),
-            StringStruct(u'FileVersion', u'0.1.0'),
+            StringStruct(u'FileVersion', u'0.1.1'),
             StringStruct(u'InternalName', u'InterviewAssistant'),
             StringStruct(u'OriginalFilename', u'InterviewAssistant.exe'),
             StringStruct(u'ProductName', u'Interview Assistant'),
-            StringStruct(u'ProductVersion', u'0.1.0')
+            StringStruct(u'ProductVersion', u'0.1.1')
           ]
         )
       ]

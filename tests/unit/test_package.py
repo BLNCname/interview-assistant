@@ -4,10 +4,10 @@ from pathlib import Path
 ROOT = Path(__file__).parents[2]
 
 
-def test_package_exposes_version() -> None:
+def test_package_version() -> None:
     import interview_assistant
 
-    assert interview_assistant.__version__ == "0.1.0"
+    assert interview_assistant.__version__ == "0.1.1"
 
 
 def test_setuptools_discovers_only_the_root_package() -> None:

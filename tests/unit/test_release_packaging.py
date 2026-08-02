@@ -34,6 +34,20 @@ RELEASE_CONFIG_PATH = ROOT / "packaging" / "source_release_config.yaml"
 SPEC_PATH = ROOT / "packaging" / "interview_assistant.spec"
 APP_ID = "9CE7901A-56E8-49CB-A8ED-8D5CF4F97C7D"
 
+
+def test_release_version_defaults_are_consistent() -> None:
+    assert 'version = "0.1.1"' in (ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    assert "StringStruct(u'FileVersion', u'0.1.1')" in (
+        ROOT / "packaging" / "version_info.txt"
+    ).read_text(encoding="utf-8")
+    assert '#define AppVersion "0.1.1"' in ISS_PATH.read_text(encoding="utf-8")
+    assert '[string]$Version = "0.1.1"' in INSTALLER_SCRIPT_PATH.read_text(
+        encoding="utf-8"
+    )
+    assert '[string]$Version = "0.1.1"' in ARCHIVE_SCRIPT_PATH.read_text(
+        encoding="utf-8"
+    )
+
 EXPECTED_RELEASE_HOTKEYS = {
     "force_request": "ctrl+shift+space",
     "screenshot": "ctrl+shift+s",
