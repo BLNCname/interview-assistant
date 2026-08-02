@@ -40,3 +40,10 @@ def test_dark_title_bar_is_a_safe_noop_off_windows(monkeypatch, qtbot) -> None:
     monkeypatch.setattr(theme.sys, "platform", "linux")
 
     assert not apply_native_dark_title_bar(widget)
+
+
+def test_status_color_maps_readiness_semantics_with_safe_fallback() -> None:
+    assert theme.status_color("ready") == "#50DE73"
+    assert theme.status_color("warning") == "#F2C66D"
+    assert theme.status_color("error") == "#FB7185"
+    assert theme.status_color("failed") == "#F8FAF9"

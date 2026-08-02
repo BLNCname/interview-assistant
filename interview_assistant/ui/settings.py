@@ -5,7 +5,7 @@ from collections.abc import Callable, Mapping
 from typing import Literal, Protocol, cast
 
 from PyQt6.QtCore import QByteArray, QSettings, Qt, pyqtSignal
-from PyQt6.QtGui import QCloseEvent, QKeySequence
+from PyQt6.QtGui import QColor, QCloseEvent, QKeySequence, QShowEvent
 from PyQt6.QtWidgets import (
     QComboBox,
     QDoubleSpinBox,
@@ -37,6 +37,7 @@ from interview_assistant.config import (
     SearchConfig,
 )
 from interview_assistant.diagnostics.readiness import ReadinessReport
+from interview_assistant.ui.theme import apply_native_dark_title_bar, status_color
 from interview_assistant.utils.hotkeys import (
     DEFAULT_HOTKEY_BINDINGS,
     HotkeyAction,
@@ -274,14 +275,18 @@ class SettingsWindow(QMainWindow):
         models: tuple[SettingsChoice, ...],
     ) -> None:
         central = QWidget(self)
+        central.setObjectName("settingsRoot")
         root = QVBoxLayout(central)
         self.setCentralWidget(central)
 
         content = QHBoxLayout()
         self.navigation_list = QListWidget(central)
         self.navigation_list.setObjectName("settingsNavigation")
+        self.navigation_list.setAccessibleName("Settings navigation")
         self.navigation_list.addItems(SETTINGS_PAGE_TITLES)
         self.page_stack = QStackedWidget(central)
+        self.page_stack.setObjectName("settingsPages")
+        self.page_stack.setAccessibleName("Settings pages")
 
         self.general_page = self._build_general_page()
         self.models_page = self._build_models_page(models)
@@ -309,23 +314,12 @@ class SettingsWindow(QMainWindow):
         self.save_button = QPushButton("Save", central)
         self.readiness_button = QPushButton("Run checks", central)
         self.start_button = QPushButton("Start", central)
+        self.save_button.setObjectName("secondaryButton")
+        self.readiness_button.setObjectName("secondaryButton")
         self.start_button.setObjectName("startButton")
-        self.start_button.setStyleSheet(
-            """
-            QPushButton#startButton[readyToStart="true"] {
-                background-color: #343A40;
-                color: #FFFFFF;
-                border: 1px solid #272B30;
-                padding: 4px 14px;
-            }
-            QPushButton#startButton[readyToStart="true"]:hover {
-                background-color: #41474E;
-            }
-            QPushButton#startButton[readyToStart="true"]:pressed {
-                background-color: #272B30;
-            }
-            """
-        )
+        self.save_button.setAccessibleName("Save settings")
+        self.readiness_button.setAccessibleName("Run readiness checks")
+        self.start_button.setAccessibleName("Start interview assistant")
         self._set_start_available(
             False,
             "Run readiness checks before starting.",
@@ -342,7 +336,11 @@ class SettingsWindow(QMainWindow):
     def _build_general_page(self) -> QWidget:
         page = QWidget()
         layout = QVBoxLayout(page)
+        page_title = QLabel("General", page)
+        page_title.setObjectName("settingsPageTitle")
+        layout.addWidget(page_title)
         general = QGroupBox("General", page)
+        general.setObjectName("settingsCard")
         form = QFormLayout(general)
 
         self.search_mode_combo = QComboBox(general)
@@ -367,7 +365,11 @@ class SettingsWindow(QMainWindow):
     def _build_models_page(self, models: tuple[SettingsChoice, ...]) -> QWidget:
         page = QWidget()
         layout = QVBoxLayout(page)
+        page_title = QLabel("Models", page)
+        page_title.setObjectName("settingsPageTitle")
+        layout.addWidget(page_title)
         models_group = QGroupBox("Models", page)
+        models_group.setObjectName("settingsCard")
         form = QFormLayout(models_group)
 
         self.text_model_combo = self._choice_combo(
@@ -399,7 +401,11 @@ class SettingsWindow(QMainWindow):
     ) -> QWidget:
         page = QWidget()
         layout = QVBoxLayout(page)
+        page_title = QLabel("Audio", page)
+        page_title.setObjectName("settingsPageTitle")
+        layout.addWidget(page_title)
         audio = QGroupBox("Audio", page)
+        audio.setObjectName("settingsCard")
         form = QFormLayout(audio)
 
         self.system_device_combo = self._choice_combo(
@@ -433,6 +439,9 @@ class SettingsWindow(QMainWindow):
     def _build_hotkeys_page(self) -> QWidget:
         page = QWidget()
         layout = QVBoxLayout(page)
+        page_title = QLabel("Hotkeys", page)
+        page_title.setObjectName("settingsPageTitle")
+        layout.addWidget(page_title)
         layout.addWidget(self._build_hotkey_group(page))
         layout.addStretch(1)
         return page
@@ -440,7 +449,11 @@ class SettingsWindow(QMainWindow):
     def _build_appearance_page(self) -> QWidget:
         page = QWidget()
         layout = QVBoxLayout(page)
+        page_title = QLabel("Appearance", page)
+        page_title.setObjectName("settingsPageTitle")
+        layout.addWidget(page_title)
         appearance = QGroupBox("Appearance", page)
+        appearance.setObjectName("settingsCard")
         form = QFormLayout(appearance)
 
         self.opacity_spin = QDoubleSpinBox(appearance)
@@ -461,8 +474,12 @@ class SettingsWindow(QMainWindow):
     def _build_diagnostics_page(self) -> QWidget:
         page = QWidget()
         layout = QVBoxLayout(page)
+        page_title = QLabel("Diagnostics", page)
+        page_title.setObjectName("settingsPageTitle")
+        layout.addWidget(page_title)
 
         readiness = QGroupBox("Readiness", page)
+        readiness.setObjectName("settingsCard")
         readiness_layout = QVBoxLayout(readiness)
         self.readiness_status_label = QLabel("Run readiness checks before starting", readiness)
         self.readiness_status_label.setTextFormat(Qt.TextFormat.PlainText)
@@ -487,6 +504,7 @@ class SettingsWindow(QMainWindow):
 
     def _build_hotkey_group(self, parent: QWidget) -> QGroupBox:
         hotkeys = QGroupBox("Hotkeys", parent)
+        hotkeys.setObjectName("settingsCard")
         layout = QGridLayout(hotkeys)
         layout.setColumnStretch(1, 1)
         self.hotkey_edits: dict[HotkeyAction, QKeySequenceEdit] = {}
@@ -700,6 +718,9 @@ class SettingsWindow(QMainWindow):
             for column, value in enumerate(values):
                 item = QTableWidgetItem(value)
                 item.setToolTip(value)
+                if column == 1:
+                    item.setData(Qt.ItemDataRole.UserRole, result.status)
+                    item.setForeground(QColor(status_color(result.status)))
                 self.readiness_table.setItem(row, column, item)
         if not report.can_start:
             blocking_count = sum(
@@ -809,6 +830,13 @@ class SettingsWindow(QMainWindow):
             self.close()
         finally:
             self._controller_close = False
+
+    def showEvent(self, event: QShowEvent | None) -> None:
+        super().showEvent(event)
+        try:
+            apply_native_dark_title_bar(self)
+        except Exception:
+            pass
 
     def closeEvent(self, event: QCloseEvent | None) -> None:
         self._settings.setValue(self.GEOMETRY_KEY, self.saveGeometry())

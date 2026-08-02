@@ -6,11 +6,17 @@ import re
 import pytest
 from PyQt6.QtCore import QByteArray, QSettings, QSize, Qt
 from PyQt6.QtGui import QKeySequence
-from PyQt6.QtWidgets import QGroupBox, QPushButton
+from PyQt6.QtWidgets import QGroupBox, QLabel, QPushButton
 
+import interview_assistant.ui.settings as settings_ui
 from interview_assistant.config import AppConfig, HotkeysConfig
 from interview_assistant.diagnostics.readiness import CheckResult, ReadinessReport
-from interview_assistant.ui.settings import SettingsBinding, SettingsChoice, SettingsWindow
+from interview_assistant.ui.settings import (
+    SETTINGS_PAGE_TITLES,
+    SettingsBinding,
+    SettingsChoice,
+    SettingsWindow,
+)
 from interview_assistant.utils.hotkeys import DEFAULT_HOTKEY_BINDINGS, HotkeyAction
 
 
@@ -115,6 +121,82 @@ def test_settings_uses_approved_a1_sidebar_pages(qtbot, tmp_path) -> None:
     ]
     assert window.page_stack.count() == 6
     assert window.page_stack.currentWidget() is window.general_page
+
+
+def test_settings_exposes_graphite_object_names_and_persistent_actions(
+    qtbot,
+    tmp_path,
+) -> None:
+    window, _, _, _ = _window(qtbot, tmp_path)
+
+    assert window.centralWidget().objectName() == "settingsRoot"
+    assert window.navigation_list.objectName() == "settingsNavigation"
+    assert window.page_stack.objectName() == "settingsPages"
+    assert window.navigation_list.accessibleName() == "Settings navigation"
+    assert window.page_stack.accessibleName() == "Settings pages"
+    assert window.save_button.objectName() == "secondaryButton"
+    assert window.readiness_button.objectName() == "secondaryButton"
+    assert window.start_button.objectName() == "startButton"
+    assert window.save_button.accessibleName() == "Save settings"
+    assert window.readiness_button.accessibleName() == "Run readiness checks"
+    assert window.start_button.accessibleName() == "Start interview assistant"
+    assert window.save_button.parentWidget() is window.centralWidget()
+    assert window.readiness_button.parentWidget() is window.centralWidget()
+    assert window.start_button.parentWidget() is window.centralWidget()
+
+    for title, page in zip(
+        SETTINGS_PAGE_TITLES,
+        (
+            window.general_page,
+            window.models_page,
+            window.audio_page,
+            window.hotkeys_page,
+            window.appearance_page,
+            window.diagnostics_page,
+        ),
+        strict=True,
+    ):
+        assert page.findChild(QLabel, "settingsPageTitle").text() == title
+        assert len(page.findChildren(QGroupBox, "settingsCard")) == 1
+
+
+def test_settings_show_applies_native_title_bar_without_changing_window(
+    monkeypatch,
+    qtbot,
+    tmp_path,
+) -> None:
+    window, _, _, _ = _window(qtbot, tmp_path)
+    calls = []
+
+    monkeypatch.setattr(
+        settings_ui,
+        "apply_native_dark_title_bar",
+        lambda widget: calls.append((widget, widget.geometry())),
+    )
+
+    window.show()
+    qtbot.waitUntil(window.isVisible)
+
+    assert calls == [(window, window.geometry())]
+    assert window.isVisible()
+
+
+def test_settings_show_contains_native_title_bar_helper_failure(
+    monkeypatch,
+    qtbot,
+    tmp_path,
+) -> None:
+    window, _, _, _ = _window(qtbot, tmp_path)
+
+    def fail_native_hook(_widget) -> None:
+        raise RuntimeError("DWM unavailable")
+
+    monkeypatch.setattr(settings_ui, "apply_native_dark_title_bar", fail_native_hook)
+
+    window.show()
+    qtbot.waitUntil(window.isVisible)
+
+    assert window.isVisible()
 
 
 def test_settings_page_switching_preserves_unsaved_values(qtbot, tmp_path) -> None:
@@ -438,9 +520,21 @@ def test_readiness_failure_disables_start_but_warning_is_visible_and_permits_it(
     assert window.start_button.property("readyToStart") is True
     assert window.readiness_status_label.text() == ("Readiness: ready — 2 non-blocking warnings")
     assert "ready to start" in window.start_button.toolTip().casefold()
-    assert "#343a40" in window.start_button.styleSheet().casefold()
+    assert window.start_button.styleSheet() == ""
     qtbot.mouseClick(window.start_button, Qt.MouseButton.LeftButton)
     assert starts == [True]
+
+
+def test_readiness_rows_receive_semantic_status_metadata(qtbot, tmp_path) -> None:
+    window, _, _, _ = _window(qtbot, tmp_path)
+
+    window.set_readiness_report(_startable_warning_report())
+
+    statuses = {
+        window.readiness_table.item(row, 1).data(Qt.ItemDataRole.UserRole)
+        for row in range(window.readiness_table.rowCount())
+    }
+    assert statuses == {"ready", "warning"}
 
 
 def test_readiness_warning_surfaces_diagnostics_before_enabling_start(

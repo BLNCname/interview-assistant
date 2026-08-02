@@ -26,6 +26,15 @@ class GraphitePalette:
 GRAPHITE = GraphitePalette()
 
 
+def status_color(status: str) -> str:
+    """Return the Graphite text color for a readiness status."""
+    return {
+        "ready": GRAPHITE.accent,
+        "warning": GRAPHITE.warning,
+        "error": GRAPHITE.error,
+    }.get(status, GRAPHITE.text_primary)
+
+
 def graphite_stylesheet() -> str:
     """Return the shared application stylesheet for native Qt widgets."""
     return f"""
@@ -40,8 +49,34 @@ def graphite_stylesheet() -> str:
         color: {GRAPHITE.text_primary};
         background: transparent;
     }}
+    QLabel#settingsPageTitle {{
+        color: {GRAPHITE.text_primary};
+        font-size: 20px;
+        font-weight: 600;
+        padding: 2px 0 6px 2px;
+    }}
     QLabel[readinessStatus="warning"] {{ color: {GRAPHITE.warning}; }}
     QLabel[readinessStatus="error"] {{ color: {GRAPHITE.error}; }}
+
+    QStackedWidget#settingsPages {{
+        background: transparent;
+        border: 0;
+    }}
+
+    QGroupBox#settingsCard {{
+        color: {GRAPHITE.text_primary};
+        background: #1D201F;
+        border: 1px solid rgba(255, 255, 255, 30);
+        border-radius: 8px;
+        margin-top: 12px;
+        padding: 12px;
+    }}
+    QGroupBox#settingsCard::title {{
+        color: {GRAPHITE.text_secondary};
+        subcontrol-origin: margin;
+        left: 12px;
+        padding: 0 4px;
+    }}
 
     QListWidget#settingsNavigation {{
         background: #121514;
@@ -63,7 +98,8 @@ def graphite_stylesheet() -> str:
         border-left: 2px solid {GRAPHITE.accent};
     }}
 
-    QLineEdit, QComboBox, QPlainTextEdit, QTextEdit {{
+    QLineEdit, QComboBox, QPlainTextEdit, QTextEdit,
+    QSpinBox, QDoubleSpinBox, QKeySequenceEdit {{
         color: {GRAPHITE.text_primary};
         background: #202322;
         border: 1px solid rgba(255, 255, 255, 38);
@@ -79,11 +115,13 @@ def graphite_stylesheet() -> str:
         selection-background-color: rgba(80, 222, 115, 48);
     }}
     QLineEdit:focus, QComboBox:focus, QPlainTextEdit:focus, QTextEdit:focus,
+    QSpinBox:focus, QDoubleSpinBox:focus, QKeySequenceEdit:focus,
     QListWidget:focus, QTableWidget:focus, QPushButton:focus {{
         border: 1px solid {GRAPHITE.accent};
     }}
     QLineEdit:disabled, QComboBox:disabled, QPlainTextEdit:disabled,
-    QTextEdit:disabled {{
+    QTextEdit:disabled, QSpinBox:disabled, QDoubleSpinBox:disabled,
+    QKeySequenceEdit:disabled {{
         color: #718078;
         background: #1A1D1C;
     }}
@@ -101,6 +139,12 @@ def graphite_stylesheet() -> str:
         color: #718078;
         background: #1A1D1C;
         border-color: rgba(255, 255, 255, 20);
+    }}
+    QPushButton#secondaryButton {{
+        background: #252927;
+    }}
+    QPushButton#secondaryButton:hover {{
+        background: #303532;
     }}
     QPushButton#startButton[readyToStart="true"] {{
         background: {GRAPHITE.accent};
