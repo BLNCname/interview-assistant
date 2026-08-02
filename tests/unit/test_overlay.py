@@ -1,10 +1,12 @@
 import math
+from pathlib import Path
 from unittest.mock import Mock
 
 import pytest
-from PyQt6.QtCore import QEvent, QPointF, QSettings, Qt, QUrl
+from PyQt6.QtCore import QEvent, QPointF, QSettings, QSize, Qt, QUrl
 from PyQt6.QtGui import (
     QFont,
+    QIcon,
     QMouseEvent,
     QPalette,
     QShowEvent,
@@ -12,7 +14,7 @@ from PyQt6.QtGui import (
     QTextDocument,
     QTextFormat,
 )
-from PyQt6.QtWidgets import QApplication, QLabel, QStyle, QTextBrowser, QWidget
+from PyQt6.QtWidgets import QApplication, QLabel, QSizePolicy, QStyle, QTextBrowser, QWidget
 
 from interview_assistant.config import OverlayConfig
 from interview_assistant.events import EventBus
@@ -27,7 +29,10 @@ from interview_assistant.ui.overlay import (
     _STATUS_CHIP_RGB,
     LiquidRibbon,
 )
+from interview_assistant.ui.theme import GRAPHITE
 from interview_assistant.ui.windows_affinity import AffinityResult, WDA_EXCLUDEFROMCAPTURE
+
+BRAND_ICO_PATH = Path(__file__).parents[2] / "assets" / "branding" / "interview-assistant.ico"
 
 
 @pytest.fixture(autouse=True)
@@ -318,6 +323,44 @@ def test_default_ribbon_uses_approved_graphite_palette(qtbot) -> None:
     assert ribbon.effective_window_opacity == 0.88
     assert ribbon.surface.gradient_top_rgb == (52, 54, 58)
     assert ribbon.surface.gradient_bottom_rgb == (37, 38, 42)
+
+
+def test_ribbon_uses_shared_graphite_palette_and_english_edit_copy(qtbot) -> None:
+    ribbon = LiquidRibbon(EventBus(), settings=None)
+    qtbot.addWidget(ribbon)
+
+    assert ribbon.surface.gradient_top_rgb == GRAPHITE.surface_top
+    assert ribbon.surface.gradient_bottom_rgb == GRAPHITE.surface_bottom
+    assert ribbon.edit_mode_label.text() == "Edit mode"
+    assert "#50DE73" in ribbon.edit_mode_label.styleSheet()
+
+
+def test_ribbon_header_uses_application_icon_when_available(qtbot) -> None:
+    QApplication.instance().setWindowIcon(QIcon(str(BRAND_ICO_PATH)))
+    ribbon = LiquidRibbon(EventBus(), settings=None)
+    qtbot.addWidget(ribbon)
+
+    assert not ribbon.brand_icon_label.pixmap().isNull()
+    assert ribbon.brand_icon_label.maximumSize() == QSize(20, 20)
+
+
+def test_ribbon_brand_icon_does_not_consume_mouse_input(qtbot) -> None:
+    ribbon = LiquidRibbon(EventBus(), settings=None)
+    qtbot.addWidget(ribbon)
+
+    assert ribbon.brand_icon_label.testAttribute(
+        Qt.WidgetAttribute.WA_TransparentForMouseEvents
+    )
+
+
+def test_ribbon_brand_icon_yields_horizontal_space(qtbot) -> None:
+    ribbon = LiquidRibbon(EventBus(), settings=None)
+    qtbot.addWidget(ribbon)
+
+    assert (
+        ribbon.brand_icon_label.sizePolicy().horizontalPolicy()
+        is QSizePolicy.Policy.Ignored
+    )
 
 
 def test_settings_opacity_maps_to_distinct_monotonic_effective_values(qtbot) -> None:

@@ -28,6 +28,7 @@ from PyQt6.QtGui import (
     QPainter,
     QPainterPath,
     QPen,
+    QPixmap,
     QRegion,
     QResizeEvent,
     QShowEvent,
@@ -53,6 +54,7 @@ from interview_assistant.ui.markdown import (
     render_safe_markdown,
     restore_scroll_state,
 )
+from interview_assistant.ui.theme import GRAPHITE
 from interview_assistant.ui.windows_affinity import (
     AffinityApplier,
     AffinityResult,
@@ -63,11 +65,11 @@ from interview_assistant.ui.windows_affinity import (
 _LONG_UNBROKEN_TOKEN = re.compile(r"\S{65,}")
 
 _RGB = tuple[int, int, int]
-_SURFACE_TOP_RGB: _RGB = (52, 54, 58)
-_SURFACE_BOTTOM_RGB: _RGB = (37, 38, 42)
+_SURFACE_TOP_RGB = GRAPHITE.surface_top
+_SURFACE_BOTTOM_RGB = GRAPHITE.surface_bottom
 _STATUS_CHIP_RGB: _RGB = (255, 255, 255)
 _STATUS_CHIP_ALPHA = 8
-_MODEL_CHIP_RGB: _RGB = (125, 211, 252)
+_MODEL_CHIP_RGB: _RGB = (80, 222, 115)
 _MODEL_CHIP_ALPHA = 12
 _ANSWER_BACKGROUND_RGB: _RGB = (12, 12, 14)
 _ANSWER_BACKGROUND_ALPHA = 112
@@ -549,6 +551,20 @@ class LiquidRibbon(QMainWindow):
         header_layout = QHBoxLayout(self.header_widget)
         header_layout.setContentsMargins(0, 0, 0, 0)
         header_layout.setSpacing(7)
+
+        self.brand_icon_label = QLabel(self.header_widget)
+        self.brand_icon_label.setMaximumSize(20, 20)
+        self.brand_icon_label.setSizePolicy(
+            QSizePolicy.Policy.Ignored,
+            QSizePolicy.Policy.Preferred,
+        )
+        self.brand_icon_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        app = QApplication.instance()
+        pixmap = app.windowIcon().pixmap(20, 20) if app is not None else QPixmap()
+        self.brand_icon_label.setPixmap(pixmap)
+        self.brand_icon_label.setVisible(not pixmap.isNull())
+        header_layout.addWidget(self.brand_icon_label)
+
         self.status_dot = _StatusDot(self.header_widget)
         header_layout.addWidget(self.status_dot)
 
@@ -567,15 +583,15 @@ class LiquidRibbon(QMainWindow):
         self.model_chip.setStyleSheet(
             f"QLabel {{ color: {model_text}; "
             f"background: {_rgba_css(_MODEL_CHIP_RGB, _MODEL_CHIP_ALPHA)}; "
-            "border: 1px solid rgba(125, 211, 252, 46); border-radius: 9px; "
+            "border: 1px solid rgba(80, 222, 115, 46); border-radius: 9px; "
             "padding: 2px 7px; }"
         )
         header_layout.addWidget(self.model_chip)
 
-        self.edit_mode_label = QLabel("Режим настройки", self.header_widget)
+        self.edit_mode_label = QLabel("Edit mode", self.header_widget)
         self.edit_mode_label.setTextFormat(Qt.TextFormat.PlainText)
         self.edit_mode_label.setStyleSheet(
-            "QLabel { color: #50DE73; border: 1px solid #50DE73; "
+            f"QLabel {{ color: {GRAPHITE.accent}; border: 1px solid {GRAPHITE.accent}; "
             "border-radius: 9px; padding: 2px 7px; font-size: 12px; }"
         )
         self.edit_mode_label.hide()
