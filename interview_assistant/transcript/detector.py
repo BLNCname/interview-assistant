@@ -87,10 +87,14 @@ _EXPLICIT_REQUEST = re.compile(
 _INDIRECT_REQUEST_PREFIX = re.compile(
     r"^(?:(?:please|пожалуйста)[,\s]+)?(?:"
     r"i(?:'d|\s+would)\s+like\s+to\s+hear\s+your\s+opinion\s+(?:on|about)\b|"
+    r"i(?:'d|\s+would)\s+like\s+your\s+view(?:\s+(?:on|about))?\b|"
+    r"let(?:'s|’s)\s+discuss\b|"
     r"what(?:'s|\s+is)\s+your\s+view\s+(?:on|about)\b|"
     r"could\s+you\s+elaborate\s+(?:on|about)\b|"
     r"walk\s+me\s+through\b|"
     r"хотелось\s+бы\s+услышать\s+(?:(?:ваше|вашу)\s+)?мнение\s+(?:о|про)\b|"
+    r"интересно\s+ваше\s+мнение(?:\s+(?:о|об|про))?\b|"
+    r"давайте\s+обсудим\b|"
     r"как\s+вы\s+считаете\b|"
     r"что\s+вы\s+думаете\s+(?:о|про)\b|"
     r"раскройте\s+тему\b|"
@@ -98,6 +102,7 @@ _INDIRECT_REQUEST_PREFIX = re.compile(
     r")",
     re.IGNORECASE,
 )
+_TOPIC_SEPARATOR = re.compile(r"[\s,:—-]{0,4}")
 _SCREEN_OBJECT = re.compile(
     r"\b(?:screenshot|screen|image|picture|diagram|code\s+shown|"
     r"скриншот\w*|экран\w*|изображени\w*|картин\w*|диаграмм\w*|"
@@ -332,7 +337,9 @@ def _stem_english(token: str) -> str:
 def _classify(text: str) -> AutoQuestionKind | None:
     question_like = "?" in text or bool(_INTERROGATIVE.search(text))
     indirect_prefix = _INDIRECT_REQUEST_PREFIX.search(text)
-    indirect_request = bool(indirect_prefix and _LEXICAL_TOKEN.search(text, indirect_prefix.end()))
+    indirect_request = bool(
+        indirect_prefix and _has_immediate_lexical_topic(text, indirect_prefix.end())
+    )
     if indirect_prefix is not None and not indirect_request:
         return None
     if not question_like and not _EXPLICIT_REQUEST.search(text) and not indirect_request:
@@ -350,3 +357,10 @@ def _classify(text: str) -> AutoQuestionKind | None:
     if question_like or indirect_request or _THEORY_IMPERATIVE.search(text):
         return "theory"
     return None
+
+
+def _has_immediate_lexical_topic(text: str, prefix_end: int) -> bool:
+    remainder = text[prefix_end:]
+    separator = _TOPIC_SEPARATOR.match(remainder)
+    assert separator is not None
+    return _LEXICAL_TOKEN.match(remainder, separator.end()) is not None

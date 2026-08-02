@@ -124,6 +124,22 @@ def test_indirect_ru_en_interview_requests_trigger(text: str) -> None:
 @pytest.mark.parametrize(
     "text",
     [
+        "Интересно ваше мнение о CAP theorem",
+        "Давайте обсудим optimistic locking",
+        "I'd like your view on event sourcing",
+        "Let's discuss database indexes",
+    ],
+)
+def test_bounded_topical_ru_en_request_families_trigger(text: str) -> None:
+    result = QuestionDetector(cooldown_seconds=0).detect(AudioSource.SYSTEM, text)
+
+    assert result is not None
+    assert result.kind == "theory"
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
         "У него интересное мнение о микросервисах",
         "В документации встречается фраза как вы считаете",
         "My opinion on caching changed last year",
@@ -149,6 +165,25 @@ def test_indirect_keywords_inside_narration_do_not_trigger(text: str) -> None:
     ],
 )
 def test_indirect_request_without_lexical_topic_does_not_trigger(text: str) -> None:
+    assert QuestionDetector().detect(AudioSource.SYSTEM, text) is None
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Интересно ваше мнение",
+        "Давайте обсудим...",
+        "I'd like your view?!",
+        "Let's discuss ___",
+        "В заметках написано: давайте обсудим Redis",
+        "The guide says let's discuss database indexes",
+        "Неинтересно ваше мнение о Redis",
+        "I'd like your viewpoint on caching",
+        "Let's discuss... Redis is already covered",
+        "Интересно ваше мнение... Redis мы уже обсудили",
+    ],
+)
+def test_topical_request_families_require_anchored_immediate_topic(text: str) -> None:
     assert QuestionDetector().detect(AudioSource.SYSTEM, text) is None
 
 

@@ -9,7 +9,7 @@ from PyQt6.QtGui import QKeySequence
 from interview_assistant.config import AppConfig, HotkeysConfig
 from interview_assistant.diagnostics.readiness import CheckResult, ReadinessReport
 from interview_assistant.ui.settings import SettingsBinding, SettingsChoice, SettingsWindow
-from interview_assistant.utils.hotkeys import HotkeyAction
+from interview_assistant.utils.hotkeys import DEFAULT_HOTKEY_BINDINGS, HotkeyAction
 
 
 class FakeSecretStore:
@@ -136,6 +136,150 @@ def test_valid_hotkeys_are_persisted_with_other_settings(qtbot, tmp_path) -> Non
     assert window.save()
 
     assert binding.config.hotkeys.overlay_visibility == "ctrl+alt+f9"
+
+
+@pytest.mark.parametrize("sequence", ["", "Ctrl", "Ctrl++"])
+def test_invalid_hotkey_identifies_its_settings_row(
+    qtbot,
+    tmp_path,
+    sequence: str,
+) -> None:
+    window, binding, _, _ = _window(qtbot, tmp_path)
+    action = HotkeyAction.FORCE_REQUEST
+    window.hotkey_edits[action].setKeySequence(sequence)
+
+    assert not window.save()
+
+    assert window.hotkey_labels[action].text() in window.notification_label.text()
+    assert binding.config.hotkeys == HotkeysConfig()
+
+
+def test_hotkey_only_save_updates_live_map_without_invalidating_readiness(
+    qtbot,
+    tmp_path,
+) -> None:
+    config = AppConfig()
+    live_updates: list[dict[HotkeyAction, str]] = []
+    binding = SettingsBinding(
+        config,
+        FakeSecretStore(),
+        apply_hotkeys=lambda bindings: live_updates.append(dict(bindings)),
+    )
+    window = SettingsWindow(
+        binding,
+        audio_devices=(),
+        models=(),
+        settings=QSettings(str(tmp_path / "hotkey-only.ini"), QSettings.Format.IniFormat),
+    )
+    qtbot.addWidget(window)
+    report = _report("ready")
+    window.set_readiness_report(report)
+    reruns: list[bool] = []
+    window.readiness_requested.connect(lambda: reruns.append(True))
+
+    window.hotkey_edits[HotkeyAction.SCREENSHOT].setKeySequence("Ctrl+Alt+F11")
+    assert window.save()
+
+    assert live_updates == [config.hotkeys.as_bindings()]
+    assert live_updates[0][HotkeyAction.SCREENSHOT] == "ctrl+alt+f11"
+    assert window.readiness_report is report
+    assert window.start_button.isEnabled()
+    assert reruns == []
+
+
+def test_hotkey_manager_failure_restores_previous_live_map_and_config(
+    qtbot,
+    tmp_path,
+) -> None:
+    config = AppConfig()
+    previous = config.hotkeys.as_bindings()
+    live_updates: list[dict[HotkeyAction, str]] = []
+
+    def fail_new_map(bindings) -> None:
+        live_updates.append(dict(bindings))
+        if len(live_updates) == 1:
+            raise RuntimeError("listener rejected binding")
+
+    binding = SettingsBinding(
+        config,
+        FakeSecretStore(),
+        apply_hotkeys=fail_new_map,
+    )
+    window = SettingsWindow(
+        binding,
+        audio_devices=(),
+        models=(),
+        settings=QSettings(str(tmp_path / "manager-failure.ini"), QSettings.Format.IniFormat),
+    )
+    qtbot.addWidget(window)
+    window.hotkey_edits[HotkeyAction.SCREENSHOT].setKeySequence("Ctrl+Alt+F11")
+
+    assert not window.save()
+
+    assert live_updates[0][HotkeyAction.SCREENSHOT] == "ctrl+alt+f11"
+    assert live_updates[1] == previous
+    assert config.hotkeys.as_bindings() == previous
+
+
+def test_hotkey_persistence_failure_restores_previous_live_map_and_config(
+    qtbot,
+    tmp_path,
+) -> None:
+    config = AppConfig()
+    previous = config.hotkeys.as_bindings()
+    live_updates: list[dict[HotkeyAction, str]] = []
+
+    def fail_persistence(_candidate: AppConfig) -> None:
+        raise OSError("destination unavailable")
+
+    binding = SettingsBinding(
+        config,
+        FakeSecretStore(),
+        persist=fail_persistence,
+        apply_hotkeys=lambda bindings: live_updates.append(dict(bindings)),
+    )
+    window = SettingsWindow(
+        binding,
+        audio_devices=(),
+        models=(),
+        settings=QSettings(str(tmp_path / "persistence-failure.ini"), QSettings.Format.IniFormat),
+    )
+    qtbot.addWidget(window)
+    window.hotkey_edits[HotkeyAction.SCREENSHOT].setKeySequence("Ctrl+Alt+F11")
+
+    assert not window.save()
+
+    assert live_updates[0][HotkeyAction.SCREENSHOT] == "ctrl+alt+f11"
+    assert live_updates[1] == previous
+    assert config.hotkeys.as_bindings() == previous
+
+
+def test_custom_hotkeys_save_to_disk_and_reload(qtbot, tmp_path: Path) -> None:
+    config = AppConfig()
+    path = tmp_path / "config.yaml"
+    binding = SettingsBinding(
+        config,
+        FakeSecretStore(),
+        persist=lambda candidate: candidate.save(path),
+        apply_hotkeys=lambda _bindings: None,
+    )
+    window = SettingsWindow(
+        binding,
+        audio_devices=(),
+        models=(),
+        settings=QSettings(str(tmp_path / "reload.ini"), QSettings.Format.IniFormat),
+    )
+    qtbot.addWidget(window)
+    window.hotkey_edits[HotkeyAction.SCREENSHOT].setKeySequence("Ctrl+Alt+F11")
+    window.hotkey_edits[HotkeyAction.PAUSE].setKeySequence("Alt+Shift+F12")
+
+    assert window.save()
+
+    reloaded = AppConfig.load(path)
+    assert reloaded.hotkeys.as_bindings() == config.hotkeys.as_bindings()
+    assert reloaded.hotkeys.screenshot == "ctrl+alt+f11"
+    assert reloaded.hotkeys.pause == "shift+alt+f12"
+    assert set(reloaded.hotkeys.as_bindings()) == set(DEFAULT_HOTKEY_BINDINGS)
 
 
 def test_same_model_can_be_selected_twice_and_is_annotated_as_shared(qtbot, tmp_path) -> None:

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from collections import OrderedDict, deque
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from threading import Lock
@@ -32,6 +32,7 @@ from interview_assistant.transcript.detector import (
     QuestionKind,
 )
 from interview_assistant.transcript.store import TranscriptStore
+from interview_assistant.utils.hotkeys import HotkeyAction
 
 
 class AudioService(Protocol):
@@ -54,6 +55,8 @@ class HotkeyService(Protocol):
     def start(self) -> None: ...
 
     def stop(self) -> None: ...
+
+    def update_bindings(self, bindings: Mapping[HotkeyAction | str, str]) -> None: ...
 
 
 class CaptureService(Protocol):
@@ -264,6 +267,12 @@ class ApplicationRuntime(QObject):
     @property
     def manual_image_path(self) -> Path | None:
         return self._manual_image_path
+
+    def update_hotkey_bindings(
+        self,
+        bindings: Mapping[HotkeyAction | str, str],
+    ) -> None:
+        self.services.hotkeys.update_bindings(bindings)
 
     def _connect_actions(self) -> None:
         events = self.application.events

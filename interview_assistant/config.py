@@ -66,33 +66,29 @@ class HotkeysConfig(BaseModel):
     forced_web_search: str = DEFAULT_HOTKEY_BINDINGS[HotkeyAction.FORCED_WEB_SEARCH]
     clear_answer: str = DEFAULT_HOTKEY_BINDINGS[HotkeyAction.CLEAR_ANSWER]
 
-    @model_validator(mode="after")
-    def validate_bindings(self) -> "HotkeysConfig":
-        normalize_bindings(
+    def _raw_bindings(self) -> dict[HotkeyAction, str]:
+        return {action: getattr(self, action.value) for action in HotkeyAction}
+
+    @classmethod
+    def from_bindings(
+        cls,
+        bindings: Mapping[HotkeyAction | str, str],
+    ) -> "HotkeysConfig":
+        normalized = normalize_bindings(bindings)
+        return cls.model_validate(
             {
-                HotkeyAction.FORCE_REQUEST: self.force_request,
-                HotkeyAction.SCREENSHOT: self.screenshot,
-                HotkeyAction.PAUSE: self.pause,
-                HotkeyAction.OVERLAY_VISIBILITY: self.overlay_visibility,
-                HotkeyAction.OVERLAY_INTERACTION: self.overlay_interaction,
-                HotkeyAction.FORCED_WEB_SEARCH: self.forced_web_search,
-                HotkeyAction.CLEAR_ANSWER: self.clear_answer,
+                action.value: chord.to_portable_text()
+                for action, chord in normalized.items()
             }
         )
+
+    @model_validator(mode="after")
+    def validate_bindings(self) -> "HotkeysConfig":
+        normalize_bindings(self._raw_bindings())
         return self
 
     def as_bindings(self) -> dict[HotkeyAction, str]:
-        bindings = normalize_bindings(
-            {
-                HotkeyAction.FORCE_REQUEST: self.force_request,
-                HotkeyAction.SCREENSHOT: self.screenshot,
-                HotkeyAction.PAUSE: self.pause,
-                HotkeyAction.OVERLAY_VISIBILITY: self.overlay_visibility,
-                HotkeyAction.OVERLAY_INTERACTION: self.overlay_interaction,
-                HotkeyAction.FORCED_WEB_SEARCH: self.forced_web_search,
-                HotkeyAction.CLEAR_ANSWER: self.clear_answer,
-            }
-        )
+        bindings = normalize_bindings(self._raw_bindings())
         return {
             action: chord.to_portable_text() for action, chord in bindings.items()
         }

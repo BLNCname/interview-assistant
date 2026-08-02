@@ -14,6 +14,7 @@ from interview_assistant.config import AppConfig
 from interview_assistant.diagnostics.readiness import CheckResult, ReadinessReport
 from interview_assistant.state import ApplicationState
 from interview_assistant.ui.settings import SettingsBinding, SettingsChoice, SettingsWindow
+from interview_assistant.utils.hotkeys import HotkeyAction
 
 
 def _report(
@@ -82,9 +83,13 @@ class _BlockingRunner(_Runner):
 class _Runtime:
     def __init__(self) -> None:
         self.start_count = 0
+        self.hotkey_updates: list[dict[HotkeyAction, str]] = []
 
     async def start(self) -> None:
         self.start_count += 1
+
+    def update_hotkey_bindings(self, bindings) -> None:
+        self.hotkey_updates.append(dict(bindings))
 
 
 class _BlockingRuntime(_Runtime):
@@ -259,6 +264,47 @@ async def test_readiness_rebuild_closes_old_components_and_uses_latest_config(
     assert built[1][1].close_count == 0
     await controller.shutdown()
     assert built[1][1].close_count == 1
+    assert app.is_shutdown
+
+
+async def test_hotkey_only_settings_save_updates_current_runtime_without_rebuild(
+    qtbot,
+    tmp_path: Path,
+) -> None:
+    app = InterviewApplication.for_test()
+    qtbot.addWidget(app.ribbon)
+    config = _config()
+    secrets = _Secrets()
+    settings = _settings(qtbot, tmp_path, config, secrets)
+    components = _Components(_report())
+    build_count = 0
+
+    def build(_candidate: AppConfig, _token: str | None) -> _Components:
+        nonlocal build_count
+        build_count += 1
+        return components
+
+    controller = ApplicationController(
+        app,
+        settings,
+        config,
+        secrets,
+        component_factory=build,
+        loop=asyncio.get_running_loop(),
+    )
+    await controller.initialize()
+    report = settings.readiness_report
+    settings.hotkey_edits[HotkeyAction.SCREENSHOT].setKeySequence("Ctrl+Alt+F11")
+
+    assert settings.save()
+    await asyncio.sleep(0)
+
+    assert components.runtime.hotkey_updates == [config.hotkeys.as_bindings()]
+    assert components.close_count == 0
+    assert build_count == 1
+    assert controller.components is components
+    assert settings.readiness_report is report
+    await controller.shutdown()
     assert app.is_shutdown
 
 

@@ -4,7 +4,7 @@ import asyncio
 import ctypes
 import subprocess
 import sys
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from importlib import import_module
 from pathlib import Path
@@ -51,7 +51,7 @@ from interview_assistant.ui.settings import (
     SettingsWindow,
 )
 from interview_assistant.ui.windows_affinity import AffinityApplier
-from interview_assistant.utils.hotkeys import HotkeyManager
+from interview_assistant.utils.hotkeys import HotkeyAction, HotkeyManager
 
 
 class ControllerSecretStore(Protocol):
@@ -70,6 +70,11 @@ class _CTranslate2Module(Protocol):
 
 class ControllerRuntime(Protocol):
     async def start(self) -> None: ...
+
+    def update_hotkey_bindings(
+        self,
+        bindings: Mapping[HotkeyAction | str, str],
+    ) -> None: ...
 
 
 class ControllerReadiness(Protocol):
@@ -400,6 +405,7 @@ class ApplicationController(QObject):
         self._shutdown_task: asyncio.Task[None] | None = None
         self._quit_task: asyncio.Task[None] | None = None
         self.application.qt_app.setQuitOnLastWindowClosed(False)
+        self.settings.bind_hotkey_updater(self._update_live_hotkeys)
         self._connect_signals()
 
     @property
@@ -414,6 +420,14 @@ class ApplicationController(QObject):
         self.application.events.quit_requested.connect(self._on_quit_requested)
         self.application.events.notification.connect(self.settings.show_notification)
         self.application.qt_app.aboutToQuit.connect(self.request_shutdown)
+
+    def _update_live_hotkeys(
+        self,
+        bindings: Mapping[HotkeyAction | str, str],
+    ) -> None:
+        components = self._components
+        if components is not None:
+            components.runtime.update_hotkey_bindings(bindings)
 
     async def initialize(self) -> None:
         if self._closing:

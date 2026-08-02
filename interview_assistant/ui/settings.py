@@ -100,10 +100,18 @@ class SettingsBinding:
         secret_store: SecretStoreProtocol,
         *,
         persist: Callable[[AppConfig], None] | None = None,
+        apply_hotkeys: Callable[[Mapping[HotkeyAction, str]], None] | None = None,
     ) -> None:
         self.config = config
         self._secret_store = secret_store
         self._persist = persist
+        self._apply_hotkeys = apply_hotkeys
+
+    def bind_hotkey_updater(
+        self,
+        updater: Callable[[Mapping[HotkeyAction, str]], None],
+    ) -> None:
+        self._apply_hotkeys = updater
 
     @property
     def unique_model_keys(self) -> tuple[str, ...]:
@@ -135,7 +143,7 @@ class SettingsBinding:
         max_height: int,
         hotkeys: Mapping[HotkeyAction | str, str],
         token: str,
-    ) -> None:
+    ) -> bool:
         audio = AudioConfig.model_validate(
             {
                 **self.config.audio.model_dump(),
@@ -161,10 +169,7 @@ class SettingsBinding:
                 "max_height": max_height,
             }
         )
-        normalized_hotkeys = normalize_bindings(hotkeys)
-        hotkeys_config = HotkeysConfig.model_validate(
-            {action.value: chord.to_portable_text() for action, chord in normalized_hotkeys.items()}
-        )
+        hotkeys_config = HotkeysConfig.from_bindings(hotkeys)
 
         candidate = self.config.model_copy(deep=True)
         candidate.audio = audio
@@ -172,15 +177,43 @@ class SettingsBinding:
         candidate.search = search
         candidate.overlay = overlay
         candidate.hotkeys = hotkeys_config
-        if token.strip():
-            self._secret_store.set_lm_token(token)
-        if self._persist is not None:
-            self._persist(candidate)
+        hotkeys_changed = candidate.hotkeys != self.config.hotkeys
+        non_hotkey_changed = candidate.model_dump(exclude={"hotkeys"}) != self.config.model_dump(
+            exclude={"hotkeys"}
+        )
+        hotkey_only = hotkeys_changed and not non_hotkey_changed and not token.strip()
+        previous_bindings = self.config.hotkeys.as_bindings()
+        live_updated = False
+        if hotkeys_changed and self._apply_hotkeys is not None:
+            try:
+                self._apply_hotkeys(candidate.hotkeys.as_bindings())
+            except Exception:
+                self._restore_live_hotkeys(previous_bindings)
+                raise
+            live_updated = True
+        try:
+            if token.strip():
+                self._secret_store.set_lm_token(token)
+            if self._persist is not None:
+                self._persist(candidate)
+        except Exception:
+            if live_updated:
+                self._restore_live_hotkeys(previous_bindings)
+            raise
         self.config.audio = candidate.audio
         self.config.lmstudio = candidate.lmstudio
         self.config.search = candidate.search
         self.config.overlay = candidate.overlay
         self.config.hotkeys = candidate.hotkeys
+        return not hotkey_only
+
+    def _restore_live_hotkeys(self, bindings: Mapping[HotkeyAction, str]) -> None:
+        if self._apply_hotkeys is None:
+            return
+        try:
+            self._apply_hotkeys(bindings)
+        except Exception:
+            pass
 
 
 class SettingsWindow(QMainWindow):
@@ -212,6 +245,12 @@ class SettingsWindow(QMainWindow):
         self._build_ui(audio_devices, models)
         self._restore_geometry()
         self._connect_invalidators()
+
+    def bind_hotkey_updater(
+        self,
+        updater: Callable[[Mapping[HotkeyAction, str]], None],
+    ) -> None:
+        self._binding.bind_hotkey_updater(updater)
 
     @property
     def readiness_report(self) -> ReadinessReport | None:
@@ -403,12 +442,16 @@ class SettingsWindow(QMainWindow):
             )
 
     def _hotkey_bindings(self) -> dict[HotkeyAction, str]:
-        portable_bindings = {
-            action: HotkeyChord.parse(
-                editor.keySequence().toString(QKeySequence.SequenceFormat.PortableText)
-            ).to_portable_text()
-            for action, editor in self.hotkey_edits.items()
-        }
+        portable_bindings: dict[HotkeyAction, str] = {}
+        for action, editor in self.hotkey_edits.items():
+            try:
+                portable_bindings[action] = HotkeyChord.parse(
+                    editor.keySequence().toString(
+                        QKeySequence.SequenceFormat.PortableText
+                    )
+                ).to_portable_text()
+            except ValueError as error:
+                raise ValueError(f"{HOTKEY_COPY[action][0]}: {error}") from error
         normalized = normalize_bindings(portable_bindings)
         return {action: chord.to_portable_text() for action, chord in normalized.items()}
 
@@ -519,8 +562,6 @@ class SettingsWindow(QMainWindow):
         self.opacity_spin.valueChanged.connect(self._invalidate_readiness)
         self.max_height_spin.valueChanged.connect(self._invalidate_readiness)
         self.token_edit.textChanged.connect(self._invalidate_readiness)
-        for editor in self.hotkey_edits.values():
-            editor.keySequenceChanged.connect(self._invalidate_readiness)
 
     def _update_shared_instance_annotation(self, _value: int | None = None) -> None:
         text_key = str(self.text_model_combo.currentData() or "")
@@ -610,7 +651,7 @@ class SettingsWindow(QMainWindow):
             self.show_notification(message)
             return False
         try:
-            self._binding.apply(
+            requires_readiness = self._binding.apply(
                 system_device_id=cast(str | None, self.system_device_combo.currentData()),
                 microphone_device_id=cast(str | None, self.microphone_device_combo.currentData()),
                 language=cast(
@@ -636,9 +677,10 @@ class SettingsWindow(QMainWindow):
                 self.token_edit.clear()
                 self._refresh_token_placeholder()
         self._update_shared_instance_annotation()
-        self.clear_readiness()
         self.settings_saved.emit()
-        self.readiness_requested.emit()
+        if requires_readiness:
+            self.clear_readiness()
+            self.readiness_requested.emit()
         return True
 
     def _refresh_token_placeholder(self) -> None:
