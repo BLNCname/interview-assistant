@@ -369,10 +369,21 @@ The installer builder is intentionally fail-closed. Before invoking Inno Setup, 
 entire portable tree against `packaging/dist_inventory.json` and independently verifies the STT
 manifest. That inventory authenticates the shipped, reviewed release. A clean build on a different
 Windows/Python/PyInstaller toolchain may compile correctly yet have different binary hashes and be
-rejected as *not the attested release*. Do not silently regenerate the inventory merely to make an
-unknown build pass. Source audit, tests, diagnostics, and the portable build are sufficient to
-confirm that the checked-in code is executable; producing a new trusted installer requires a
-deliberate inventory review and all release gates documented under `docs/validation/`.
+rejected as *not the attested release*. Only after source tests, frozen diagnostics, bundled model
+validation, and a human review of the inventory diff may a deliberate release step regenerate it:
+
+```powershell
+.\.venv\Scripts\python.exe .\scripts\generate_release_inventory.py `
+  --dist .\dist\InterviewAssistant `
+  --output .\packaging\dist_inventory.json `
+  --application InterviewAssistant `
+  --replace
+```
+
+Do not silently regenerate the inventory merely to make an unknown build pass. Source audit, tests,
+diagnostics, and the portable build are sufficient to confirm that the checked-in code is
+executable; producing a new trusted installer requires a deliberate inventory review and all
+release gates documented under `docs/validation/`.
 
 ## Run tests and diagnostics
 

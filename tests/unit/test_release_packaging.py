@@ -26,6 +26,7 @@ ARCHIVE_SCRIPT_PATH = ROOT / "scripts" / "create_source_archive.ps1"
 ARCHIVE_INSPECTOR_PATH = ROOT / "scripts" / "inspect_source_archive.py"
 GITATTRIBUTES_PATH = ROOT / ".gitattributes"
 DIST_VALIDATOR_PATH = ROOT / "scripts" / "validate_release_dist.py"
+INVENTORY_GENERATOR_PATH = ROOT / "scripts" / "generate_release_inventory.py"
 DIST_INVENTORY_PATH = ROOT / "packaging" / "dist_inventory.json"
 HISTORY_SCANNER_PATH = ROOT / "scripts" / "scan_release_git_history.py"
 INSTALLER_SMOKE_PATH = ROOT / "scripts" / "smoke_installer.ps1"
@@ -887,6 +888,192 @@ def _write_dist_fixture(tmp_path: Path) -> tuple[Path, Path, Path, dict[str, byt
     inventory_path = tmp_path / "dist-inventory.json"
     inventory_path.write_text(json.dumps(inventory), encoding="utf-8")
     return dist, manifest_path, inventory_path, model_files
+
+
+def _write_inventory_generator_fixture(tmp_path: Path) -> Path:
+    dist = tmp_path / "InterviewAssistant"
+    (dist / "_internal").mkdir(parents=True)
+    (dist / "InterviewAssistant.exe").write_bytes(b"exe")
+    (dist / "_internal" / "runtime.dll").write_bytes(b"runtime")
+    return dist
+
+
+def test_inventory_generator_hashes_sorted_safe_relative_files(tmp_path: Path) -> None:
+    from scripts.generate_release_inventory import build_inventory
+
+    inventory = build_inventory(_write_inventory_generator_fixture(tmp_path))
+
+    assert inventory["schema_version"] == 1
+    assert inventory["application"] == "InterviewAssistant"
+    assert [entry["path"] for entry in inventory["files"]] == [
+        "_internal/runtime.dll",
+        "InterviewAssistant.exe",
+    ]
+    assert inventory["files"][0]["sha256"] == hashlib.sha256(b"runtime").hexdigest()
+
+
+def test_inventory_generator_rejects_wrong_root_and_unreviewed_top_level(tmp_path: Path) -> None:
+    from scripts.generate_release_inventory import build_inventory
+
+    with pytest.raises(ValueError, match="root must be named"):
+        build_inventory(tmp_path / "not-InterviewAssistant")
+
+    dist = _write_inventory_generator_fixture(tmp_path)
+    (dist / "unexpected.dll").write_bytes(b"unexpected")
+
+    with pytest.raises(ValueError, match="reviewed top-level shape"):
+        build_inventory(dist)
+
+
+def test_inventory_generator_requires_the_reviewed_top_level_node_types(tmp_path: Path) -> None:
+    from scripts.generate_release_inventory import build_inventory
+
+    dist = tmp_path / "InterviewAssistant"
+    dist.mkdir()
+    (dist / "InterviewAssistant.exe").write_bytes(b"exe")
+    (dist / "_internal").write_bytes(b"not a directory")
+
+    with pytest.raises(ValueError):
+        build_inventory(dist)
+
+
+def test_inventory_generator_rejects_symbolic_links(tmp_path: Path) -> None:
+    from scripts.generate_release_inventory import build_inventory
+
+    dist = _write_inventory_generator_fixture(tmp_path)
+    link = dist / "_internal" / "runtime-link.dll"
+    try:
+        link.symlink_to(dist / "_internal" / "runtime.dll")
+    except OSError as error:
+        pytest.skip(f"Windows does not permit test symbolic links: {error}")
+
+    with pytest.raises(ValueError, match="symbolic links"):
+        build_inventory(dist)
+
+
+def test_inventory_generator_rejects_symbolic_link_outputs(tmp_path: Path) -> None:
+    dist = _write_inventory_generator_fixture(tmp_path)
+    target = tmp_path / "outside-inventory.json"
+    output = tmp_path / "inventory.json"
+    try:
+        output.symlink_to(target)
+    except OSError as error:
+        pytest.skip(f"Windows does not permit test symbolic links: {error}")
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(INVENTORY_GENERATOR_PATH),
+            "--dist",
+            str(dist),
+            "--output",
+            str(output),
+            "--application",
+            "InterviewAssistant",
+            "--replace",
+        ],
+        cwd=ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+    assert result.returncode != 0
+    assert "symbolic links" in result.stderr
+    assert not target.exists()
+
+
+def test_inventory_generator_cli_requires_reviewed_arguments_and_safe_output(tmp_path: Path) -> None:
+    dist = _write_inventory_generator_fixture(tmp_path)
+    output = tmp_path / "inventory.json"
+    base_command = [sys.executable, str(INVENTORY_GENERATOR_PATH), "--dist", str(dist)]
+
+    missing_application = subprocess.run(
+        [*base_command, "--output", str(output)],
+        cwd=ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    unsafe_output = subprocess.run(
+        [
+            *base_command,
+            "--output",
+            str(dist / "inventory.json"),
+            "--application",
+            "InterviewAssistant",
+        ],
+        cwd=ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    generated = subprocess.run(
+        [
+            *base_command,
+            "--output",
+            str(output),
+            "--application",
+            "InterviewAssistant",
+        ],
+        cwd=ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    overwrite = subprocess.run(
+        [
+            *base_command,
+            "--output",
+            str(output),
+            "--application",
+            "InterviewAssistant",
+        ],
+        cwd=ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+    assert missing_application.returncode != 0
+    assert unsafe_output.returncode != 0
+    assert "must not be inside the distribution" in unsafe_output.stderr
+    assert generated.returncode == 0, generated.stdout + generated.stderr
+    assert json.loads(output.read_text(encoding="utf-8"))["application"] == "InterviewAssistant"
+    assert overwrite.returncode != 0
+
+
+def test_inventory_generator_cli_replaces_only_when_explicitly_requested(tmp_path: Path) -> None:
+    dist = _write_inventory_generator_fixture(tmp_path)
+    output = tmp_path / "inventory.json"
+    output.write_text("old inventory\n", encoding="utf-8")
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(INVENTORY_GENERATOR_PATH),
+            "--dist",
+            str(dist),
+            "--output",
+            str(output),
+            "--application",
+            "InterviewAssistant",
+            "--replace",
+        ],
+        cwd=ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert output.read_text(encoding="utf-8").endswith("\n")
 
 
 def _run_dist_validator(
