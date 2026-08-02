@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import shutil
 import stat
 import subprocess
@@ -15,6 +16,10 @@ import yaml
 
 
 ROOT = Path(__file__).parents[2]
+README_PATH = ROOT / "README.md"
+START_HERE_PATH = ROOT / "START_HERE.md"
+CHECKSUMS_PATH = ROOT / "SHA256SUMS.txt"
+GITIGNORE_PATH = ROOT / ".gitignore"
 ISS_PATH = ROOT / "packaging" / "interview_assistant.iss"
 INSTALLER_SCRIPT_PATH = ROOT / "scripts" / "build_installer.ps1"
 ARCHIVE_SCRIPT_PATH = ROOT / "scripts" / "create_source_archive.ps1"
@@ -38,6 +43,66 @@ EXPECTED_RELEASE_HOTKEYS = {
     "forced_web_search": "ctrl+shift+w",
     "clear_answer": "ctrl+shift+c",
 }
+
+
+def test_instructor_readme_is_english_and_covers_clean_machine_workflows() -> None:
+    text = README_PATH.read_text(encoding="utf-8")
+    folded = text.casefold()
+
+    assert re.search(r"[А-Яа-яЁё]", text) is None
+    for heading in (
+        "## System requirements",
+        "## Install the ready-to-use application",
+        "## Configure LM Studio",
+        "## Build from source",
+        "## Run tests and diagnostics",
+        "## Troubleshooting",
+    ):
+        assert heading in text
+    for required in (
+        "InterviewAssistant-Setup-0.1.0-win64.exe",
+        "uv sync --extra dev --extra cuda --frozen",
+        "scripts\\build.ps1",
+        "scripts\\build_installer.ps1",
+        "dropbox-dash/faster-whisper-large-v3-turbo",
+        "0a363e9161cbc7ed1431c9597a8ceaf0c4f78fcf",
+        "windows credential manager",
+        "participant consent",
+    ):
+        assert required.casefold() in folded
+
+
+def test_start_here_is_a_short_english_installer_entry_point() -> None:
+    text = START_HERE_PATH.read_text(encoding="utf-8")
+
+    assert re.search(r"[А-Яа-яЁё]", text) is None
+    assert "InterviewAssistant-Setup-0.1.0-win64.exe" in text
+    assert "README.md" in text
+    assert "InterviewAssistant.exe" not in text
+    assert "InterviewAssistant-source-0.1.0.zip" not in text
+
+
+def test_root_checksum_manifest_contains_only_the_installer() -> None:
+    lines = CHECKSUMS_PATH.read_text(encoding="ascii").splitlines()
+
+    assert len(lines) == 1
+    assert re.fullmatch(
+        r"[0-9A-F]{64}  InterviewAssistant-Setup-0\.1\.0-win64\.exe",
+        lines[0],
+    )
+
+
+def test_gitignore_exposes_duplicate_handoff_clutter() -> None:
+    patterns = GITIGNORE_PATH.read_text(encoding="utf-8").splitlines()
+
+    assert "/InterviewAssistant-Setup-*-win64.exe" in patterns
+    for stale_ignore in (
+        "/InterviewAssistant.exe",
+        "/InterviewAssistant-source-*.zip",
+        "/SHA256SUMS.txt",
+        "/_internal/",
+    ):
+        assert stale_ignore not in patterns
 
 
 def test_frozen_bundle_includes_prompt_but_not_machine_config() -> None:
