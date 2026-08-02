@@ -17,9 +17,11 @@ from PyQt6.QtWidgets import (
     QKeySequenceEdit,
     QLabel,
     QLineEdit,
+    QListWidget,
     QMainWindow,
     QPushButton,
     QSpinBox,
+    QStackedWidget,
     QTableWidget,
     QTableWidgetItem,
     QVBoxLayout,
@@ -43,34 +45,44 @@ from interview_assistant.utils.hotkeys import (
 )
 
 
+SETTINGS_PAGE_TITLES = (
+    "General",
+    "Models",
+    "Audio",
+    "Hotkeys",
+    "Appearance",
+    "Diagnostics",
+)
+
+
 HOTKEY_COPY = {
     HotkeyAction.FORCE_REQUEST: (
-        "Отправить текущий контекст разговора",
-        "Отправляет последнюю реплику преподавателя и недавний диалог обеих сторон.",
+        "Submit conversation context",
+        "Submits the latest instructor turn and recent dialogue from both speakers.",
     ),
     HotkeyAction.SCREENSHOT: (
-        "Подготовить снимок для следующего запроса",
-        "Одноразово добавляет следующий пригодный снимок в контекст модели.",
+        "Capture next screenshot",
+        "Attaches the next usable screen capture to the model context once.",
     ),
     HotkeyAction.PAUSE: (
-        "Пауза или возобновление распознавания",
-        "Останавливает или продолжает обработку обоих аудиоисточников.",
+        "Pause or resume recognition",
+        "Pauses or continues processing for both audio sources.",
     ),
     HotkeyAction.OVERLAY_VISIBILITY: (
-        "Показать или скрыть окно помощника",
-        "Временно скрывает Ribbon, не закрывая приложение.",
+        "Show or hide assistant",
+        "Temporarily hides the Ribbon without closing the application.",
     ),
     HotkeyAction.OVERLAY_INTERACTION: (
-        "Изменить положение или размер окна",
-        "Переключает click-through и режим настройки Ribbon.",
+        "Move or resize assistant",
+        "Toggles click-through and Ribbon edit mode.",
     ),
     HotkeyAction.FORCED_WEB_SEARCH: (
-        "Включить поиск для следующего запроса",
-        "Принудительно разрешает web search только для следующего ответа.",
+        "Force web search for next request",
+        "Enables web search only for the next answer.",
     ),
     HotkeyAction.CLEAR_ANSWER: (
-        "Очистить ответ и историю разговора",
-        "Удаляет текущий ответ и transcript history из памяти приложения.",
+        "Clear answer and conversation",
+        "Removes the current answer and transcript history from application memory.",
     ),
 }
 
@@ -265,103 +277,32 @@ class SettingsWindow(QMainWindow):
         root = QVBoxLayout(central)
         self.setCentralWidget(central)
 
-        configuration = QGroupBox("Configuration", central)
-        form = QFormLayout(configuration)
+        content = QHBoxLayout()
+        self.navigation_list = QListWidget(central)
+        self.navigation_list.setObjectName("settingsNavigation")
+        self.navigation_list.addItems(SETTINGS_PAGE_TITLES)
+        self.page_stack = QStackedWidget(central)
 
-        self.system_device_combo = self._choice_combo(
-            audio_devices,
-            current=self._binding.config.audio.system_device_id,
-            empty_label="Not selected",
-            empty_data=None,
-        )
-        self.microphone_device_combo = self._choice_combo(
-            audio_devices,
-            current=self._binding.config.audio.microphone_device_id,
-            empty_label="Not selected",
-            empty_data=None,
-        )
-        self.language_combo = QComboBox(configuration)
-        for label, key in (
-            ("Auto (Russian / English)", "auto"),
-            ("Russian", "ru"),
-            ("English", "en"),
+        self.general_page = self._build_general_page()
+        self.models_page = self._build_models_page(models)
+        self.audio_page = self._build_audio_page(audio_devices)
+        self.hotkeys_page = self._build_hotkeys_page()
+        self.appearance_page = self._build_appearance_page()
+        self.diagnostics_page = self._build_diagnostics_page()
+        for page in (
+            self.general_page,
+            self.models_page,
+            self.audio_page,
+            self.hotkeys_page,
+            self.appearance_page,
+            self.diagnostics_page,
         ):
-            self.language_combo.addItem(label, key)
-        self._select_data(self.language_combo, self._binding.config.audio.language)
-
-        self.text_model_combo = self._choice_combo(
-            models,
-            current=self._binding.config.lmstudio.text_model,
-            empty_label="Not selected",
-            empty_data="",
-        )
-        self.vision_model_combo = self._choice_combo(
-            models,
-            current=self._binding.config.lmstudio.vision_model,
-            empty_label="Not selected",
-            empty_data="",
-        )
-        self.shared_instance_label = QLabel(configuration)
-        self.shared_instance_label.setWordWrap(True)
-        self._update_shared_instance_annotation()
-
-        self.search_mode_combo = QComboBox(configuration)
-        for label, key in (
-            ("Off", "off"),
-            ("Automatic", "auto"),
-            ("Forced for next request", "forced"),
-        ):
-            self.search_mode_combo.addItem(label, key)
-        self._select_data(self.search_mode_combo, self._binding.config.search.mode)
-
-        self.opacity_spin = QDoubleSpinBox(configuration)
-        self.opacity_spin.setRange(0.2, 1.0)
-        self.opacity_spin.setSingleStep(0.01)
-        self.opacity_spin.setDecimals(2)
-        self.opacity_spin.setValue(self._binding.config.overlay.opacity)
-        self.max_height_spin = QSpinBox(configuration)
-        self.max_height_spin.setRange(120, 900)
-        self.max_height_spin.setValue(self._binding.config.overlay.max_height)
-
-        self.token_edit = QLineEdit(configuration)
-        self.token_edit.setEchoMode(QLineEdit.EchoMode.Password)
-        self._refresh_token_placeholder()
-
-        form.addRow("System audio", self.system_device_combo)
-        form.addRow("Microphone", self.microphone_device_combo)
-        form.addRow("Recognition language", self.language_combo)
-        form.addRow("Text model", self.text_model_combo)
-        form.addRow("Vision model", self.vision_model_combo)
-        form.addRow("Model instances", self.shared_instance_label)
-        form.addRow("Web search", self.search_mode_combo)
-        form.addRow("Overlay opacity", self.opacity_spin)
-        form.addRow("Overlay maximum height", self.max_height_spin)
-        form.addRow("LM Studio token", self.token_edit)
-        root.addWidget(configuration)
-
-        root.addWidget(self._build_hotkey_group(central))
-
-        readiness = QGroupBox("Readiness", central)
-        readiness_layout = QVBoxLayout(readiness)
-        self.readiness_status_label = QLabel("Run readiness checks before starting", readiness)
-        self.readiness_status_label.setTextFormat(Qt.TextFormat.PlainText)
-        self.notification_label = QLabel("", readiness)
-        self.notification_label.setTextFormat(Qt.TextFormat.PlainText)
-        self.notification_label.setWordWrap(True)
-        self.notification_label.hide()
-        self.readiness_table = QTableWidget(0, 5, readiness)
-        self.readiness_table.setHorizontalHeaderLabels(
-            ("Check", "Status", "Message", "Remediation", "Duration")
-        )
-        header = self.readiness_table.horizontalHeader()
-        assert header is not None
-        header.setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
-        header.setStretchLastSection(True)
-        self.readiness_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
-        readiness_layout.addWidget(self.readiness_status_label)
-        readiness_layout.addWidget(self.notification_label)
-        readiness_layout.addWidget(self.readiness_table)
-        root.addWidget(readiness, 1)
+            self.page_stack.addWidget(page)
+        self.navigation_list.currentRowChanged.connect(self.page_stack.setCurrentIndex)
+        self.navigation_list.setCurrentRow(0)
+        content.addWidget(self.navigation_list)
+        content.addWidget(self.page_stack, 1)
+        root.addLayout(content, 1)
 
         actions = QHBoxLayout()
         actions.addStretch(1)
@@ -398,8 +339,154 @@ class SettingsWindow(QMainWindow):
         self.readiness_button.clicked.connect(self.save)
         self.start_button.clicked.connect(self._request_start)
 
+    def _build_general_page(self) -> QWidget:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        general = QGroupBox("General", page)
+        form = QFormLayout(general)
+
+        self.search_mode_combo = QComboBox(general)
+        for label, key in (
+            ("Off", "off"),
+            ("Automatic", "auto"),
+            ("Forced for next request", "forced"),
+        ):
+            self.search_mode_combo.addItem(label, key)
+        self._select_data(self.search_mode_combo, self._binding.config.search.mode)
+
+        self.token_edit = QLineEdit(general)
+        self.token_edit.setEchoMode(QLineEdit.EchoMode.Password)
+        self._refresh_token_placeholder()
+
+        form.addRow("Web search", self.search_mode_combo)
+        form.addRow("LM Studio token", self.token_edit)
+        layout.addWidget(general)
+        layout.addStretch(1)
+        return page
+
+    def _build_models_page(self, models: tuple[SettingsChoice, ...]) -> QWidget:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        models_group = QGroupBox("Models", page)
+        form = QFormLayout(models_group)
+
+        self.text_model_combo = self._choice_combo(
+            models,
+            current=self._binding.config.lmstudio.text_model,
+            empty_label="Not selected",
+            empty_data="",
+        )
+        self.vision_model_combo = self._choice_combo(
+            models,
+            current=self._binding.config.lmstudio.vision_model,
+            empty_label="Not selected",
+            empty_data="",
+        )
+        self.shared_instance_label = QLabel(models_group)
+        self.shared_instance_label.setWordWrap(True)
+        self._update_shared_instance_annotation()
+
+        form.addRow("Text model", self.text_model_combo)
+        form.addRow("Vision model", self.vision_model_combo)
+        form.addRow("Model instances", self.shared_instance_label)
+        layout.addWidget(models_group)
+        layout.addStretch(1)
+        return page
+
+    def _build_audio_page(
+        self,
+        audio_devices: tuple[SettingsChoice, ...],
+    ) -> QWidget:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        audio = QGroupBox("Audio", page)
+        form = QFormLayout(audio)
+
+        self.system_device_combo = self._choice_combo(
+            audio_devices,
+            current=self._binding.config.audio.system_device_id,
+            empty_label="Not selected",
+            empty_data=None,
+        )
+        self.microphone_device_combo = self._choice_combo(
+            audio_devices,
+            current=self._binding.config.audio.microphone_device_id,
+            empty_label="Not selected",
+            empty_data=None,
+        )
+        self.language_combo = QComboBox(audio)
+        for label, key in (
+            ("Auto (Russian / English)", "auto"),
+            ("Russian", "ru"),
+            ("English", "en"),
+        ):
+            self.language_combo.addItem(label, key)
+        self._select_data(self.language_combo, self._binding.config.audio.language)
+
+        form.addRow("System audio", self.system_device_combo)
+        form.addRow("Microphone", self.microphone_device_combo)
+        form.addRow("Recognition language", self.language_combo)
+        layout.addWidget(audio)
+        layout.addStretch(1)
+        return page
+
+    def _build_hotkeys_page(self) -> QWidget:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.addWidget(self._build_hotkey_group(page))
+        layout.addStretch(1)
+        return page
+
+    def _build_appearance_page(self) -> QWidget:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        appearance = QGroupBox("Appearance", page)
+        form = QFormLayout(appearance)
+
+        self.opacity_spin = QDoubleSpinBox(appearance)
+        self.opacity_spin.setRange(0.2, 1.0)
+        self.opacity_spin.setSingleStep(0.01)
+        self.opacity_spin.setDecimals(2)
+        self.opacity_spin.setValue(self._binding.config.overlay.opacity)
+        self.max_height_spin = QSpinBox(appearance)
+        self.max_height_spin.setRange(120, 900)
+        self.max_height_spin.setValue(self._binding.config.overlay.max_height)
+
+        form.addRow("Overlay opacity", self.opacity_spin)
+        form.addRow("Overlay maximum height", self.max_height_spin)
+        layout.addWidget(appearance)
+        layout.addStretch(1)
+        return page
+
+    def _build_diagnostics_page(self) -> QWidget:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+
+        readiness = QGroupBox("Readiness", page)
+        readiness_layout = QVBoxLayout(readiness)
+        self.readiness_status_label = QLabel("Run readiness checks before starting", readiness)
+        self.readiness_status_label.setTextFormat(Qt.TextFormat.PlainText)
+        self.notification_label = QLabel("", readiness)
+        self.notification_label.setTextFormat(Qt.TextFormat.PlainText)
+        self.notification_label.setWordWrap(True)
+        self.notification_label.hide()
+        self.readiness_table = QTableWidget(0, 5, readiness)
+        self.readiness_table.setHorizontalHeaderLabels(
+            ("Check", "Status", "Message", "Remediation", "Duration")
+        )
+        header = self.readiness_table.horizontalHeader()
+        assert header is not None
+        header.setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+        header.setStretchLastSection(True)
+        self.readiness_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        readiness_layout.addWidget(self.readiness_status_label)
+        readiness_layout.addWidget(self.notification_label)
+        readiness_layout.addWidget(self.readiness_table)
+        layout.addWidget(readiness)
+        return page
+
     def _build_hotkey_group(self, parent: QWidget) -> QGroupBox:
-        hotkeys = QGroupBox("Горячие клавиши", parent)
+        hotkeys = QGroupBox("Hotkeys", parent)
         layout = QGridLayout(hotkeys)
         layout.setColumnStretch(1, 1)
         self.hotkey_edits: dict[HotkeyAction, QKeySequenceEdit] = {}
@@ -427,7 +514,7 @@ class SettingsWindow(QMainWindow):
             layout.addWidget(help_label, row, 1)
             layout.addWidget(editor, row, 2)
 
-        restore_defaults = QPushButton("Восстановить по умолчанию", hotkeys)
+        restore_defaults = QPushButton("Restore defaults", hotkeys)
         restore_defaults.clicked.connect(self.restore_default_hotkeys)
         layout.addWidget(restore_defaults, len(HotkeyAction), 2)
         return hotkeys
@@ -597,6 +684,10 @@ class SettingsWindow(QMainWindow):
 
     def set_readiness_report(self, report: ReadinessReport) -> None:
         self._readiness_report = report
+        if report.status != "ready":
+            self.navigation_list.setCurrentRow(
+                self.page_stack.indexOf(self.diagnostics_page)
+            )
         self.readiness_table.setRowCount(len(report.checks))
         for row, result in enumerate(report.checks):
             values = (
@@ -639,6 +730,7 @@ class SettingsWindow(QMainWindow):
     def show_notification(self, message: str) -> None:
         self.notification_label.setText(str(message))
         self.notification_label.show()
+        self.navigation_list.setCurrentRow(self.page_stack.indexOf(self.diagnostics_page))
 
     def save(self) -> bool:
         token = self.token_edit.text()
@@ -647,7 +739,7 @@ class SettingsWindow(QMainWindow):
         except ValueError as error:
             message = str(error)
             if message.startswith("Duplicate hotkey"):
-                message = f"Конфликт горячих клавиш: {message}"
+                message = f"Hotkey conflict: {message}"
             self.show_notification(message)
             return False
         try:

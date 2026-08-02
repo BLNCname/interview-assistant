@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 from pathlib import Path
+import re
 
 import pytest
 from PyQt6.QtCore import QByteArray, QSettings, QSize, Qt
 from PyQt6.QtGui import QKeySequence
+from PyQt6.QtWidgets import QGroupBox, QPushButton
 
 from interview_assistant.config import AppConfig, HotkeysConfig
 from interview_assistant.diagnostics.readiness import CheckResult, ReadinessReport
@@ -97,15 +99,85 @@ def _hotkey_text(window: SettingsWindow, action: HotkeyAction) -> str:
     )
 
 
+def test_settings_uses_approved_a1_sidebar_pages(qtbot, tmp_path) -> None:
+    window, _, _, _ = _window(qtbot, tmp_path)
+
+    assert [
+        window.navigation_list.item(index).text()
+        for index in range(window.navigation_list.count())
+    ] == [
+        "General",
+        "Models",
+        "Audio",
+        "Hotkeys",
+        "Appearance",
+        "Diagnostics",
+    ]
+    assert window.page_stack.count() == 6
+    assert window.page_stack.currentWidget() is window.general_page
+
+
+def test_settings_page_switching_preserves_unsaved_values(qtbot, tmp_path) -> None:
+    window, _, _, _ = _window(qtbot, tmp_path)
+    window.text_model_combo.setCurrentIndex(window.text_model_combo.findData("gemma"))
+
+    window.navigation_list.setCurrentRow(3)
+    window.navigation_list.setCurrentRow(1)
+
+    assert window.page_stack.currentWidget() is window.models_page
+    assert window.text_model_combo.currentData() == "gemma"
+
+
+def test_hidden_settings_pages_receive_dynamic_choice_refreshes(qtbot, tmp_path) -> None:
+    window, _, _, _ = _window(qtbot, tmp_path)
+    text_combo = window.text_model_combo
+    vision_combo = window.vision_model_combo
+    system_combo = window.system_device_combo
+    microphone_combo = window.microphone_device_combo
+    window.navigation_list.setCurrentRow(3)
+
+    window.set_model_choices((SettingsChoice("mistral", "Mistral"),))
+    window.set_audio_choices((SettingsChoice("headset", "Headset"),))
+
+    assert window.page_stack.currentWidget() is window.hotkeys_page
+    assert window.text_model_combo is text_combo
+    assert window.vision_model_combo is vision_combo
+    assert window.system_device_combo is system_combo
+    assert window.microphone_device_combo is microphone_combo
+    assert text_combo.findData("mistral") >= 0
+    assert vision_combo.findData("mistral") >= 0
+    assert system_combo.findData("headset") >= 0
+    assert microphone_combo.findData("headset") >= 0
+
+
 def test_settings_exposes_every_hotkey_with_help_text(qtbot, tmp_path) -> None:
     window, _, _, _ = _window(qtbot, tmp_path)
 
     assert set(window.hotkey_edits) == set(HotkeyAction)
-    assert window.hotkey_labels[HotkeyAction.FORCE_REQUEST].text() == (
-        "Отправить текущий контекст разговора"
+    assert (
+        window.hotkey_labels[HotkeyAction.FORCE_REQUEST].text()
+        == "Submit conversation context"
     )
-    assert "послед" in window.hotkey_help[HotkeyAction.FORCE_REQUEST].text().casefold()
-    assert "следующ" in window.hotkey_help[HotkeyAction.SCREENSHOT].text().casefold()
+    assert (
+        "latest instructor turn"
+        in window.hotkey_help[HotkeyAction.FORCE_REQUEST].text().casefold()
+    )
+    assert (
+        window.hotkey_labels[HotkeyAction.SCREENSHOT].text()
+        == "Capture next screenshot"
+    )
+    assert all(
+        not re.search(r"[А-Яа-яЁё]", label.text())
+        for label in window.hotkey_labels.values()
+    )
+    assert all(
+        not re.search(r"[А-Яа-яЁё]", group.title())
+        for group in window.findChildren(QGroupBox)
+    )
+    assert all(
+        not re.search(r"[А-Яа-яЁё]", button.text())
+        for button in window.findChildren(QPushButton)
+    )
 
 
 def test_restore_default_hotkeys_updates_all_editors(qtbot, tmp_path) -> None:
@@ -125,7 +197,7 @@ def test_duplicate_hotkeys_are_named_and_not_saved(qtbot, tmp_path) -> None:
 
     assert not window.save()
 
-    assert "конфликт" in window.notification_label.text().casefold()
+    assert "conflict" in window.notification_label.text().casefold()
     assert binding.config.hotkeys == HotkeysConfig()
 
 
@@ -369,6 +441,20 @@ def test_readiness_failure_disables_start_but_warning_is_visible_and_permits_it(
     assert "#343a40" in window.start_button.styleSheet().casefold()
     qtbot.mouseClick(window.start_button, Qt.MouseButton.LeftButton)
     assert starts == [True]
+
+
+def test_readiness_warning_surfaces_diagnostics_before_enabling_start(
+    qtbot,
+    tmp_path,
+) -> None:
+    window, _, _, _ = _window(qtbot, tmp_path)
+    window.navigation_list.setCurrentRow(4)
+
+    window.set_readiness_report(_startable_warning_report())
+
+    assert window.page_stack.currentWidget() is window.diagnostics_page
+    assert window.readiness_status_label.isVisibleTo(window)
+    assert window.start_button.isEnabled()
 
 
 def test_readiness_affecting_edit_invalidates_stale_report(qtbot, tmp_path) -> None:
