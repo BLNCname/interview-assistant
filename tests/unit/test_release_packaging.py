@@ -37,9 +37,11 @@ APP_ID = "9CE7901A-56E8-49CB-A8ED-8D5CF4F97C7D"
 
 def test_release_version_defaults_are_consistent() -> None:
     assert 'version = "0.1.1"' in (ROOT / "pyproject.toml").read_text(encoding="utf-8")
-    assert "StringStruct(u'FileVersion', u'0.1.1')" in (
-        ROOT / "packaging" / "version_info.txt"
-    ).read_text(encoding="utf-8")
+    version_info = (ROOT / "packaging" / "version_info.txt").read_text(encoding="utf-8")
+    assert "filevers=(0, 1, 1, 0)" in version_info
+    assert "prodvers=(0, 1, 1, 0)" in version_info
+    assert "StringStruct(u'FileVersion', u'0.1.1')" in version_info
+    assert "StringStruct(u'ProductVersion', u'0.1.1')" in version_info
     assert '#define AppVersion "0.1.1"' in ISS_PATH.read_text(encoding="utf-8")
     assert '[string]$Version = "0.1.1"' in INSTALLER_SCRIPT_PATH.read_text(
         encoding="utf-8"
