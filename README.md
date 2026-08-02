@@ -261,7 +261,17 @@ uv sync --extra dev --extra cuda --frozen
 
 This creates `.venv` and installs the dependency versions resolved in `uv.lock`. The project
 supports CPython `>=3.11,<3.13`. `requirements.txt` is only a compatibility shim (`-e .`); it is
-not the reproducibility lockfile.
+not a lockfile and is not the reproducibility path. If an auditor needs only linting and tests
+without the optional NVIDIA user-space wheels, the smaller environment is:
+
+```powershell
+uv sync --extra dev --frozen
+```
+
+See the [official uv project-sync documentation](https://docs.astral.sh/uv/concepts/projects/sync/)
+for frozen synchronization semantics. The lockfile makes dependency resolution reproducible for
+the supported interpreter range; it does not guarantee a byte-for-byte identical EXE across
+different Windows, Python, SDK, or PyInstaller toolchains.
 
 ### 3. Obtain the pinned STT model
 
@@ -287,6 +297,8 @@ manifest entries before using the bundle:
 ```
 
 Validation checks exact filenames, sizes, and SHA-256 values. A mismatched model is rejected.
+One multilingual `large-v3-turbo` model serves RU/EN recognition. The six-file release bundle
+includes its `README.md` model card and is distributed under the model repository's `MIT` license.
 
 ### 4. Run from source
 
@@ -307,7 +319,21 @@ not locations for API tokens.
 
 ### 5. Build the portable application
 
-Create a verified PyInstaller onedir build containing the pinned STT model:
+A build without `-SttModelPath` remains lightweight: it does not download model weights and does
+not bundle the Whisper model. This is useful for inspecting whether the source compiles:
+
+```powershell
+.\scripts\build.ps1
+```
+
+Create a verified PyInstaller onedir build containing the pinned STT model with:
+
+```powershell
+.\scripts\build.ps1 -SttModelPath $ModelPath -VerifyCuda `
+  -ConfigPath .\packaging\source_release_config.yaml
+```
+
+The equivalent execution-policy-explicit invocation is:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\scripts\build.ps1 `
@@ -390,6 +416,24 @@ For a packaged build:
 Automated diagnostics prove dependency, CUDA, STT, API, capture, and packaging contracts. They do
 not replace an observed target-machine session with real microphone/system audio, the selected LM
 Studio model, LM Link routing, and participant-consented screen content.
+
+For the observed Teams/target-hardware acceptance procedure, use
+[`scripts/teams_acceptance.md`](scripts/teams_acceptance.md) and record results with
+[`docs/validation/acceptance-template.md`](docs/validation/acceptance-template.md). A synthetic
+self-test deliberately remains unobserved:
+
+```powershell
+.\.venv\Scripts\python.exe .\scripts\benchmark_session.py --mode self-test
+```
+
+Its report keeps `overall_acceptance: NOT_RUN`. Only observed event evidence may be evaluated:
+
+```powershell
+.\.venv\Scripts\python.exe .\scripts\benchmark_session.py --mode event-input `
+  --events-input .\session-events.jsonl `
+  --report .\acceptance.jsonl `
+  --session-id instructor-observed-01
+```
 
 ## Project structure
 

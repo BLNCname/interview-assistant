@@ -259,8 +259,8 @@ def test_readme_documents_the_frozen_uv_workflow_truthfully() -> None:
     assert "uv lock --check" in source
     assert "https://docs.astral.sh/uv/concepts/projects/sync/" in source
     assert "requirements.txt" in source
-    assert "не lock-файл" in source
-    assert "не обещает побайтово одинаковый EXE" in source
+    assert "not a lockfile" in source
+    assert "does not guarantee a byte-for-byte identical EXE" in source
     assert 'pip install -e ".[dev]"' not in source
 
 
@@ -277,12 +277,12 @@ def test_readme_and_gitignore_cover_lightweight_and_offline_stt_builds() -> None
 
     assert "models/" in ignored
     assert ".\\scripts\\build.ps1 -SttModelPath" in readme
-    assert "Сборка без `-SttModelPath` остаётся лёгкой" in readme
-    assert "не скачивает веса" in readme
-    assert "Одна многоязычная модель `large-v3-turbo` обслуживает RU/EN" in readme
+    assert "A build without `-SttModelPath` remains lightweight" in readme
+    assert "does not download model weights" in readme
+    assert "One multilingual `large-v3-turbo` model serves RU/EN" in readme
     assert "0a363e9161cbc7ed1431c9597a8ceaf0c4f78fcf" in readme
-    assert "`README.md` с model card" in readme
-    assert "лицензии `MIT`" in readme
+    assert "`README.md` model card" in readme
+    assert "`MIT` license" in readme
 
 
 def test_bundled_stt_fixture_is_deterministic_two_second_pcm() -> None:
