@@ -358,59 +358,59 @@ def _write_atomically(
 ) -> None:
     temporary_path: Path | None = None
     temporary_name: str | None = None
-    parent_descriptor: int | None = None
     try:
         with _stable_output_parent(resolved_output.parent) as parent_descriptor:
-            if parent_descriptor is None:
-                descriptor, temporary_name = tempfile.mkstemp(
-                    dir=resolved_output.parent,
-                    prefix=f".{resolved_output.name}.",
-                    suffix=".tmp",
-                )
-                temporary_path = Path(temporary_name)
-                with os.fdopen(descriptor, "wb") as destination:
-                    destination.write(content)
-                output_exists = _output_exists_and_is_safe(output)
-                if output_exists:
-                    _replace_file_windows(resolved_output, temporary_path)
+            try:
+                if parent_descriptor is None:
+                    descriptor, temporary_name = tempfile.mkstemp(
+                        dir=resolved_output.parent,
+                        prefix=f".{resolved_output.name}.",
+                        suffix=".tmp",
+                    )
+                    temporary_path = Path(temporary_name)
+                    with os.fdopen(descriptor, "wb") as destination:
+                        destination.write(content)
+                    output_exists = _output_exists_and_is_safe(output)
+                    if output_exists:
+                        _replace_file_windows(resolved_output, temporary_path)
+                    else:
+                        os.replace(temporary_path, resolved_output)
+                    temporary_path = None
                 else:
-                    os.replace(temporary_path, resolved_output)
-                temporary_path = None
-            else:
-                mode = _posix_target_mode(parent_descriptor, resolved_output.name)
-                descriptor, temporary_name = _open_posix_temporary(
-                    parent_descriptor,
-                    resolved_output.name,
-                    mode if mode is not None else 0o666,
-                )
-                with os.fdopen(descriptor, "wb") as destination:
-                    destination.write(content)
-                if mode is not None:
-                    os.chmod(temporary_name, mode, dir_fd=parent_descriptor)
-                os.replace(
-                    temporary_name,
-                    resolved_output.name,
-                    src_dir_fd=parent_descriptor,
-                    dst_dir_fd=parent_descriptor,
-                )
-                temporary_name = None
+                    mode = _posix_target_mode(parent_descriptor, resolved_output.name)
+                    descriptor, temporary_name = _open_posix_temporary(
+                        parent_descriptor,
+                        resolved_output.name,
+                        mode if mode is not None else 0o666,
+                    )
+                    with os.fdopen(descriptor, "wb") as destination:
+                        destination.write(content)
+                    if mode is not None:
+                        os.chmod(temporary_name, mode, dir_fd=parent_descriptor)
+                    os.replace(
+                        temporary_name,
+                        resolved_output.name,
+                        src_dir_fd=parent_descriptor,
+                        dst_dir_fd=parent_descriptor,
+                    )
+                    temporary_name = None
+            finally:
+                if temporary_path is not None:
+                    try:
+                        temporary_path.unlink()
+                    except FileNotFoundError:
+                        pass
+                    except OSError:
+                        pass
+                if temporary_name is not None and parent_descriptor is not None:
+                    try:
+                        os.unlink(temporary_name, dir_fd=parent_descriptor)
+                    except FileNotFoundError:
+                        pass
+                    except OSError:
+                        pass
     except OSError as error:
         raise ValueError("Inventory output could not be written") from error
-    finally:
-        if temporary_path is not None:
-            try:
-                temporary_path.unlink()
-            except FileNotFoundError:
-                pass
-            except OSError:
-                pass
-        if temporary_name is not None and os.name != "nt":
-            try:
-                os.unlink(temporary_name, dir_fd=parent_descriptor)
-            except FileNotFoundError:
-                pass
-            except OSError:
-                pass
 
 
 def write_inventory(dist: Path, output: Path, *, replace: bool) -> None:

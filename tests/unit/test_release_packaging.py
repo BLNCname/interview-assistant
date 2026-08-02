@@ -1193,6 +1193,30 @@ def test_inventory_generator_replacement_preserves_existing_posix_mode(tmp_path:
     assert stat.S_IMODE(output.stat().st_mode) == 0o640
 
 
+@pytest.mark.skipif(os.name == "nt", reason="requires POSIX directory descriptor cleanup")
+def test_inventory_generator_posix_failure_removes_temporary_file(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import scripts.generate_release_inventory as release_inventory
+
+    dist = _write_inventory_generator_fixture(tmp_path)
+    output = tmp_path / "inventory.json"
+    output.write_bytes(b"reviewed inventory")
+    original_chmod = os.chmod
+
+    def fail_after_temporary_creation(*args: object, **kwargs: object) -> None:
+        raise OSError("simulated chmod failure")
+
+    monkeypatch.setattr(release_inventory.os, "chmod", fail_after_temporary_creation)
+
+    with pytest.raises(ValueError, match="could not be written"):
+        release_inventory.write_inventory(dist, output, replace=True)
+
+    monkeypatch.setattr(release_inventory.os, "chmod", original_chmod)
+    assert not list(tmp_path.glob(".inventory.json.*.tmp"))
+
+
 def test_inventory_generator_cli_replaces_only_when_explicitly_requested(tmp_path: Path) -> None:
     dist = _write_inventory_generator_fixture(tmp_path)
     output = tmp_path / "inventory.json"
