@@ -615,11 +615,14 @@ def test_persistence_failure_keeps_live_config_and_does_not_request_readiness(
     reruns: list[bool] = []
     window.readiness_requested.connect(lambda: reruns.append(True))
     window.text_model_combo.setCurrentIndex(window.text_model_combo.findData("qwen-vl"))
+    window.navigation_list.setCurrentRow(1)
 
     window.save_button.click()
 
     assert config.lmstudio.text_model == ""
     assert reruns == []
+    assert window.page_stack.currentWidget() is window.diagnostics_page
+    assert window.readiness_status_label.isVisibleTo(window)
     assert "could not be saved" in window.readiness_status_label.text().casefold()
 
 

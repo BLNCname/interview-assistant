@@ -763,6 +763,9 @@ class SettingsWindow(QMainWindow):
             )
         except Exception:
             self.readiness_status_label.setText("Settings could not be saved securely")
+            self.navigation_list.setCurrentRow(
+                self.page_stack.indexOf(self.diagnostics_page)
+            )
             return False
         finally:
             if token.strip():
