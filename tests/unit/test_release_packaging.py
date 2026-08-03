@@ -77,7 +77,7 @@ def test_instructor_readme_is_english_and_covers_clean_machine_workflows() -> No
     ):
         assert heading in text
     for required in (
-        "InterviewAssistant-Setup-0.1.0-win64.exe",
+        "InterviewAssistant-Setup-0.1.1-win64.exe",
         "uv sync --extra dev --extra cuda --frozen",
         "scripts\\build.ps1",
         "scripts\\build_installer.ps1",
@@ -93,7 +93,7 @@ def test_start_here_is_a_short_english_installer_entry_point() -> None:
     text = START_HERE_PATH.read_text(encoding="utf-8")
 
     assert re.search(r"[А-Яа-яЁё]", text) is None
-    assert "InterviewAssistant-Setup-0.1.0-win64.exe" in text
+    assert "InterviewAssistant-Setup-0.1.1-win64.exe" in text
     assert "README.md" in text
     assert "InterviewAssistant.exe" not in text
     assert "InterviewAssistant-source-0.1.0.zip" not in text
@@ -104,7 +104,7 @@ def test_root_checksum_manifest_contains_only_the_installer() -> None:
 
     assert len(lines) == 1
     assert re.fullmatch(
-        r"[0-9A-F]{64}  InterviewAssistant-Setup-0\.1\.0-win64\.exe",
+        r"[0-9A-F]{64}  InterviewAssistant-Setup-0\.1\.1-win64\.exe",
         lines[0],
     )
 

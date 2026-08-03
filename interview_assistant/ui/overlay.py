@@ -186,6 +186,12 @@ class _ElidingLabel(QLabel):
             super().setText(display_text)
 
 
+class _ShrinkingIconLabel(QLabel):
+    def minimumSizeHint(self) -> QSize:
+        hint = super().minimumSizeHint()
+        return QSize(0, hint.height())
+
+
 class _RibbonSurface(QWidget):
     corner_radius = 18
 
@@ -306,7 +312,7 @@ class LiquidRibbon(QMainWindow):
         self.is_collapsed = False
         self.is_edit_mode = False
         self.answer_text = ""
-        self.question_text = "Ожидание вопроса…"
+        self.question_text = "Waiting for a question…"
         self.source_texts: tuple[str, ...] = ()
         self._fallback_action: str | None = None
         self._fallback_press_global: QPoint | None = None
@@ -552,10 +558,10 @@ class LiquidRibbon(QMainWindow):
         header_layout.setContentsMargins(0, 0, 0, 0)
         header_layout.setSpacing(7)
 
-        self.brand_icon_label = QLabel(self.header_widget)
+        self.brand_icon_label = _ShrinkingIconLabel(self.header_widget)
         self.brand_icon_label.setMaximumSize(20, 20)
         self.brand_icon_label.setSizePolicy(
-            QSizePolicy.Policy.Ignored,
+            QSizePolicy.Policy.Preferred,
             QSizePolicy.Policy.Preferred,
         )
         self.brand_icon_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
@@ -645,7 +651,7 @@ class LiquidRibbon(QMainWindow):
         self.question_layout = QVBoxLayout(self.question_panel)
         self.question_layout.setContentsMargins(0, 0, 0, 0)
         self.question_layout.setSpacing(4)
-        self.question_eyebrow = QLabel("ВОПРОС", self.question_panel)
+        self.question_eyebrow = QLabel("QUESTION", self.question_panel)
         self.question_eyebrow.setTextFormat(Qt.TextFormat.PlainText)
         self.question_eyebrow.setStyleSheet(f"color: {secondary_text}; font-size: 11px;")
         self.question_layout.addWidget(self.question_eyebrow)

@@ -9,11 +9,11 @@ the application only with informed participant consent.
 
    ```powershell
    $expected = (Get-Content .\SHA256SUMS.txt).Split()[0]
-   $actual = (Get-FileHash .\InterviewAssistant-Setup-0.1.0-win64.exe -Algorithm SHA256).Hash
+   $actual = (Get-FileHash .\InterviewAssistant-Setup-0.1.1-win64.exe -Algorithm SHA256).Hash
    if ($actual -ne $expected) { throw "Installer checksum mismatch" }
    ```
 
-2. Run `InterviewAssistant-Setup-0.1.0-win64.exe`.
+2. Run `InterviewAssistant-Setup-0.1.1-win64.exe`.
 3. Windows SmartScreen may warn that the publisher is unknown because the academic installer is
    not commercially signed. Continue only after the checksum matches.
 4. Install LM Studio 0.4 or newer separately, start its server on `127.0.0.1:1234`, and load a

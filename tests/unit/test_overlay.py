@@ -354,13 +354,25 @@ def test_ribbon_brand_icon_does_not_consume_mouse_input(qtbot) -> None:
 
 
 def test_ribbon_brand_icon_yields_horizontal_space(qtbot) -> None:
+    QApplication.instance().setWindowIcon(QIcon(str(BRAND_ICO_PATH)))
     ribbon = LiquidRibbon(EventBus(), settings=None)
     qtbot.addWidget(ribbon)
+    ribbon.resize(1_400, 180)
+    ribbon.show()
+    qtbot.waitExposed(ribbon)
 
     assert (
         ribbon.brand_icon_label.sizePolicy().horizontalPolicy()
-        is QSizePolicy.Policy.Ignored
+        is QSizePolicy.Policy.Preferred
     )
+    assert ribbon.brand_icon_label.width() == 20
+    generous_status_width = ribbon.status_label.width()
+    assert ribbon.minimumSizeHint().width() == 361
+
+    ribbon.resize(ribbon.minimumSizeHint().width(), 180)
+    qtbot.waitUntil(lambda: ribbon.width() == 361)
+    assert ribbon.brand_icon_label.width() < 20
+    assert ribbon.status_label.width() == generous_status_width
 
 
 def test_settings_opacity_maps_to_distinct_monotonic_effective_values(qtbot) -> None:
@@ -525,8 +537,8 @@ def test_reference_spacing_and_standard_collapse_icon_are_applied(qtbot) -> None
     expected = ribbon.style().standardIcon(QStyle.StandardPixmap.SP_ArrowUp)
     assert ribbon.collapse_button.icon().availableSizes() == expected.availableSizes()
     visible_labels = {label.text() for label in ribbon.findChildren(QLabel)}
-    assert "ВОПРОС" in visible_labels
-    assert ribbon.question_label.text() == "Ожидание вопроса…"
+    assert "QUESTION" in visible_labels
+    assert ribbon.question_label.text() == "Waiting for a question…"
     assert ribbon.sources_label.text() == "Sources: —"
     assert "border-radius" in ribbon.status_label.styleSheet()
 
@@ -987,7 +999,7 @@ def test_minimum_opacity_primary_and_secondary_contrast_meets_wcag_aa(qtbot) -> 
     qtbot.waitExposed(ribbon)
 
     question_eyebrow = next(
-        label for label in ribbon.findChildren(QLabel) if label.text() == "ВОПРОС"
+        label for label in ribbon.findChildren(QLabel) if label.text() == "QUESTION"
     )
     failures: list[str] = []
     for desktop in ((0.0, 0.0, 0.0), (255.0, 255.0, 255.0)):

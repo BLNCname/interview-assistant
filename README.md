@@ -37,7 +37,7 @@ Core capabilities include:
 The root installer is:
 
 ```text
-InterviewAssistant-Setup-0.1.0-win64.exe
+InterviewAssistant-Setup-0.1.1-win64.exe
 ```
 
 It contains:
@@ -145,12 +145,12 @@ have Windows wheels for the supported Python versions.
 
    ```powershell
    $expected = (Get-Content .\SHA256SUMS.txt).Split()[0]
-   $actual = (Get-FileHash .\InterviewAssistant-Setup-0.1.0-win64.exe -Algorithm SHA256).Hash
+   $actual = (Get-FileHash .\InterviewAssistant-Setup-0.1.1-win64.exe -Algorithm SHA256).Hash
    if ($actual -ne $expected) { throw "Installer checksum mismatch" }
    $actual
    ```
 
-3. Run `InterviewAssistant-Setup-0.1.0-win64.exe` and complete the installation wizard.
+3. Run `InterviewAssistant-Setup-0.1.1-win64.exe` and complete the installation wizard.
 4. Windows SmartScreen may display an unknown-publisher warning because this academic build is
    not signed with a commercial code-signing certificate. Verify the checksum before choosing to
    run it.
@@ -555,7 +555,7 @@ inventory validation. The detailed evidence is recorded in
 Verify the handoff installer at any time:
 
 ```powershell
-Get-FileHash .\InterviewAssistant-Setup-0.1.0-win64.exe -Algorithm SHA256
+Get-FileHash .\InterviewAssistant-Setup-0.1.1-win64.exe -Algorithm SHA256
 Get-Content .\SHA256SUMS.txt
 ```
 
