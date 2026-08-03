@@ -28,6 +28,12 @@ GITATTRIBUTES_PATH = ROOT / ".gitattributes"
 DIST_VALIDATOR_PATH = ROOT / "scripts" / "validate_release_dist.py"
 INVENTORY_GENERATOR_PATH = ROOT / "scripts" / "generate_release_inventory.py"
 DIST_INVENTORY_PATH = ROOT / "packaging" / "dist_inventory.json"
+CURRENT_RELEASE_REPORT_PATH = (
+    ROOT / "docs" / "validation" / "release-verification-2026-08-02-v0.1.1.md"
+)
+CURRENT_RELEASE_REPORT_LINK = (
+    "docs/validation/release-verification-2026-08-02-v0.1.1.md"
+)
 HISTORY_SCANNER_PATH = ROOT / "scripts" / "scan_release_git_history.py"
 INSTALLER_SMOKE_PATH = ROOT / "scripts" / "smoke_installer.ps1"
 PORTABLE_DOC_PATH = ROOT / "docs" / "portable-release.md"
@@ -109,6 +115,26 @@ def test_root_checksum_manifest_contains_only_the_installer() -> None:
     )
 
 
+def test_readme_links_the_current_release_verification_report() -> None:
+    text = README_PATH.read_text(encoding="utf-8")
+
+    expected_link = f"[`{CURRENT_RELEASE_REPORT_LINK}`]({CURRENT_RELEASE_REPORT_LINK})"
+    assert expected_link in text
+
+
+def test_readme_release_digest_matches_checksum_and_current_report() -> None:
+    text = README_PATH.read_text(encoding="utf-8")
+    checksum = CHECKSUMS_PATH.read_text(encoding="ascii").split()[0]
+    digest_match = re.search(
+        r"Expected SHA-256:\s*```text\s*([0-9A-F]{64})\s*```",
+        text,
+    )
+
+    assert digest_match is not None
+    assert digest_match.group(1) == checksum
+    assert checksum in CURRENT_RELEASE_REPORT_PATH.read_text(encoding="utf-8")
+
+
 def test_gitignore_exposes_duplicate_handoff_clutter() -> None:
     patterns = GITIGNORE_PATH.read_text(encoding="utf-8").splitlines()
 
@@ -122,11 +148,22 @@ def test_gitignore_exposes_duplicate_handoff_clutter() -> None:
         assert stale_ignore not in patterns
 
 
-def test_frozen_bundle_includes_prompt_but_not_machine_config() -> None:
+def test_frozen_bundle_includes_prompt_but_not_machine_or_mcp_config() -> None:
     source = SPEC_PATH.read_text(encoding="utf-8")
 
     assert '(str(ROOT / "prompts" / "interview_system.md"), "prompts")' in source
     assert "config.yaml" not in source
+    assert "mcp.template.json" not in source
+
+
+def test_reviewed_frozen_inventory_excludes_mcp_configuration() -> None:
+    inventory = json.loads(DIST_INVENTORY_PATH.read_text(encoding="utf-8"))
+    shipped_names = {
+        entry["path"].rsplit("/", 1)[-1].casefold() for entry in inventory["files"]
+    }
+
+    assert "mcp.json" not in shipped_names
+    assert "mcp.template.json" not in shipped_names
 
 
 def _powershell() -> str:
@@ -1285,6 +1322,30 @@ def test_installer_dist_validator_rejects_modified_model(tmp_path: Path) -> None
 def test_installer_dist_validator_rejects_extra_suspicious_file(tmp_path: Path) -> None:
     dist, manifest, inventory, _files = _write_dist_fixture(tmp_path)
     (dist / "_internal" / "config.yaml").write_text("machine: private\n", encoding="utf-8")
+
+    result = _run_dist_validator(dist, manifest, inventory)
+
+    assert result.returncode != 0
+    assert "distribution failed release validation" in result.stderr
+
+
+def test_installer_dist_validator_rejects_mcp_template_listed_in_inventory(
+    tmp_path: Path,
+) -> None:
+    dist, manifest, inventory, _files = _write_dist_fixture(tmp_path)
+    template_path = dist / "_internal" / "config" / "mcp.template.json"
+    template_path.parent.mkdir()
+    template_path.write_text('{"mcpServers": {}}\n', encoding="utf-8")
+    inventory_payload = json.loads(inventory.read_text(encoding="utf-8"))
+    inventory_payload["files"].append(
+        {
+            "path": "_internal/config/mcp.template.json",
+            "size": template_path.stat().st_size,
+            "sha256": hashlib.sha256(template_path.read_bytes()).hexdigest(),
+        }
+    )
+    inventory_payload["files"].sort(key=lambda entry: entry["path"])
+    inventory.write_text(json.dumps(inventory_payload), encoding="utf-8")
 
     result = _run_dist_validator(dist, manifest, inventory)
 

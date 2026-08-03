@@ -31,6 +31,7 @@ SUSPICIOUS_FILE_NAMES = frozenset(
         "id_rsa",
         "interview_assistant.log",
         "mcp.json",
+        "mcp.template.json",
         "secret.json",
         "secrets.json",
         "token.json",

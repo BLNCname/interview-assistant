@@ -33,9 +33,10 @@
 - Handoff-contract RED: 3 focused failures proved README, START_HERE, and the
   checksum still named 0.1.0; GREEN: 3 passed after the verified binary existed
   and those contracts were updated to 0.1.1.
-- The final clean PyInstaller build reran the full suite: 844 passed and 5
-  skipped in 39.54 seconds.
-- Final tracked-tree gate: 844 passed and 5 skipped in 41.67 seconds; Ruff
+- The corrective final clean PyInstaller build reran the expanded full suite:
+  848 passed and 5 skipped in 42.78 seconds.
+- The initial pre-correction tracked-tree gate reported 844 passed and 5 skipped
+  in 41.67 seconds; Ruff
   reported zero findings, `git diff --check` exited 0, and a fresh root
   installer digest matched `SHA256SUMS.txt`.
 
@@ -116,11 +117,12 @@
 
 - Inventory generation occurred only after the final model, frozen diagnostics,
   CUDA/STT, GUI, and icon checks.
-- Final strict inventory: 4,093 files, 275 directories, and 4,193,298,972 bytes.
-- Semantic comparison with the prior inventory found zero added and zero removed
-  paths. Eight paths changed: the reviewed branding ICO, the application EXE,
-  and six same-size package `RECORD` metadata files regenerated from the isolated
-  worktree environment.
+- Final strict inventory: 4,092 files, 304 actual nonempty directories, and
+  4,193,298,768 bytes.
+- Semantic comparison with the reviewed pre-correction inventory found zero
+  added paths, exactly one removed path
+  (`_internal/config/mcp.template.json`), and two same-size changed paths
+  (`_internal/base_library.zip` and `InterviewAssistant.exe`).
 - Strict validation rehashed the complete tree and exited 0. It confirmed the
   exact six-file STT bundle and the single allowlisted Silero VAD ONNX model.
 - No token, credential, secret, user config, transcript, screenshot, log, cache,
@@ -131,16 +133,61 @@
 
 ## Installer and handoff
 
-- Inno Setup build: exit 0 in 990.35 seconds. The builder validated the complete
+- Inno Setup build: exit 0 in 981.151 seconds. The builder validated the complete
   distribution/model inventory before compilation.
-- Isolated smoke: exit 0 in 160.91 seconds; install 0, frozen diagnostics 0,
+- Isolated smoke: exit 0 in 161.827 seconds; install 0, frozen diagnostics 0,
   inventory/model hashes validated, uninstall 0, and install tree removed.
 - Root handoff artifact:
   `InterviewAssistant-Setup-0.1.1-win64.exe`.
-- Size: 2,439,441,604 bytes.
+- Size: 2,439,165,149 bytes.
 - SHA-256:
-  `1FCBEC8B098E42490DEF5ACC4DAB2404E923BC4CB6CB5CFD7C9BBE1FAD3AFAFA`.
+  `80BEAAA8B9D048367108DA1C5B2FEBF076EBE8B60F3BC8AD144940F4153A08B9`.
 - `SHA256SUMS.txt` contains exactly that one authoritative uppercase digest line.
+
+## Corrective fix round 1
+
+- Review identified that the PyInstaller `datas` list explicitly included
+  `config/mcp.template.json`, while the strict distribution validator rejected
+  `mcp.json` but not the template name. Inventory regeneration therefore made
+  the unwanted MCP configuration look reviewed. The release documentation also
+  linked the legacy report and displayed a digest independent of the checksum.
+- RED: five focused tests failed for the legacy report link/digest, explicit
+  PyInstaller MCP data, reviewed MCP inventory entry, and strict-validator
+  acceptance. GREEN: all five passed after removing the data entry, forbidding
+  `mcp.template.json`, adding inventory/validator regressions, and binding README
+  to this report and `SHA256SUMS.txt`. After root artifact replacement, the
+  digest contract independently went RED once and then GREEN after documentation
+  received the rebuilt digest.
+- The independent corrective source gate recorded 848 passed, 5 skipped in
+  44.41 seconds, Ruff clean, lock/sync/diff checks 0. Exact commands and outputs
+  are retained in `task-8-evidence/source-gate.log`.
+- The corrective final gate recorded 848 passed, 5 skipped in 44.13 seconds;
+  Ruff and `git diff --check` exited 0; strict inventory validation exited 0;
+  root checksum equality and exact one-line format were true; frozen-tree and
+  inventory MCP path counts were both zero; the LM-token grep found no match.
+- The pinned model download/validation retained revision
+  `0a363e9161cbc7ed1431c9597a8ceaf0c4f78fcf` and the exact six manifest files.
+  Frozen diagnostics report `status=ok`, `frozen=true`, `config=missing`, CUDA
+  ready with one device and zero missing DLLs. Independent real bundled STT
+  reports `status=ok`, `device=cuda`, load 5.423408 seconds, transcription
+  0.383761 seconds, and real-time factor 0.191881.
+- Inventory was generated only after that frozen validation. Its semantic JSON
+  review records zero MCP/machine-config paths, one intended removal, zero
+  additions, and the exact six pinned STT paths; strict full-tree validation
+  exited 0 in 11.903 seconds.
+- The rebuilt installer passed the primary isolated smoke and a second direct
+  installed-tree MCP audit. The latter observed
+  `installed_mcp_path_count=0`, strict installed validation 0, uninstall 0, and
+  complete tree removal. Extracted application and installer icons remained
+  recognizable and shared SHA-256
+  `25E18FB6B8EBF1FECB0155AE6F75582B37A75755BB9E94BF3143A95F81CDF8C1`.
+- Machine-readable and command evidence is retained under
+  `.superpowers/sdd/2026-08-02-unified-branding-and-graphite-ui/task-8-evidence/`,
+  including `source-gate.log`, `model-validation.log`, `build.log`,
+  `packaged-diagnostics.json`, `real-stt-inference.json`,
+  `inventory-review-summary.json`, `inventory-validation.log`,
+  `installer-build.log`, `installer-smoke.json`, and
+  `installed-mcp-audit.json`.
 
 ## Remaining acceptance boundary
 

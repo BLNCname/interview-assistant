@@ -67,7 +67,6 @@ def _optional_stt_bundle_datas():
 datas = [
     (str(ROOT / "assets" / "diagnostics" / "stt-smoke.wav"), "assets/diagnostics"),
     (str(ROOT / "assets" / "branding" / "interview-assistant.ico"), "assets/branding"),
-    (str(ROOT / "config" / "mcp.template.json"), "config"),
     (str(MANIFEST_PATH), "packaging"),
     (str(ROOT / "prompts" / "interview_system.md"), "prompts"),
 ]

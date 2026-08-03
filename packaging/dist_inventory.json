@@ -465,7 +465,7 @@
     {
       "path": "_internal/base_library.zip",
       "size": 1334834,
-      "sha256": "bcac4de5593f58d2188e24f9807a4c2df65074168d99db7f8ec28484562102f5"
+      "sha256": "a1f15787862b0130e0d62ee00526d7b48cf6e991edec094b236480f68cd3a2fd"
     },
     {
       "path": "_internal/certifi/cacert.pem",
@@ -506,11 +506,6 @@
       "path": "_internal/click-8.4.2.dist-info/WHEEL",
       "size": 82,
       "sha256": "1b68144734c4b66791f27add5d425f3620775585718a03d0f9b110ba3a4d88db"
-    },
-    {
-      "path": "_internal/config/mcp.template.json",
-      "size": 204,
-      "sha256": "16a4d1dab9827f797ff66d3c4b626c371e15399a7232f751c55130c8e33315b5"
     },
     {
       "path": "_internal/ctranslate2-4.8.1.dist-info/entry_points.txt",
@@ -20465,7 +20460,7 @@
     {
       "path": "InterviewAssistant.exe",
       "size": 12551218,
-      "sha256": "87f95a976f300b805c5369d73cced78a4b1e8ec8ce3c41e24e69ef735fcaf428"
+      "sha256": "409e59a0f3f57a1bce64cc4ab0bad95b5e4e467e13bf037a3f97b8c26c6c5c13"
     }
   ]
 }

@@ -550,7 +550,7 @@ release with a complete review.
 The shipped installer was built and tested on Windows with real CUDA STT, frozen diagnostics, a
 15-second GUI smoke test, an isolated install/diagnostics/uninstall cycle, and exact file/model
 inventory validation. The detailed evidence is recorded in
-[`docs/validation/release-verification-2026-08-02.md`](docs/validation/release-verification-2026-08-02.md).
+[`docs/validation/release-verification-2026-08-02-v0.1.1.md`](docs/validation/release-verification-2026-08-02-v0.1.1.md).
 
 Verify the handoff installer at any time:
 
@@ -562,5 +562,5 @@ Get-Content .\SHA256SUMS.txt
 Expected SHA-256:
 
 ```text
-1FF2929C390880B911D92E3AC452E908A7DEEF9AE89CC43D9EFF43647F151E64
+80BEAAA8B9D048367108DA1C5B2FEBF076EBE8B60F3BC8AD144940F4153A08B9
 ```
