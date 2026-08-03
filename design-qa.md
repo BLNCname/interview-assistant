@@ -1,67 +1,55 @@
-# Liquid Ribbon — Design QA
+# Unified Graphite Glass — Design QA
 
-## Evidence
+## Visual source of truth
 
-- Source visual truth: historical `.superpowers/brainstorm/.../overlay-layout-options-v2.html`, variant B.
-- Source capture: historical `.superpowers/sdd/task-10-reference-ribbon.png` (`1872×117`).
-- Rendered implementation: historical `.superpowers/sdd/task-10-overlay-windows-final.png` (`1888×142`).
-- Full-view comparison: historical `.superpowers/sdd/task-10-comparison-native-final.png`.
-- Focused comparisons:
-  - historical `.superpowers/sdd/task-10-comparison-focused-left-final.png`;
-  - historical `.superpowers/sdd/task-10-comparison-focused-answer-final.png`.
-- Viewport: Windows desktop at `1920×1080`; Ribbon uses the available width minus the specified 16 px side insets.
-- State: dark theme, expanded Ribbon, opacity `0.88`, status/model chips, one Russian question, a three-line streamed answer, and two sources.
+- Approved brand asset: `assets/branding/interview-assistant-logo-cutout.png` (`935×935`, transparent rounded corners).
+- Approved UI direction: `docs/superpowers/specs/2026-08-02-unified-branding-and-graphite-ui-design.md`, A1 Graphite Glass with sidebar pages.
+- The temporary browser mock used during option selection was intentionally removed during the approved repository cleanup. Final native Qt captures are therefore compared with the approved asset and written A1 specification, not with a surviving pixel-for-pixel browser target.
 
-The HTML reference was opened successfully in the local browser preview. The implementation is a native PyQt6 window, so it was rendered and captured through the normal Windows Qt platform rather than a browser canvas. Browser console checks are not applicable to the native window; the reference preview did not show an error state. The forced Qt `offscreen` backend was used only for automated layout tests because it exposes no installed system fonts on this machine.
+## Implementation evidence
+
+All final captures are retained under `.superpowers/sdd/2026-08-02-unified-branding-and-graphite-ui/task-8-evidence/` for release review:
+
+- `gui-settings-general.png`, `gui-settings-models.png`, `gui-settings-audio.png`, `gui-settings-hotkeys.png`, `gui-settings-appearance.png`, and `gui-settings-diagnostics.png` — Settings window at `1360×1080` across all six pages;
+- `gui-ribbon-widget-grab.png` and `gui-ribbon-widget-grab-edit.png` — Ribbon default and edit states at `1400×188`;
+- `gui-ribbon-capture-exclusion.png` — capture-affinity smoke evidence;
+- `exe-icon-smoke.png` and `installer-icon-smoke.png` — representative Windows shell icon renders at `32×32`.
+
+The source logo and final Ribbon/Settings evidence were opened together for direct visual comparison. The application uses native PyQt6 windows, so browser-console checks do not apply.
 
 ## Findings
 
-No actionable P0, P1, or P2 findings remain.
+No P0, P1, or P2 visual issue remains.
 
-The final full-view comparison preserves variant B's wide ribbon composition, `105:170` question/answer proportions, 16 px screen inset, 18 px corner radius, 14×12 px inner padding, 14 px body gap, slate glass gradient, and cyan/violet edge treatment. The implementation is 25 px taller than the source capture because it includes the required persistent sources row and a native collapse control. This is an intentional product constraint, not uncontrolled layout drift.
+- Branding: the application, Ribbon, executable, and installer consistently use the approved transparent liquid-glass mark. Small icon renders remain centered and recognizable without restoring the removed black square background.
+- Composition: Settings implements the approved A1 sidebar hierarchy, six stable pages, persistent footer actions, and a complete Diagnostics table. Ribbon preserves its compact question/answer composition and clearly exposes default and edit states.
+- Color: graphite surfaces are consistent across both windows. `#50DE73` is used selectively for navigation, readiness, edit state, focus, and the primary Start action; warning and failure semantics remain amber/red.
+- Typography and contrast: primary labels and answer text remain high-contrast and readable; secondary text is visibly subordinate without becoming illegible. Markdown headings, emphasis, and code no longer expose raw delimiter characters.
+- Spacing and resilience: page margins, control heights, sidebar rhythm, panel radii, and footer alignment are internally consistent. Captures show no clipping, overlap, unintended horizontal scrolling, or broken resizing state.
+- Native behavior: the dark Windows title bar retains standard minimize, maximize, close, move, resize, scaling, and accessibility behavior. Ribbon capture exclusion and click-through compatibility remain intact.
 
-### Required fidelity surfaces
+### P3 polish observation
 
-- Fonts and typography: native Windows resolves Segoe UI; the implementation keeps the intended 11–14 px hierarchy, readable line height, semibold question/first answer line, and correct Cyrillic/Latin glyphs. Focused evidence confirms wrapping and optical hierarchy. The reference capture itself contains mojibake, while the implementation renders valid UTF-8 copy.
-- Spacing and layout rhythm: header, two-column body, answer inset, sources row, margins, gaps, border, and radius remain aligned with variant B. The post-fix representative footprint returned from `1888×156` to `1888×142` in the captured bold-text state (the non-capturing plain-text measurement is `1888×140`).
-- Colors and visual tokens: the slate gradient, translucent chips, green status indicator, cyan/violet edge, and white/blue text match the source direction. At default opacity the palette is visually stable; muted text is minimally lightened from `#94a3b8` to `#9dabbe` to preserve AA contrast.
-- Image quality and asset fidelity: the target contains no photographic, illustrative, logo, or decorative raster assets. The collapse affordance uses the platform Qt standard icon as required; no emoji, placeholder art, handcrafted SVG, or CSS-art substitute was introduced.
-- Copy and content: Russian and English content renders correctly, source names remain plain text, and unsafe HTML is inert. The sample status differs from the reference's dynamic `Live transcript` state but occupies the same status-chip role and does not alter hierarchy.
-- Accessibility and resilience: all small/secondary text reaches at least `4.5:1` at minimum opacity against the worst-case white desktop composite. Long uninterrupted question/source tokens are pixel-elided without widening the Ribbon, while full raw values remain in application state. Keyboard-selectable answer text, scrolling, and the native collapse button remain available.
+The native dotted keyboard-focus cue in the Settings sidebar can appear faintly pink at some Windows scaling/theme combinations. Focus remains clearly visible and keyboard navigation works, so this is cosmetic native-platform rendering rather than a handoff blocker. Replacing it would require custom focus painting and could reduce accessibility consistency.
 
-## Comparison history
+## Primary states verified
 
-1. Initial comparison — blocked:
-   - P2: two long URL-like sources expanded an 800 px Ribbon to 7,326 px; a 2,000-character question expanded it to 28,152–35,302 px.
-   - P2: minimum-opacity metadata measured only `2.22–3.62:1` instead of WCAG AA `4.5:1`.
-   - Fix: added bounded pixel-aware middle elision with preserved raw state, ignored horizontal minimum hints, shared production color constants, and adaptive accessible foreground colors.
-   - Post-fix evidence: long-content show/collapse/expand regression remains bounded at 800 px; numeric contrast regression is at least `4.5:1`; full suite passed.
-2. Second comparison — blocked:
-   - P2: the new eliding labels left cached narrow-width height hints, increasing the normal Windows Ribbon from `1888×140` to `1888×156`.
-   - Fix: auto-height now uses each approved `105:170` column width and `heightForWidth()` for question and source labels.
-   - Post-fix evidence: final native capture is `1888×142` with bold sample text, the plain-text measurement is `1888×140`, and the long-token, max-height, scrolling, and collapse regressions remain green.
-3. Final comparison — passed:
-   - Full-view and both focused comparisons show no remaining actionable fidelity, overflow, contrast, asset, typography, copy, or interaction issue.
+- Settings: General, Models, Audio, Hotkeys, Appearance, and Diagnostics;
+- all seven configurable hotkeys and Restore defaults;
+- persistent Save, Run checks, and readiness-gated Start controls;
+- Ribbon: normal, edit/move/resize, Markdown answer, and capture-exclusion states;
+- executable and installer icon resources at representative shell size;
+- graphite theme and best-effort native dark-title-bar fallback.
 
-## Primary interactions tested
+## Acceptance checklist
 
-- incremental answer streaming, reset, stale-request rejection, and automatic scroll;
-- safe complete-delta bold/inline-code formatting with inert HTML and disabled external links;
-- collapse/expand, the deterministic fallback move/resize path forced by automated tests, maximum-height scrolling, and geometry persistence/restoration;
-- long question/source input before show and through collapse/expand;
-- low-opacity contrast, normal short content, app ownership, show, and idempotent close.
-
-## Implementation checklist
-
-- [x] Match variant B composition and liquid-glass visual tokens.
-- [x] Preserve correct UTF-8 Russian/English copy and plain-text safety.
-- [x] Keep the compact normal footprint while bounding pathological content.
-- [x] Verify minimum-opacity contrast numerically.
-- [x] Compare final full view and focused typography/layout regions.
-- [x] Re-run the focused and complete automated suites after both QA fixes.
-
-## Follow-up polish
-
-No P3 polish is required for handoff. Native Windows `startSystemMove()`/`startSystemResize()`, real multi-monitor DPI behavior, and Teams full-screen exclusion remain system acceptance checks in later tasks, not visual-QA findings for Task 10.
+- [x] Approved transparent logo is used without a black outer background.
+- [x] Settings and Ribbon share the same graphite/green visual system.
+- [x] A1 sidebar organization and persistent actions are implemented.
+- [x] Text, Markdown, status, warning, and error states remain legible.
+- [x] Native window controls and keyboard focus remain available.
+- [x] Ribbon click-through and capture-affinity behavior are preserved.
+- [x] Final native screenshots and icon evidence were inspected.
+- [x] No P0, P1, or P2 visual issue remains.
 
 final result: passed
