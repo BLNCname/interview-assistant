@@ -740,12 +740,12 @@ async def test_manual_screenshot_emits_creating_ready_and_attached_states(
     await runtime.capture_manual_screenshot()
 
     assert messages[-2:] == [
-        "Снимок создаётся",
-        "Снимок готов для следующего запроса",
+        "Capturing screenshot...",
+        "Screenshot is ready for the next request.",
     ]
     await runtime.submit_hypothesis(_hypothesis("Explain a binary search tree"))
 
-    assert "Снимок добавлен в запрос" in messages
+    assert "Screenshot added to the request." in messages
     assert runtime.manual_image_path is None
     assert "data:image/jpeg;base64," in str(client.payloads[-1]["input"])
     await runtime.shutdown()
@@ -789,7 +789,7 @@ async def test_failed_new_screenshot_clears_stale_pending_image(
     await runtime.capture_manual_screenshot()
 
     assert runtime.manual_image_path is None
-    assert "Снимок не создан" in messages[-1]
+    assert "Screenshot was not captured" in messages[-1]
     await runtime.shutdown()
 
 
@@ -888,7 +888,7 @@ async def test_payload_build_failure_consumes_manual_image_without_attached_stat
     await _wait_until(lambda: "Request processing failed." in messages)
 
     assert runtime.manual_image_path is None
-    assert "Снимок добавлен в запрос" not in messages
+    assert "Screenshot added to the request." not in messages
     assert str(capture.path) not in " ".join(messages)
     assert "sensitive" not in " ".join(messages)
     await runtime.shutdown()
@@ -912,8 +912,8 @@ async def test_action_failure_is_visible_without_leaking_backend_details(
     await _wait_until(lambda: bool(notifications))
 
     assert notifications == [
-        "Снимок создаётся",
-        "Снимок не создан: ошибка захвата",
+        "Capturing screenshot...",
+        "Screenshot was not captured: capture error.",
     ]
     assert "sensitive" not in " ".join(notifications)
     await runtime.shutdown()

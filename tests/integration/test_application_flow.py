@@ -308,9 +308,9 @@ async def test_manual_screenshot_lifecycle_is_visible_and_attaches_once(
     await runtime.handle_hypothesis(_final(AudioSource.SYSTEM, "Describe this screen"))
 
     assert notifications == [
-        "Снимок создаётся",
-        "Снимок готов для следующего запроса",
-        "Снимок добавлен в запрос",
+        "Capturing screenshot...",
+        "Screenshot is ready for the next request.",
+        "Screenshot added to the request.",
     ]
     assert runtime.manual_image_path is None
     assert "data:image/jpeg;base64," in str(client.payloads[0]["input"])

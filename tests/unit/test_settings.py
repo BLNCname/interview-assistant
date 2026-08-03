@@ -210,6 +210,39 @@ def test_settings_page_switching_preserves_unsaved_values(qtbot, tmp_path) -> No
     assert window.text_model_combo.currentData() == "gemma"
 
 
+def test_settings_controls_belong_to_the_approved_pages(qtbot, tmp_path) -> None:
+    window, _, _, _ = _window(qtbot, tmp_path)
+
+    assert window.general_page.isAncestorOf(window.language_combo)
+    assert window.general_page.isAncestorOf(window.search_mode_combo)
+    assert not window.audio_page.isAncestorOf(window.language_combo)
+
+    assert window.models_page.isAncestorOf(window.text_model_combo)
+    assert window.models_page.isAncestorOf(window.vision_model_combo)
+    assert window.models_page.isAncestorOf(window.shared_instance_label)
+    assert window.models_page.isAncestorOf(window.token_edit)
+    assert not window.general_page.isAncestorOf(window.token_edit)
+
+    assert window.audio_page.isAncestorOf(window.system_device_combo)
+    assert window.audio_page.isAncestorOf(window.microphone_device_combo)
+
+
+def test_appearance_explains_ribbon_edit_mode_geometry_persistence(
+    qtbot,
+    tmp_path,
+) -> None:
+    window, _, _, _ = _window(qtbot, tmp_path)
+
+    help_text = window.ribbon_geometry_help_label.text().casefold()
+    assert window.appearance_page.isAncestorOf(window.ribbon_geometry_help_label)
+    assert window.ribbon_geometry_help_label.wordWrap()
+    assert window.ribbon_geometry_help_label.accessibleName() == "Ribbon edit mode help"
+    assert "ribbon edit mode" in help_text
+    assert "position" in help_text
+    assert "size" in help_text
+    assert "persisted automatically" in help_text
+
+
 def test_hidden_settings_pages_receive_dynamic_choice_refreshes(qtbot, tmp_path) -> None:
     window, _, _, _ = _window(qtbot, tmp_path)
     text_combo = window.text_model_combo
@@ -339,6 +372,112 @@ def test_hotkey_only_save_updates_live_map_without_invalidating_readiness(
     assert window.readiness_report is report
     assert window.start_button.isEnabled()
     assert reruns == []
+
+
+def test_run_checks_with_hotkey_only_edit_saves_and_requests_readiness_once(
+    qtbot,
+    tmp_path,
+) -> None:
+    config = AppConfig()
+    persisted: list[AppConfig] = []
+    live_updates: list[dict[HotkeyAction, str]] = []
+    binding = SettingsBinding(
+        config,
+        FakeSecretStore(),
+        persist=lambda candidate: persisted.append(candidate.model_copy(deep=True)),
+        apply_hotkeys=lambda bindings: live_updates.append(dict(bindings)),
+    )
+    window = SettingsWindow(
+        binding,
+        audio_devices=(),
+        models=(),
+        settings=QSettings(str(tmp_path / "run-checks-hotkey.ini"), QSettings.Format.IniFormat),
+    )
+    qtbot.addWidget(window)
+    window.set_readiness_report(_report("ready"))
+    saved: list[bool] = []
+    reruns: list[bool] = []
+    window.settings_saved.connect(lambda: saved.append(True))
+    window.readiness_requested.connect(lambda: reruns.append(True))
+
+    window.hotkey_edits[HotkeyAction.SCREENSHOT].setKeySequence("Ctrl+Alt+F11")
+    window.readiness_button.click()
+
+    assert persisted == [config]
+    assert live_updates == [config.hotkeys.as_bindings()]
+    assert config.hotkeys.screenshot == "ctrl+alt+f11"
+    assert saved == [True]
+    assert reruns == [True]
+    assert window.readiness_report is None
+    assert not window.start_button.isEnabled()
+
+
+@pytest.mark.parametrize("change_model", [False, True], ids=["no-change", "normal-change"])
+def test_run_checks_saves_then_requests_readiness_once(
+    qtbot,
+    tmp_path,
+    change_model: bool,
+) -> None:
+    config = AppConfig()
+    persisted: list[AppConfig] = []
+    binding = SettingsBinding(
+        config,
+        FakeSecretStore(),
+        persist=lambda candidate: persisted.append(candidate.model_copy(deep=True)),
+    )
+    window = SettingsWindow(
+        binding,
+        audio_devices=(),
+        models=(SettingsChoice("qwen-vl", "Qwen VL"),),
+        settings=QSettings(str(tmp_path / f"run-checks-{change_model}.ini"), QSettings.Format.IniFormat),
+    )
+    qtbot.addWidget(window)
+    saved: list[bool] = []
+    reruns: list[bool] = []
+    window.settings_saved.connect(lambda: saved.append(True))
+    window.readiness_requested.connect(lambda: reruns.append(True))
+    if change_model:
+        window.text_model_combo.setCurrentIndex(window.text_model_combo.findData("qwen-vl"))
+
+    window.readiness_button.click()
+
+    assert persisted == [config]
+    assert saved == [True]
+    assert reruns == [True]
+
+
+def test_run_checks_validation_failure_does_not_save_or_request_readiness(
+    qtbot,
+    tmp_path,
+) -> None:
+    config = AppConfig()
+    persisted: list[AppConfig] = []
+    binding = SettingsBinding(
+        config,
+        FakeSecretStore(),
+        persist=lambda candidate: persisted.append(candidate.model_copy(deep=True)),
+    )
+    window = SettingsWindow(
+        binding,
+        audio_devices=(),
+        models=(),
+        settings=QSettings(str(tmp_path / "run-checks-invalid.ini"), QSettings.Format.IniFormat),
+    )
+    qtbot.addWidget(window)
+    saved: list[bool] = []
+    reruns: list[bool] = []
+    window.settings_saved.connect(lambda: saved.append(True))
+    window.readiness_requested.connect(lambda: reruns.append(True))
+    window.hotkey_edits[HotkeyAction.SCREENSHOT].setKeySequence("Ctrl+Alt+F11")
+    window.hotkey_edits[HotkeyAction.PAUSE].setKeySequence("Ctrl+Alt+F11")
+
+    window.readiness_button.click()
+
+    assert persisted == []
+    assert config.hotkeys == HotkeysConfig()
+    assert saved == []
+    assert reruns == []
+    assert "conflict" in window.notification_label.text().casefold()
 
 
 def test_hotkey_manager_failure_restores_previous_live_map_and_config(

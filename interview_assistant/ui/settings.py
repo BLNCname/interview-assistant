@@ -330,7 +330,7 @@ class SettingsWindow(QMainWindow):
         root.addLayout(actions)
 
         self.save_button.clicked.connect(self.save)
-        self.readiness_button.clicked.connect(self.save)
+        self.readiness_button.clicked.connect(self.run_checks)
         self.start_button.clicked.connect(self._request_start)
 
     def _build_general_page(self) -> QWidget:
@@ -343,6 +343,15 @@ class SettingsWindow(QMainWindow):
         general.setObjectName("settingsCard")
         form = QFormLayout(general)
 
+        self.language_combo = QComboBox(general)
+        for label, key in (
+            ("Auto (Russian / English)", "auto"),
+            ("Russian", "ru"),
+            ("English", "en"),
+        ):
+            self.language_combo.addItem(label, key)
+        self._select_data(self.language_combo, self._binding.config.audio.language)
+
         self.search_mode_combo = QComboBox(general)
         for label, key in (
             ("Off", "off"),
@@ -352,12 +361,8 @@ class SettingsWindow(QMainWindow):
             self.search_mode_combo.addItem(label, key)
         self._select_data(self.search_mode_combo, self._binding.config.search.mode)
 
-        self.token_edit = QLineEdit(general)
-        self.token_edit.setEchoMode(QLineEdit.EchoMode.Password)
-        self._refresh_token_placeholder()
-
+        form.addRow("Recognition language", self.language_combo)
         form.addRow("Web search", self.search_mode_combo)
-        form.addRow("LM Studio token", self.token_edit)
         layout.addWidget(general)
         layout.addStretch(1)
         return page
@@ -387,10 +392,14 @@ class SettingsWindow(QMainWindow):
         self.shared_instance_label = QLabel(models_group)
         self.shared_instance_label.setWordWrap(True)
         self._update_shared_instance_annotation()
+        self.token_edit = QLineEdit(models_group)
+        self.token_edit.setEchoMode(QLineEdit.EchoMode.Password)
+        self._refresh_token_placeholder()
 
         form.addRow("Text model", self.text_model_combo)
         form.addRow("Vision model", self.vision_model_combo)
         form.addRow("Model instances", self.shared_instance_label)
+        form.addRow("LM Studio token", self.token_edit)
         layout.addWidget(models_group)
         layout.addStretch(1)
         return page
@@ -420,18 +429,8 @@ class SettingsWindow(QMainWindow):
             empty_label="Not selected",
             empty_data=None,
         )
-        self.language_combo = QComboBox(audio)
-        for label, key in (
-            ("Auto (Russian / English)", "auto"),
-            ("Russian", "ru"),
-            ("English", "en"),
-        ):
-            self.language_combo.addItem(label, key)
-        self._select_data(self.language_combo, self._binding.config.audio.language)
-
         form.addRow("System audio", self.system_device_combo)
         form.addRow("Microphone", self.microphone_device_combo)
-        form.addRow("Recognition language", self.language_combo)
         layout.addWidget(audio)
         layout.addStretch(1)
         return page
@@ -464,9 +463,17 @@ class SettingsWindow(QMainWindow):
         self.max_height_spin = QSpinBox(appearance)
         self.max_height_spin.setRange(120, 900)
         self.max_height_spin.setValue(self._binding.config.overlay.max_height)
+        self.ribbon_geometry_help_label = QLabel(
+            "Use Ribbon edit mode to change the Ribbon position and size. "
+            "These changes are persisted automatically.",
+            appearance,
+        )
+        self.ribbon_geometry_help_label.setWordWrap(True)
+        self.ribbon_geometry_help_label.setAccessibleName("Ribbon edit mode help")
 
         form.addRow("Overlay opacity", self.opacity_spin)
         form.addRow("Overlay maximum height", self.max_height_spin)
+        form.addRow(self.ribbon_geometry_help_label)
         layout.addWidget(appearance)
         layout.addStretch(1)
         return page
@@ -754,6 +761,16 @@ class SettingsWindow(QMainWindow):
         self.navigation_list.setCurrentRow(self.page_stack.indexOf(self.diagnostics_page))
 
     def save(self) -> bool:
+        return self._save_settings(request_readiness=True)
+
+    def run_checks(self) -> bool:
+        if not self._save_settings(request_readiness=False):
+            return False
+        self.clear_readiness()
+        self.readiness_requested.emit()
+        return True
+
+    def _save_settings(self, *, request_readiness: bool) -> bool:
         token = self.token_edit.text()
         try:
             hotkeys = self._hotkey_bindings()
@@ -794,7 +811,7 @@ class SettingsWindow(QMainWindow):
                 self._refresh_token_placeholder()
         self._update_shared_instance_annotation()
         self.settings_saved.emit()
-        if requires_readiness:
+        if requires_readiness and request_readiness:
             self.clear_readiness()
             self.readiness_requested.emit()
         return True

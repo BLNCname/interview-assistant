@@ -525,7 +525,7 @@ class ApplicationRuntime(QObject):
             image_path,
         )
         if manual_image_path is not None:
-            self.application.events.notification.emit("Снимок добавлен в запрос")
+            self.application.events.notification.emit("Screenshot added to the request.")
         self._set_state(ApplicationState.GENERATING)
         request_id = self.services.coordinator.submit(payload)
         outcome = await self.services.coordinator.wait(request_id)
@@ -718,7 +718,7 @@ class ApplicationRuntime(QObject):
         self._manual_capture_generation += 1
         generation = self._manual_capture_generation
         self._manual_image_path = None
-        self.application.events.notification.emit("Снимок создаётся")
+        self.application.events.notification.emit("Capturing screenshot...")
         try:
             result = await self.services.capture.capture_for_event("manual", manual=True)
         except asyncio.CancelledError:
@@ -726,15 +726,21 @@ class ApplicationRuntime(QObject):
         except Exception:
             if generation != self._manual_capture_generation:
                 return
-            self.application.events.notification.emit("Снимок не создан: ошибка захвата")
+            self.application.events.notification.emit(
+                "Screenshot was not captured: capture error."
+            )
             return
         if generation != self._manual_capture_generation:
             return
         if result.status != "captured" or result.path is None:
-            self.application.events.notification.emit("Снимок не создан: снимок недоступен")
+            self.application.events.notification.emit(
+                "Screenshot was not captured: screenshot unavailable."
+            )
             return
         self._manual_image_path = result.path
-        self.application.events.notification.emit("Снимок готов для следующего запроса")
+        self.application.events.notification.emit(
+            "Screenshot is ready for the next request."
+        )
 
     def clear_history(self) -> None:
         self.services.transcript_store.clear()
