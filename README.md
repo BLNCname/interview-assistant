@@ -551,6 +551,9 @@ The shipped installer was built and tested on Windows with real CUDA STT, frozen
 15-second GUI smoke test, an isolated install/diagnostics/uninstall cycle, and exact file/model
 inventory validation. The detailed evidence is recorded in
 [`docs/validation/release-verification-2026-08-02-v0.1.1.md`](docs/validation/release-verification-2026-08-02-v0.1.1.md).
+The final-review rebuild passed 854 tests with 5 skipped and ships a reviewed
+4,092-file, 304-directory distribution totaling 4,193,299,018 bytes. The root
+installer is 2,439,149,183 bytes.
 
 Verify the handoff installer at any time:
 
@@ -562,5 +565,5 @@ Get-Content .\SHA256SUMS.txt
 Expected SHA-256:
 
 ```text
-80BEAAA8B9D048367108DA1C5B2FEBF076EBE8B60F3BC8AD144940F4153A08B9
+D17DD0C8AB35CABA5CF39435B812D64E57CE5D31E741EF0A19551E507D63E4E5
 ```

@@ -118,11 +118,10 @@
 - Inventory generation occurred only after the final model, frozen diagnostics,
   CUDA/STT, GUI, and icon checks.
 - Final strict inventory: 4,092 files, 304 actual nonempty directories, and
-  4,193,298,768 bytes.
-- Semantic comparison with the reviewed pre-correction inventory found zero
-  added paths, exactly one removed path
-  (`_internal/config/mcp.template.json`), and two same-size changed paths
-  (`_internal/base_library.zip` and `InterviewAssistant.exe`).
+  4,193,299,018 bytes.
+- Semantic comparison with the preceding reviewed inventory found zero added
+  paths, zero removed paths, and exactly one changed path
+  (`InterviewAssistant.exe`).
 - Strict validation rehashed the complete tree and exited 0. It confirmed the
   exact six-file STT bundle and the single allowlisted Silero VAD ONNX model.
 - No token, credential, secret, user config, transcript, screenshot, log, cache,
@@ -133,15 +132,15 @@
 
 ## Installer and handoff
 
-- Inno Setup build: exit 0 in 981.151 seconds. The builder validated the complete
+- Inno Setup build: exit 0 in 1,049.9 seconds. The builder validated the complete
   distribution/model inventory before compilation.
-- Isolated smoke: exit 0 in 161.827 seconds; install 0, frozen diagnostics 0,
+- Isolated smoke: exit 0 in 162.1 seconds; install 0, frozen diagnostics 0,
   inventory/model hashes validated, uninstall 0, and install tree removed.
 - Root handoff artifact:
   `InterviewAssistant-Setup-0.1.1-win64.exe`.
-- Size: 2,439,165,149 bytes.
+- Size: 2,439,149,183 bytes.
 - SHA-256:
-  `80BEAAA8B9D048367108DA1C5B2FEBF076EBE8B60F3BC8AD144940F4153A08B9`.
+  `D17DD0C8AB35CABA5CF39435B812D64E57CE5D31E741EF0A19551E507D63E4E5`.
 - `SHA256SUMS.txt` contains exactly that one authoritative uppercase digest line.
 
 ## Corrective fix round 1
@@ -188,6 +187,36 @@
   `inventory-review-summary.json`, `inventory-validation.log`,
   `installer-build.log`, `installer-smoke.json`, and
   `installed-mcp-audit.json`.
+
+## Final-review correction re-attestation
+
+- Five screenshot lifecycle notifications were translated to English while
+  preserving one-shot image consumption and generic, non-sensitive failure
+  reporting. Settings now gives **Run checks** a dedicated successful-save
+  path that requests readiness exactly once for normal, unchanged, and
+  hotkey-only saves; validation failures request nothing. The existing Save
+  hotkey-only readiness exception remains unchanged.
+- Settings information architecture now places recognition language under
+  General and the LM Studio token under Models. Audio contains only system and
+  microphone devices. Appearance explains that Ribbon edit mode changes its
+  position and size and persists those changes automatically.
+- TDD evidence recorded seven expected focused failures before implementation,
+  followed by 43 focused passes and 76 passes across all affected test modules.
+  The independent complete source gate reported 854 passed and 5 skipped in
+  43.45 seconds; Ruff, lock/sync, and `git diff --check` exited 0.
+- The rebuilt frozen application reported `status=ok`, `frozen=true`,
+  `config=missing`, CUDA ready with one device and zero missing DLLs. A separate
+  real bundled-model inference reported `status=ok`, `device=cuda`, model load
+  5.373929 seconds, transcription 0.375076 seconds, and real-time factor
+  0.187538.
+- Fresh frozen screenshots verify General, Models, Audio, and Appearance with
+  the persistent Save/Run checks/Start footer. Strict inventory review records
+  4,092 files, 304 actual nonempty directories, 4,193,299,018 bytes, exactly six
+  pinned STT model files, and zero MCP paths.
+- The rebuilt installer passed isolated install, frozen diagnostics, complete
+  installed inventory/model hashing, uninstall, and install-tree removal with
+  all exit codes 0. Evidence is retained under
+  `.superpowers/sdd/2026-08-02-unified-branding-and-graphite-ui/final-review-fix-evidence/`.
 
 ## Remaining acceptance boundary
 
