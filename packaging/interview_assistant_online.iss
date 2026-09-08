@@ -5,13 +5,13 @@
   #define DistPath "..\dist\InterviewAssistant"
 #endif
 #ifndef OutputPath
-  #define OutputPath "..\dist\installer"
+  #define OutputPath "..\dist\online-installer"
 #endif
-#ifndef AppCompression
-  #define AppCompression "lzma2/ultra64"
+#ifndef PayloadFilesPath
+  #error PayloadFilesPath is required
 #endif
-#ifndef AppDiskSpanning
-  #define AppDiskSpanning "no"
+#ifndef PayloadDataPath
+  #error PayloadDataPath is required
 #endif
 
 [Setup]
@@ -24,17 +24,14 @@ PrivilegesRequired=lowest
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 OutputDir={#OutputPath}
-OutputBaseFilename=InterviewAssistant-Setup-{#AppVersion}-win64
-Compression={#AppCompression}
-DiskSpanning={#AppDiskSpanning}
-; GitHub release assets must each remain below 2 GiB. Keep every slice at 1 GiB.
-DiskSliceSize=1073741824
-SlicesPerDisk=1
-SolidCompression=yes
-LZMAUseSeparateProcess=yes
+OutputBaseFilename=Setup
+Compression=none
+DiskSpanning=no
+ArchiveExtraction=full
 SetupIconFile={#SourcePath}\..\assets\branding\interview-assistant.ico
 WizardStyle=modern
 SetupLogging=yes
+SetupMutex=InterviewAssistantOnlineSetup
 CloseApplications=yes
 RestartApplications=no
 UninstallDisplayIcon={app}\InterviewAssistant.exe
@@ -42,13 +39,16 @@ UninstallDisplayIcon={app}\InterviewAssistant.exe
 [Tasks]
 Name: "desktopicon"; Description: "Create a desktop shortcut"; GroupDescription: "Additional shortcuts:"; Flags: unchecked
 
+#include "online_legacy_cleanup.iss"
+
 [Files]
-Source: "{#DistPath}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "{#SourcePath}\installer_gpu_probe.ps1"; Flags: dontcopy
+#include PayloadFilesPath
 
 [Icons]
 Name: "{group}\Interview Assistant"; Filename: "{app}\InterviewAssistant.exe"; WorkingDir: "{app}"
 Name: "{autodesktop}\Interview Assistant"; Filename: "{app}\InterviewAssistant.exe"; WorkingDir: "{app}"; Tasks: desktopicon
 
-[InstallDelete]
-Type: filesandordirs; Name: "{app}\_internal"
-Type: files; Name: "{app}\InterviewAssistant.exe"
+[Code]
+#include "online_downloads.iss"
+#include "online_hardware.iss"

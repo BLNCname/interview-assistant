@@ -7,10 +7,14 @@ from pathlib import Path
 import shutil
 import subprocess
 import sys
+import tomllib
 
 import pytest
 
 from tests.unit.test_release_packaging import ROOT, _powershell, _write_dist_fixture
+
+VERSION = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))["project"]["version"]
+INSTALLER_STEM = f"InterviewAssistant-Setup-{VERSION}-win64"
 
 
 def _installer_fixture(tmp_path):
@@ -160,7 +164,7 @@ def test_installer_disk_spanning_is_opt_in(tmp_path, enabled):
 @pytest.mark.parametrize("spanning", [False, True])
 def test_installer_checksums_cover_executable_and_every_disk_slice(tmp_path, spanning):
     fixture = _installer_fixture(tmp_path)
-    stem = "InterviewAssistant-Setup-0.1.2-win64"
+    stem = INSTALLER_STEM
     parts = [stem + ".exe"]
     if spanning:
         parts += [stem + "-1.bin", stem + "-2.bin", stem + "-3.bin"]
@@ -183,7 +187,7 @@ def test_installer_checksums_cover_executable_and_every_disk_slice(tmp_path, spa
 def test_spanning_installer_requires_first_slice(tmp_path):
     fixture = _installer_fixture(tmp_path)
     fake_parts = tmp_path / "compiler-outputs.json"
-    fake_parts.write_text(json.dumps(["InterviewAssistant-Setup-0.1.2-win64.exe"]))
+    fake_parts.write_text(json.dumps([INSTALLER_STEM + ".exe"]))
     result = _invoke_builder(
         fixture, inventory=fixture[2], disk_spanning=True, fake_parts=fake_parts
     )
@@ -196,7 +200,7 @@ def test_installer_refuses_stale_artifacts_before_compiler(tmp_path, suffix):
     fixture = _installer_fixture(tmp_path)
     output = fixture[0] / "dist/installer"
     output.mkdir(parents=True)
-    sentinel = output / ("InterviewAssistant-Setup-0.1.2-win64" + suffix)
+    sentinel = output / (INSTALLER_STEM + suffix)
     sentinel.write_text("preserve", encoding="utf-8")
     result = _invoke_builder(fixture, inventory=fixture[2], disk_spanning=True)
     assert result.returncode != 0
@@ -216,7 +220,7 @@ def test_inno_disk_slices_stay_under_github_asset_limit():
 @pytest.mark.parametrize("size,allowed", [(2147483647, True), (2147483648, False)])
 def test_spanned_installer_enforces_strict_github_size_boundary(tmp_path, size, allowed):
     fixture = _installer_fixture(tmp_path)
-    stem = "InterviewAssistant-Setup-0.1.2-win64"
+    stem = INSTALLER_STEM
     fake_parts = tmp_path / "compiler-outputs.json"
     fake_parts.write_text(json.dumps([stem + ".exe", stem + "-1.bin"]))
     # Inject compiler-output metadata; never allocate a 2 GiB test artifact.

@@ -8,7 +8,9 @@ param(
 
     [string]$ReportPath = "",
 
-    [string]$InventoryPath = ""
+    [string]$InventoryPath = "",
+
+    [switch]$RepeatInstall
 )
 
 $ErrorActionPreference = "Stop"
@@ -163,6 +165,20 @@ if ($diagnosticsReport.status -ne "ok" -or -not $diagnosticsReport.frozen) {
     throw "Installed diagnostics did not report a healthy frozen application."
 }
 
+$repeatExitCode = $null
+if ($RepeatInstall) {
+    $repeat = Start-Process -FilePath $installer -ArgumentList @(
+        "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART",
+        "/NORESTARTAPPLICATIONS", "/NOCLOSEAPPLICATIONS", "/NOICONS",
+        '/TASKS=""', "/SP-", ('/DIR="' + $smoke + '"'),
+        ('/LOG="' + (Join-Path $runRoot 'installer-smoke-repeat.log') + '"')
+    ) -WindowStyle Hidden -Wait -PassThru
+    $repeatExitCode = $repeat.ExitCode
+    if ($repeatExitCode -ne 0) { throw 'Repeat installation failed.' }
+    & $python $validator --dist $smoke --manifest $manifest --inventory $inventory --installed
+    if ($LASTEXITCODE -ne 0) { throw 'Repeat installation changed the expected inventory.' }
+}
+
 $uninstall = Start-Process `
     -FilePath $uninstaller `
     -ArgumentList @(
@@ -193,6 +209,7 @@ $result = [PSCustomObject]@{
     Frozen = $diagnosticsReport.frozen
     ModelInventoryAndHashesValidated = $true
     InstallTreeRemoved = $true
+    RepeatInstallExitCode = $repeatExitCode
     InventoryPath = $inventory
     InstallPath = $smoke
 }

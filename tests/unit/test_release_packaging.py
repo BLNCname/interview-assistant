@@ -331,7 +331,9 @@ def _run_archive_script(
     if temporary_directory is None:
         temporary_directory = _archive_temp_directory(repository)
     os.makedirs(_extended_windows_path(temporary_directory), exist_ok=True)
-    environment = os.environ.copy()
+    # Windows PowerShell must discover its own modules when pytest was launched
+    # from PowerShell 7; inheriting the host's PSModulePath hides Get-FileHash.
+    environment = {key: value for key, value in os.environ.items() if key.casefold() != "psmodulepath"}
     environment["INTERVIEW_ASSISTANT_ARCHIVE_TEMP"] = str(temporary_directory)
     if source_commit is None:
         source_commit = _git("rev-parse", "HEAD", cwd=repository).stdout.strip()
