@@ -63,7 +63,7 @@ Files: version metadata, README, START_HERE, build/instructor instructions,
   the portable inventory, run frozen diagnostics and test repeat/uninstall.
 - [x] Review privacy and secret exclusion, update one-file installation docs,
   and correct the obsolete tray instruction.
-- [ ] Commit and push reviewed source, create a draft release, upload only Setup,
+- [x] Commit and push reviewed source, create a draft release, upload only Setup,
   include its digest in release notes, compare GitHub digests, then publish.
 
 ## Decisions and progress
@@ -89,3 +89,7 @@ Files: version metadata, README, START_HERE, build/instructor instructions,
   uninstalled. The final cleanup-enabled binary independently passed cached installation,
   diagnostics, a repeat upgrade seeded with all 16 historical DLLs, exact
   inventory verification, and uninstall (all exit codes 0).
+- Published v0.1.3 as the latest release after comparing all 223 source blobs
+  against GitHub and checking the sole Setup asset's size and server SHA-256.
+  The previous v0.1.2 release remains available. Publication was confirmed by
+  reading GitHub's latest-release endpoint after a transient TLS timeout.
