@@ -32,7 +32,7 @@ class HistoryScanError(RuntimeError):
 def _git(repository: Path, *arguments: str, text: bool = False) -> bytes | str:
     try:
         process = subprocess.run(
-            ["git", "-C", str(repository), *arguments],
+            ["git", "-c", "core.longpaths=true", "-C", str(repository), *arguments],
             check=False,
             capture_output=True,
             text=text,
@@ -71,7 +71,7 @@ def stream_contains_release_secret(
 def _run_batch(repository: Path, arguments: list[str], payload: bytes) -> bytes:
     try:
         process = subprocess.run(
-            ["git", "-C", str(repository), *arguments],
+            ["git", "-c", "core.longpaths=true", "-C", str(repository), *arguments],
             input=payload,
             check=False,
             capture_output=True,
@@ -163,7 +163,10 @@ def scan_reachable_history(repository: Path, expected_commit: str | None = None)
         if resolved.casefold() != expected_commit.casefold():
             raise HistoryScanError
         reachable = subprocess.run(
-            ["git", "-C", str(repository), "merge-base", "--is-ancestor", expected_commit, "HEAD"],
+            [
+                "git", "-c", "core.longpaths=true", "-C", str(repository),
+                "merge-base", "--is-ancestor", expected_commit, "HEAD",
+            ],
             check=False,
             capture_output=True,
             timeout=60,

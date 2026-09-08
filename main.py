@@ -1,27 +1,51 @@
+from __future__ import annotations
+
 import argparse
 import asyncio
+import json
 import sys
-from collections.abc import Callable
 from importlib import import_module
 from pathlib import Path
-from typing import cast
+from typing import TYPE_CHECKING, Any
 
-from PyQt6.QtGui import QIcon
-from PyQt6.QtWidgets import QApplication
+from interview_assistant.diagnostics.selftest import run_fast_self_test
 
-from interview_assistant.composition import (
-    ApplicationController,
-    create_production_controller,
-    default_config_path,
-)
-from interview_assistant.diagnostics.cli import run_no_gui_diagnostics
-from interview_assistant.ui.theme import graphite_stylesheet
+if TYPE_CHECKING:
+    from interview_assistant.composition import ApplicationController
 
 
-QEventLoop = cast(
-    Callable[[QApplication], asyncio.AbstractEventLoop],
-    getattr(import_module("qasync"), "QEventLoop"),
-)
+# Load GUI/provider dependencies only after the cheap command-line paths exit.
+# These small entry points also keep controller/loop substitution in tests simple.
+def QApplication(argv: list[str]) -> Any:
+    return import_module("PyQt6.QtWidgets").QApplication(argv)
+
+
+def QIcon(source: str) -> Any:
+    return import_module("PyQt6.QtGui").QIcon(source)
+
+
+def QEventLoop(app: Any) -> asyncio.AbstractEventLoop:
+    return import_module("qasync").QEventLoop(app)
+
+
+def default_config_path() -> Path:
+    from platformdirs import user_config_path
+
+    return Path(user_config_path("InterviewAssistant", "InterviewAssistant")) / "config.yaml"
+
+
+def create_production_controller(*args: Any, **kwargs: Any) -> ApplicationController:
+    return import_module("interview_assistant.composition").create_production_controller(
+        *args, **kwargs,
+    )
+
+
+def run_no_gui_diagnostics(**kwargs: Any) -> int:
+    return import_module("interview_assistant.diagnostics.cli").run_no_gui_diagnostics(**kwargs)
+
+
+def graphite_stylesheet() -> str:
+    return import_module("interview_assistant.ui.theme").graphite_stylesheet()
 
 
 def _application_icon_path() -> Path:
@@ -85,7 +109,29 @@ def main(
     if diagnostic_exit_code is not None:
         return diagnostic_exit_code
 
-    qt_app = QApplication(runtime_argv)
+    parser = argparse.ArgumentParser(description="Interview Assistant")
+    parser.add_argument("--config", type=Path)
+    parser.add_argument("--self-test", action="store_true",
+                        help="Run fast offline core checks and print a JSON report")
+    try:
+        options, qt_arguments = parser.parse_known_args(runtime_argv[1:])
+        if "--mcp-web-search-server" in qt_arguments:
+            parser.error("--mcp-web-search-server was removed; configure a remote MCP server")
+    except SystemExit as exc:
+        return int(exc.code or 0)
+    selected_config = config_path or options.config or default_config_path()
+    report = run_fast_self_test(config_path=selected_config)
+    if options.self_test or report["status"] != "ok":
+        if sys.stdout is not None:
+            sys.stdout.write(json.dumps(report, ensure_ascii=True, sort_keys=True) + "\n")
+            sys.stdout.flush()
+        elif not options.self_test:
+            # Windowed frozen builds have no terminal; PyInstaller presents this
+            # explicit error instead of silently disappearing before readiness.
+            raise RuntimeError("Offline startup self-test failed. Run --self-test from source.")
+        return 0 if report["status"] == "ok" else 1
+
+    qt_app = QApplication([runtime_argv[0], *qt_arguments])
     icon = QIcon(str(_application_icon_path()))
     if icon.isNull():
         raise RuntimeError("Application branding icon could not be loaded")
@@ -96,7 +142,7 @@ def main(
     controller = create_production_controller(
         qt_app,
         loop,
-        config_path=config_path,
+        config_path=selected_config,
     )
     initialization = loop.create_task(
         controller.initialize(),

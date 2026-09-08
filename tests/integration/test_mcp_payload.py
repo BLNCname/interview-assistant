@@ -67,8 +67,8 @@ async def test_retrieval_submission_contains_only_model_sanitized_input_and_plug
             "integrations": [
                 {
                     "type": "plugin",
-                    "id": "mcp/duckduckgo",
-                    "allowed_tools": ["search"],
+                    "id": "mcp/firecrawl",
+                    "allowed_tools": ["firecrawl_search"],
                 }
             ],
             "store": False,
@@ -218,8 +218,8 @@ def test_generic_submission_cannot_bypass_the_retrieval_policy() -> None:
                 "integrations": [
                     {
                         "type": "plugin",
-                        "id": "mcp/duckduckgo",
-                        "allowed_tools": ["search"],
+                        "id": "mcp/firecrawl",
+                        "allowed_tools": ["firecrawl_search"],
                     }
                 ],
             }
@@ -275,8 +275,8 @@ async def test_retrieval_http_payload_contains_only_sanitized_native_fields() ->
         "integrations": [
             {
                 "type": "plugin",
-                "id": "mcp/duckduckgo",
-                "allowed_tools": ["search"],
+                "id": "mcp/firecrawl",
+                "allowed_tools": ["firecrawl_search"],
             }
         ],
         "store": False,

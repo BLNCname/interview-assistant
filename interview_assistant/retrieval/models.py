@@ -8,12 +8,13 @@ from typing import final
 
 CONTEXT7_ID = "mcp/context7"
 CONTEXT7_TOOLS = ("resolve-library-id", "query-docs")
-DUCKDUCKGO_ID = "mcp/duckduckgo"
-DUCKDUCKGO_TOOLS = ("search",)
+FIRECRAWL_ID = "mcp/firecrawl"
+FIRECRAWL_TOOLS = ("firecrawl_search",)
+FIRECRAWL_QUERY_LIMIT = 500
 
 _TOOLS_BY_INTEGRATION = {
     CONTEXT7_ID: CONTEXT7_TOOLS,
-    DUCKDUCKGO_ID: DUCKDUCKGO_TOOLS,
+    FIRECRAWL_ID: FIRECRAWL_TOOLS,
 }
 
 
@@ -110,7 +111,7 @@ del _make_question_authority
 @final
 @dataclass(frozen=True, slots=True, init=False)
 class SearchIntegration:
-    """A sanitized local query paired with one exact LM Studio tool allowlist."""
+    """A sanitized local query paired with one exact MCP tool allowlist."""
 
     id: str
     _sanitized_question: _SanitizedQuestion = field(repr=False)
@@ -144,6 +145,8 @@ class SearchIntegration:
             raise TypeError("allowed_tools must be an immutable tuple")
         if self.allowed_tools != expected_tools:
             raise ValueError("Search integration tools must match the allowlist")
+        if self.id == FIRECRAWL_ID and len(query) > FIRECRAWL_QUERY_LIMIT:
+            raise ValueError("Search query exceeds the Firecrawl query limit")
         return query
 
     @property

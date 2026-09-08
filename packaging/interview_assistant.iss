@@ -1,11 +1,17 @@
 #ifndef AppVersion
-  #define AppVersion "0.1.1"
+  #define AppVersion "0.1.2"
 #endif
 #ifndef DistPath
   #define DistPath "..\dist\InterviewAssistant"
 #endif
 #ifndef OutputPath
   #define OutputPath "..\dist\installer"
+#endif
+#ifndef AppCompression
+  #define AppCompression "lzma2/ultra64"
+#endif
+#ifndef AppDiskSpanning
+  #define AppDiskSpanning "no"
 #endif
 
 [Setup]
@@ -19,7 +25,11 @@ ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 OutputDir={#OutputPath}
 OutputBaseFilename=InterviewAssistant-Setup-{#AppVersion}-win64
-Compression=lzma2/ultra64
+Compression={#AppCompression}
+DiskSpanning={#AppDiskSpanning}
+; GitHub release assets must each remain below 2 GiB. Keep every slice at 1 GiB.
+DiskSliceSize=1073741824
+SlicesPerDisk=1
 SolidCompression=yes
 LZMAUseSeparateProcess=yes
 SetupIconFile={#SourcePath}\..\assets\branding\interview-assistant.ico

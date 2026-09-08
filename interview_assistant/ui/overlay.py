@@ -566,7 +566,7 @@ class LiquidRibbon(QMainWindow):
         )
         self.brand_icon_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
         app = QApplication.instance()
-        pixmap = app.windowIcon().pixmap(20, 20) if app is not None else QPixmap()
+        pixmap = app.windowIcon().pixmap(20, 20) if isinstance(app, QApplication) else QPixmap()
         self.brand_icon_label.setPixmap(pixmap)
         self.brand_icon_label.setVisible(not pixmap.isNull())
         header_layout.addWidget(self.brand_icon_label)

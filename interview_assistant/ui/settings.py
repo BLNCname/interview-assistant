@@ -7,6 +7,7 @@ from typing import Literal, Protocol, cast
 from PyQt6.QtCore import QByteArray, QSettings, Qt, pyqtSignal
 from PyQt6.QtGui import QColor, QCloseEvent, QKeySequence, QShowEvent
 from PyQt6.QtWidgets import (
+    QCheckBox,
     QComboBox,
     QDoubleSpinBox,
     QFormLayout,
@@ -32,7 +33,6 @@ from interview_assistant.config import (
     AppConfig,
     AudioConfig,
     HotkeysConfig,
-    LMStudioConfig,
     OverlayConfig,
     SearchConfig,
 )
@@ -93,6 +93,26 @@ class SecretStoreProtocol(Protocol):
 
     def set_lm_token(self, value: str) -> None: ...
 
+    def has_openrouter_token(self) -> bool: ...
+
+    def set_openrouter_token(self, value: str) -> None: ...
+
+    def has_firecrawl_token(self) -> bool: ...
+
+    def set_firecrawl_token(self, value: str) -> None: ...
+
+    def has_context7_token(self) -> bool: ...
+
+    def set_context7_token(self, value: str) -> None: ...
+
+    def delete_lm_token(self) -> None: ...
+
+    def delete_openrouter_token(self) -> None: ...
+
+    def delete_firecrawl_token(self) -> None: ...
+
+    def delete_context7_token(self) -> None: ...
+
 
 @dataclass(frozen=True, slots=True)
 class SettingsChoice:
@@ -132,8 +152,8 @@ class SettingsBinding:
             dict.fromkeys(
                 key
                 for key in (
-                    self.config.lmstudio.text_model,
-                    self.config.lmstudio.vision_model,
+                    self.config.text_model,
+                    self.config.vision_model,
                 )
                 if key
             )
@@ -142,6 +162,15 @@ class SettingsBinding:
     @property
     def has_lm_token(self) -> bool:
         return self._secret_store.has_lm_token()
+
+    def has_provider_token(self, provider: str) -> bool:
+        if provider == "openrouter":
+            return self._secret_store.has_openrouter_token()
+        if provider == "firecrawl":
+            return self._secret_store.has_firecrawl_token()
+        if provider == "context7":
+            return self._secret_store.has_context7_token()
+        return self.has_lm_token
 
     def apply(
         self,
@@ -156,20 +185,26 @@ class SettingsBinding:
         max_height: int,
         hotkeys: Mapping[HotkeyAction | str, str],
         token: str,
+        remove_token: bool = False,
+        firecrawl_token: str = "",
+        remove_firecrawl_token: bool = False,
+        context7_token: str = "",
+        remove_context7_token: bool = False,
+        provider: Literal["lmstudio", "openrouter"] | None = None,
+        model_selections: Mapping[str, tuple[str, str]] | None = None,
+        mcp_backend: Literal["native", "lmstudio", "off"] | None = None,
+        stt_device: Literal["cuda", "cpu"] | None = None,
+        stt_compute_type: Literal["float16", "int8_float16", "int8", "float32"] | None = None,
     ) -> bool:
+        active_provider = provider or self.config.provider
         audio = AudioConfig.model_validate(
             {
                 **self.config.audio.model_dump(),
                 "system_device_id": system_device_id,
                 "microphone_device_id": microphone_device_id,
                 "language": language,
-            }
-        )
-        lmstudio = LMStudioConfig.model_validate(
-            {
-                **self.config.lmstudio.model_dump(),
-                "text_model": text_model,
-                "vision_model": vision_model,
+                "device": stt_device or self.config.audio.device,
+                "compute_type": stt_compute_type or self.config.audio.compute_type,
             }
         )
         search = SearchConfig.model_validate(
@@ -186,7 +221,26 @@ class SettingsBinding:
 
         candidate = self.config.model_copy(deep=True)
         candidate.audio = audio
-        candidate.lmstudio = lmstudio
+        candidate.provider = active_provider
+        selections = dict(model_selections or {})
+        selections[active_provider] = (text_model, vision_model)
+        for name in ("lmstudio", "openrouter"):
+            if name in selections:
+                current = getattr(candidate, name)
+                text_key, vision_key = selections[name]
+                setattr(
+                    candidate,
+                    name,
+                    type(current).model_validate(
+                        {
+                            **current.model_dump(),
+                            "text_model": text_key,
+                            "vision_model": vision_key,
+                        }
+                    ),
+                )
+        if mcp_backend is not None:
+            candidate.mcp.backend = mcp_backend
         candidate.search = search
         candidate.overlay = overlay
         candidate.hotkeys = hotkeys_config
@@ -194,7 +248,11 @@ class SettingsBinding:
         non_hotkey_changed = candidate.model_dump(exclude={"hotkeys"}) != self.config.model_dump(
             exclude={"hotkeys"}
         )
-        hotkey_only = hotkeys_changed and not non_hotkey_changed and not token.strip()
+        secret_changed = any((
+            token.strip(), firecrawl_token.strip(), context7_token.strip(),
+            remove_token, remove_firecrawl_token, remove_context7_token,
+        ))
+        hotkey_only = hotkeys_changed and not non_hotkey_changed and not secret_changed
         previous_bindings = self.config.hotkeys.as_bindings()
         live_updated = False
         if hotkeys_changed and self._apply_hotkeys is not None:
@@ -205,8 +263,24 @@ class SettingsBinding:
                 raise
             live_updated = True
         try:
-            if token.strip():
-                self._secret_store.set_lm_token(token)
+            if remove_token:
+                if active_provider == "openrouter":
+                    self._secret_store.delete_openrouter_token()
+                else:
+                    self._secret_store.delete_lm_token()
+            elif token.strip():
+                if active_provider == "openrouter":
+                    self._secret_store.set_openrouter_token(token)
+                else:
+                    self._secret_store.set_lm_token(token)
+            if remove_firecrawl_token:
+                self._secret_store.delete_firecrawl_token()
+            elif firecrawl_token.strip():
+                self._secret_store.set_firecrawl_token(firecrawl_token)
+            if remove_context7_token:
+                self._secret_store.delete_context7_token()
+            elif context7_token.strip():
+                self._secret_store.set_context7_token(context7_token)
             if self._persist is not None:
                 self._persist(candidate)
         except Exception:
@@ -214,7 +288,10 @@ class SettingsBinding:
                 self._restore_live_hotkeys(previous_bindings)
             raise
         self.config.audio = candidate.audio
+        self.config.provider = candidate.provider
         self.config.lmstudio = candidate.lmstudio
+        self.config.openrouter = candidate.openrouter
+        self.config.mcp = candidate.mcp
         self.config.search = candidate.search
         self.config.overlay = candidate.overlay
         self.config.hotkeys = candidate.hotkeys
@@ -252,6 +329,15 @@ class SettingsWindow(QMainWindow):
             else QSettings("InterviewAssistant", "InterviewAssistant")
         )
         self._readiness_report: ReadinessReport | None = None
+        self._selected_provider = binding.config.provider
+        self._model_drafts = {
+            name: (
+                getattr(binding.config, name).text_model,
+                getattr(binding.config, name).vision_model,
+            )
+            for name in ("lmstudio", "openrouter")
+        }
+        self._provider_model_choices = {binding.config.provider: models}
         self._controller_close = False
         self.setWindowTitle("Interview Assistant Settings")
         self.resize(820, 620)
@@ -361,8 +447,30 @@ class SettingsWindow(QMainWindow):
             self.search_mode_combo.addItem(label, key)
         self._select_data(self.search_mode_combo, self._binding.config.search.mode)
 
+        self.mcp_backend_combo = QComboBox(general)
+        for label, key in (
+            ("Application MCP", "native"),
+            ("LM Studio MCP", "lmstudio"),
+            ("Disabled", "off"),
+        ):
+            self.mcp_backend_combo.addItem(label, key)
+        self._select_data(self.mcp_backend_combo, self._binding.config.mcp.backend)
+
         form.addRow("Recognition language", self.language_combo)
         form.addRow("Web search", self.search_mode_combo)
+        form.addRow("Tools and retrieval", self.mcp_backend_combo)
+        firecrawl_row, self.firecrawl_token_edit, self.firecrawl_remove_token_checkbox = (
+            self._secret_editor(general, "Firecrawl API key")
+        )
+        context7_row, self.context7_token_edit, self.context7_remove_token_checkbox = (
+            self._secret_editor(general, "Context7 API key (optional)")
+        )
+        form.addRow("Firecrawl API key", firecrawl_row)
+        form.addRow("Context7 API key (optional)", context7_row)
+        self.mcp_token_help_label = self._secret_help(general)
+        form.addRow(self.mcp_token_help_label)
+        self._refresh_secret_placeholder(self.firecrawl_token_edit, "firecrawl")
+        self._refresh_secret_placeholder(self.context7_token_edit, "context7")
         layout.addWidget(general)
         layout.addStretch(1)
         return page
@@ -377,32 +485,80 @@ class SettingsWindow(QMainWindow):
         models_group.setObjectName("settingsCard")
         form = QFormLayout(models_group)
 
+        self.provider_combo = QComboBox(models_group)
+        self.provider_combo.addItem("LM Studio (local)", "lmstudio")
+        self.provider_combo.addItem("OpenRouter (cloud)", "openrouter")
+        self.provider_combo.setAccessibleName("Model provider")
+        self._select_data(self.provider_combo, self._selected_provider)
+
         self.text_model_combo = self._choice_combo(
             models,
-            current=self._binding.config.lmstudio.text_model,
+            current=self._binding.config.text_model,
             empty_label="Not selected",
             empty_data="",
         )
         self.vision_model_combo = self._choice_combo(
             models,
-            current=self._binding.config.lmstudio.vision_model,
+            current=self._binding.config.vision_model,
             empty_label="Not selected",
             empty_data="",
         )
         self.shared_instance_label = QLabel(models_group)
         self.shared_instance_label.setWordWrap(True)
         self._update_shared_instance_annotation()
-        self.token_edit = QLineEdit(models_group)
-        self.token_edit.setEchoMode(QLineEdit.EchoMode.Password)
+        token_row, self.token_edit, self.remove_token_checkbox = self._secret_editor(
+            models_group, "API key / token",
+        )
         self._refresh_token_placeholder()
+        self.token_help_label = self._secret_help(models_group)
+        if self._selected_provider == "openrouter":
+            self._populate_provider_models()
 
+        form.addRow("Provider", self.provider_combo)
         form.addRow("Text model", self.text_model_combo)
         form.addRow("Vision model", self.vision_model_combo)
         form.addRow("Model instances", self.shared_instance_label)
-        form.addRow("LM Studio token", self.token_edit)
+        form.addRow("API key / token", token_row)
+        form.addRow(self.token_help_label)
         layout.addWidget(models_group)
         layout.addStretch(1)
         return page
+
+    @staticmethod
+    def _secret_help(parent: QWidget) -> QLabel:
+        label = QLabel(
+            "Saved keys stay in Windows Credential Manager and override .env/environment keys. "
+            "Leave a field blank to keep its key. To delete it, select Remove stored key and Save; "
+            "a key from .env/environment may then be used. Application MCP uses Firecrawl and "
+            "Context7 keys independently of the model provider.",
+            parent,
+        )
+        label.setWordWrap(True)
+        return label
+
+    def _secret_editor(
+        self, parent: QWidget, label: str,
+    ) -> tuple[QWidget, QLineEdit, QCheckBox]:
+        row = QWidget(parent)
+        layout = QHBoxLayout(row)
+        layout.setContentsMargins(0, 0, 0, 0)
+        editor = QLineEdit(row)
+        editor.setEchoMode(QLineEdit.EchoMode.Password)
+        editor.setAccessibleName(label)
+        removal = QCheckBox("Remove stored key", row)
+        removal.setAccessibleName(f"Remove stored {label}")
+        removal.setToolTip("Applied when you Save. External .env/environment keys remain unchanged.")
+
+        def toggle(checked: bool) -> None:
+            editor.setEnabled(not checked)
+            if checked:
+                editor.clear()
+            self._invalidate_readiness()
+
+        removal.toggled.connect(toggle)
+        layout.addWidget(editor, 1)
+        layout.addWidget(removal)
+        return row, editor, removal
 
     def _build_audio_page(
         self,
@@ -431,6 +587,22 @@ class SettingsWindow(QMainWindow):
         )
         form.addRow("System audio", self.system_device_combo)
         form.addRow("Microphone", self.microphone_device_combo)
+        self.stt_device_combo = QComboBox(audio)
+        self.stt_device_combo.addItem("NVIDIA GPU (CUDA)", "cuda")
+        self.stt_device_combo.addItem("CPU", "cpu")
+        self._select_data(self.stt_device_combo, self._binding.config.audio.device)
+        self.stt_compute_combo = QComboBox(audio)
+        for label, key in (
+            ("Float16", "float16"),
+            ("Int8 + Float16 (less GPU memory)", "int8_float16"),
+            ("Int8", "int8"),
+            ("Float32", "float32"),
+        ):
+            self.stt_compute_combo.addItem(label, key)
+        self._select_data(self.stt_compute_combo, self._binding.config.audio.compute_type)
+        self._stt_device_changed(0)
+        form.addRow("Speech recognition device", self.stt_device_combo)
+        form.addRow("Speech recognition precision", self.stt_compute_combo)
         layout.addWidget(audio)
         layout.addStretch(1)
         return page
@@ -553,14 +725,12 @@ class SettingsWindow(QMainWindow):
                 )
             )
 
-    def _hotkey_bindings(self) -> dict[HotkeyAction, str]:
-        portable_bindings: dict[HotkeyAction, str] = {}
+    def _hotkey_bindings(self) -> dict[HotkeyAction | str, str]:
+        portable_bindings: dict[HotkeyAction | str, str] = {}
         for action, editor in self.hotkey_edits.items():
             try:
                 portable_bindings[action] = HotkeyChord.parse(
-                    editor.keySequence().toString(
-                        QKeySequence.SequenceFormat.PortableText
-                    )
+                    editor.keySequence().toString(QKeySequence.SequenceFormat.PortableText)
                 ).to_portable_text()
             except ValueError as error:
                 raise ValueError(f"{HOTKEY_COPY[action][0]}: {error}") from error
@@ -614,24 +784,84 @@ class SettingsWindow(QMainWindow):
             combo.blockSignals(previous_signal_state)
 
     def set_model_choices(self, models: tuple[SettingsChoice, ...]) -> None:
-        text_key = str(self.text_model_combo.currentData() or "")
-        vision_key = str(self.vision_model_combo.currentData() or "")
-        self._populate_choice_combo(
-            self.text_model_combo,
-            models,
-            current=text_key,
-            empty_label="Not selected",
-            empty_data="",
-        )
-        self._populate_choice_combo(
-            self.vision_model_combo,
-            models,
-            current=vision_key,
-            empty_label="Not selected",
-            empty_data="",
-        )
+        # Discovery belongs to the saved provider, even if the selector changed mid-check.
+        provider = self._binding.config.provider
+        self._provider_model_choices[provider] = models
+        if provider != self._selected_provider:
+            return
+        self._remember_model_draft()
+        self._populate_provider_models()
         self._update_shared_instance_annotation()
         self._invalidate_readiness()
+
+    @staticmethod
+    def _model_key(combo: QComboBox) -> str:
+        if combo.isEditable() and combo.currentText() != combo.itemText(combo.currentIndex()):
+            return combo.currentText().strip()
+        return str(combo.currentData() or "")
+
+    def _remember_model_draft(self) -> None:
+        self._model_drafts[self._selected_provider] = (
+            self._model_key(self.text_model_combo),
+            self._model_key(self.vision_model_combo),
+        )
+
+    def _populate_provider_models(self) -> None:
+        models = self._provider_model_choices.get(self._selected_provider, ())
+        cloud = self._selected_provider == "openrouter"
+        for combo, current in zip(
+            (self.text_model_combo, self.vision_model_combo),
+            self._model_drafts[self._selected_provider],
+            strict=True,
+        ):
+            previous = combo.blockSignals(True)
+            try:
+                combo.setEditable(cloud)
+                combo.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+                self._populate_choice_combo(
+                    combo,
+                    models,
+                    current=current,
+                    empty_label="" if cloud else "Not selected",
+                    empty_data="",
+                )
+                if cloud and current and current not in {item.key for item in models}:
+                    combo.setItemText(combo.currentIndex(), current)
+                editor = combo.lineEdit()
+                if cloud and editor is not None:
+                    editor.setPlaceholderText("provider/model-id")
+            finally:
+                combo.blockSignals(previous)
+
+    def _provider_changed(self, _index: int) -> None:
+        self._remember_model_draft()
+        self._selected_provider = cast(
+            Literal["lmstudio", "openrouter"], self.provider_combo.currentData()
+        )
+        self.token_edit.clear()
+        self.remove_token_checkbox.setChecked(False)
+        self._populate_provider_models()
+        self._refresh_token_placeholder()
+        self._update_shared_instance_annotation()
+        self._invalidate_readiness()
+
+    def _stt_device_changed(self, _index: int) -> None:
+        selected = self.stt_compute_combo.currentData()
+        cpu = self.stt_device_combo.currentData() == "cpu"
+        choices = [("Int8", "int8"), ("Float32", "float32")]
+        if not cpu:
+            choices = [
+                ("Float16", "float16"),
+                ("Int8 + Float16 (less GPU memory)", "int8_float16"),
+            ] + choices
+        previous = self.stt_compute_combo.blockSignals(True)
+        try:
+            self.stt_compute_combo.clear()
+            for label, value in choices:
+                self.stt_compute_combo.addItem(label, value)
+            self._select_data(self.stt_compute_combo, selected)
+        finally:
+            self.stt_compute_combo.blockSignals(previous)
 
     def set_audio_choices(self, devices: tuple[SettingsChoice, ...]) -> None:
         system_key = cast(str | None, self.system_device_combo.currentData())
@@ -666,18 +896,33 @@ class SettingsWindow(QMainWindow):
             self.text_model_combo,
             self.vision_model_combo,
             self.search_mode_combo,
+            self.mcp_backend_combo,
+            self.stt_device_combo,
+            self.stt_compute_combo,
         )
         for combo in combos:
             combo.currentIndexChanged.connect(self._invalidate_readiness)
         self.text_model_combo.currentIndexChanged.connect(self._update_shared_instance_annotation)
         self.vision_model_combo.currentIndexChanged.connect(self._update_shared_instance_annotation)
+        self.provider_combo.currentIndexChanged.connect(self._provider_changed)
+        self.stt_device_combo.currentIndexChanged.connect(self._stt_device_changed)
+        for combo in (self.text_model_combo, self.vision_model_combo):
+            combo.editTextChanged.connect(self._invalidate_readiness)
+            combo.editTextChanged.connect(self._update_shared_instance_annotation)
         self.opacity_spin.valueChanged.connect(self._invalidate_readiness)
         self.max_height_spin.valueChanged.connect(self._invalidate_readiness)
         self.token_edit.textChanged.connect(self._invalidate_readiness)
+        self.firecrawl_token_edit.textChanged.connect(self._invalidate_readiness)
+        self.context7_token_edit.textChanged.connect(self._invalidate_readiness)
 
-    def _update_shared_instance_annotation(self, _value: int | None = None) -> None:
-        text_key = str(self.text_model_combo.currentData() or "")
-        vision_key = str(self.vision_model_combo.currentData() or "")
+    def _update_shared_instance_annotation(self, _value: object = None) -> None:
+        text_key = self._model_key(self.text_model_combo)
+        vision_key = self._model_key(self.vision_model_combo)
+        if self._selected_provider == "openrouter":
+            self.shared_instance_label.setText(
+                "Models run through OpenRouter; no local model loading."
+            )
+            return
         if text_key and text_key == vision_key:
             self.shared_instance_label.setText(f"Shared instance: {text_key} (loaded once)")
         else:
@@ -710,13 +955,14 @@ class SettingsWindow(QMainWindow):
     def set_readiness_report(self, report: ReadinessReport) -> None:
         self._readiness_report = report
         if report.status != "ready":
-            self.navigation_list.setCurrentRow(
-                self.page_stack.indexOf(self.diagnostics_page)
-            )
+            self.navigation_list.setCurrentRow(self.page_stack.indexOf(self.diagnostics_page))
         self.readiness_table.setRowCount(len(report.checks))
         for row, result in enumerate(report.checks):
+            display_name = "Firecrawl MCP" if result.name == "firecrawl_mcp" else result.name
+            if self._selected_provider == "openrouter" and result.name == "lmstudio_auth":
+                display_name = "OpenRouter API key"
             values = (
-                result.name,
+                display_name,
                 result.status,
                 result.message,
                 result.remediation,
@@ -781,6 +1027,7 @@ class SettingsWindow(QMainWindow):
             self.show_notification(message)
             return False
         try:
+            self._remember_model_draft()
             requires_readiness = self._binding.apply(
                 system_device_id=cast(str | None, self.system_device_combo.currentData()),
                 microphone_device_id=cast(str | None, self.microphone_device_combo.currentData()),
@@ -788,8 +1035,18 @@ class SettingsWindow(QMainWindow):
                     Literal["auto", "ru", "en"],
                     self.language_combo.currentData(),
                 ),
-                text_model=str(self.text_model_combo.currentData() or ""),
-                vision_model=str(self.vision_model_combo.currentData() or ""),
+                text_model=self._model_key(self.text_model_combo),
+                vision_model=self._model_key(self.vision_model_combo),
+                provider=self._selected_provider,
+                model_selections=self._model_drafts,
+                mcp_backend=cast(
+                    Literal["native", "lmstudio", "off"], self.mcp_backend_combo.currentData()
+                ),
+                stt_device=cast(Literal["cuda", "cpu"], self.stt_device_combo.currentData()),
+                stt_compute_type=cast(
+                    Literal["float16", "int8_float16", "int8", "float32"],
+                    self.stt_compute_combo.currentData(),
+                ),
                 search_mode=cast(
                     Literal["off", "auto", "forced"],
                     self.search_mode_combo.currentData(),
@@ -798,17 +1055,30 @@ class SettingsWindow(QMainWindow):
                 max_height=self.max_height_spin.value(),
                 hotkeys=hotkeys,
                 token=token,
+                remove_token=self.remove_token_checkbox.isChecked(),
+                firecrawl_token=self.firecrawl_token_edit.text(),
+                remove_firecrawl_token=self.firecrawl_remove_token_checkbox.isChecked(),
+                context7_token=self.context7_token_edit.text(),
+                remove_context7_token=self.context7_remove_token_checkbox.isChecked(),
             )
         except Exception:
-            self.readiness_status_label.setText("Settings could not be saved securely")
-            self.navigation_list.setCurrentRow(
-                self.page_stack.indexOf(self.diagnostics_page)
+            self.readiness_status_label.setText(
+                "Settings could not be saved securely. Check Windows Credential Manager "
+                "and configuration file permissions, then re-enter the key."
             )
+            self.navigation_list.setCurrentRow(self.page_stack.indexOf(self.diagnostics_page))
             return False
         finally:
-            if token.strip():
-                self.token_edit.clear()
-                self._refresh_token_placeholder()
+            for editor in (self.token_edit, self.firecrawl_token_edit, self.context7_token_edit):
+                editor.clear()
+            self._refresh_token_placeholder()
+            self._refresh_secret_placeholder(self.firecrawl_token_edit, "firecrawl")
+            self._refresh_secret_placeholder(self.context7_token_edit, "context7")
+        for removal in (
+            self.remove_token_checkbox, self.firecrawl_remove_token_checkbox,
+            self.context7_remove_token_checkbox,
+        ):
+            removal.setChecked(False)
         self._update_shared_instance_annotation()
         self.settings_saved.emit()
         if requires_readiness and request_readiness:
@@ -817,15 +1087,18 @@ class SettingsWindow(QMainWindow):
         return True
 
     def _refresh_token_placeholder(self) -> None:
+        self._refresh_secret_placeholder(self.token_edit, self._selected_provider)
+
+    def _refresh_secret_placeholder(self, editor: QLineEdit, provider: str) -> None:
         try:
-            has_token = self._binding.has_lm_token
+            has_token = self._binding.has_provider_token(provider)
         except Exception:
-            self.token_edit.setPlaceholderText("Secure token status unavailable")
+            editor.setPlaceholderText("Secure key status unavailable")
         else:
-            self.token_edit.setPlaceholderText(
-                "Token stored in Windows Credential Manager"
+            editor.setPlaceholderText(
+                "Key configured (stored key or .env/environment)"
                 if has_token
-                else "Enter token (stored securely)"
+                else "Enter key (stored securely)"
             )
 
     def _request_start(self) -> None:

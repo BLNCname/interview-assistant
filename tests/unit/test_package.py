@@ -1,4 +1,5 @@
 from pathlib import Path
+import tomllib
 
 
 ROOT = Path(__file__).parents[2]
@@ -7,7 +8,8 @@ ROOT = Path(__file__).parents[2]
 def test_package_version() -> None:
     import interview_assistant
 
-    assert interview_assistant.__version__ == "0.1.1"
+    project = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    assert interview_assistant.__version__ == project["project"]["version"]
 
 
 def test_setuptools_discovers_only_the_root_package() -> None:

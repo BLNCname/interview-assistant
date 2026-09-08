@@ -94,6 +94,41 @@ def test_scheduler_prioritizes_system_and_decodes_only_in_background_thread() ->
     assert all(call[3] != caller_thread for call in engine.calls)
 
 
+def test_scheduler_serves_microphone_while_system_queue_remains_backlogged() -> None:
+    worker = StreamingSTTWorker(engine=RecordingEngine())
+    for index in range(4):
+        worker.submit(_frame(AudioSource.SYSTEM, float(index), 0.25, 0.1))
+    worker.submit(_frame(AudioSource.MICROPHONE, 0.0, 0.5, 0.1))
+
+    processed = []
+    for _ in range(2):
+        queued = worker._dequeue_next()
+        assert queued is not None
+        source, queue, _ = queued
+        processed.append(source)
+        queue.task_done()
+    worker.stop()
+
+    assert processed == [AudioSource.SYSTEM, AudioSource.MICROPHONE]
+
+
+def test_source_without_more_audio_packets_still_publishes_final() -> None:
+    finals = []
+    worker = StreamingSTTWorker(
+        engine=RecordingEngine(), silence_duration_seconds=0.05,
+        on_hypothesis=lambda item: finals.append(item) if item.is_final else None,
+    )
+    worker.start()
+    try:
+        worker.submit(_frame(AudioSource.SYSTEM, 10.0, 0.25, 0.1))
+        _wait_for(lambda: len(finals) == 1, timeout=0.5)
+        assert finals[0].ended_at == pytest.approx(10.1)
+        sleep(0.08)
+        assert len(finals) == 1
+    finally:
+        worker.stop()
+
+
 def test_worker_keeps_final_source_language_and_timestamps_separate() -> None:
     engine = RecordingEngine()
     published = []
@@ -153,8 +188,8 @@ def test_worker_keeps_final_source_language_and_timestamps_separate() -> None:
     )
     assert [(call[1], call[2]) for call in engine.calls] == [
         (1, False),
-        (3, False),
         (1, False),
+        (3, False),
         (3, False),
     ]
     assert worker.hypothesis_queue.maxsize == 1

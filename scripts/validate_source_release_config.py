@@ -20,7 +20,7 @@ EXPECTED_CONFIG = {
         "port": 1234,
         "text_model": "",
         "vision_model": "",
-        "preferred_device_name": "Strix Halo",
+        "preferred_device_name": "",
     },
     "capture": {
         "mode": "event",
@@ -29,7 +29,7 @@ EXPECTED_CONFIG = {
     },
     "search": {
         "mode": "auto",
-        "provider": "duckduckgo",
+        "provider": "firecrawl",
         "timeout_seconds": 5.0,
     },
     "overlay": {"opacity": 0.88, "max_height": 360},

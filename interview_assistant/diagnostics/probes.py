@@ -3,12 +3,13 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import Awaitable, Callable, Mapping
-from typing import Protocol
+from typing import Protocol, runtime_checkable
 
 from interview_assistant.audio.devices import AudioDevice
 from interview_assistant.capture.worker import CaptureResult
 from interview_assistant.config import AppConfig
 from interview_assistant.lmstudio.models import ModelDetails, ModelInstance, ModelSummary
+from interview_assistant.retrieval.models import CONTEXT7_ID, FIRECRAWL_ID
 from interview_assistant.transcript.detector import QuestionKind
 from interview_assistant.ui.windows_affinity import AffinityResult
 
@@ -28,6 +29,11 @@ class ReadinessLMClient(Protocol):
     async def list_models(self) -> list[ModelSummary]: ...
 
     async def list_model_details(self) -> list[ModelDetails]: ...
+
+
+@runtime_checkable
+class CredentialValidationClient(Protocol):
+    async def validate_credentials(self) -> None: ...
 
 
 class ReadinessRegistry(Protocol):
@@ -120,8 +126,8 @@ class ProductionReadinessProbes:
             "model_discovery": self._model_discovery,
             "duplicate_instances": self._duplicate_instances,
             "model_load_warmup": self._model_load_warmup,
-            "context7": lambda: self._mcp("mcp/context7"),
-            "duckduckgo_mcp": lambda: self._mcp("mcp/duckduckgo"),
+            "context7": lambda: self._mcp(CONTEXT7_ID),
+            "firecrawl_mcp": lambda: self._mcp(FIRECRAWL_ID),
             "hotkeys": self._hotkeys,
             "display_affinity": self._display_affinity,
             "event_capture": self._event_capture,
@@ -240,6 +246,9 @@ class ProductionReadinessProbes:
         return ProbeOutcome("ready", "Selected microphone is available")
 
     async def _cuda_stt(self) -> ProbeOutcome:
+        if self.config.audio.device == "cpu":
+            await self._warm_stt()
+            return ProbeOutcome("warning", "CPU STT inference passed; expect higher latency")
         if self._cuda_count_task is None:
             self._cuda_count_task = asyncio.create_task(
                 asyncio.to_thread(self.cuda_device_count)
@@ -288,6 +297,11 @@ class ProductionReadinessProbes:
         return await asyncio.shield(self._details_task)
 
     async def _lmstudio_auth(self) -> ProbeOutcome:
+        if self.config.provider == "openrouter":
+            if not isinstance(self.client, CredentialValidationClient):
+                return ProbeOutcome("failed", "Provider does not support API key validation")
+            await self.client.validate_credentials()
+            return ProbeOutcome("ready", "OpenRouter API key validated")
         await self._models()
         return ProbeOutcome("ready", "LM Studio API authentication succeeded")
 
@@ -299,6 +313,8 @@ class ProductionReadinessProbes:
         return await asyncio.shield(self._lmlink_task)
 
     async def _lmlink(self) -> ProbeOutcome:
+        if self.config.provider == "openrouter":
+            return ProbeOutcome("ready", "Not required for OpenRouter")
         output = (await self._lmlink_output()).strip()
         if not output:
             return ProbeOutcome("failed", "LM Link status returned no data")
@@ -311,6 +327,8 @@ class ProductionReadinessProbes:
         return ProbeOutcome("ready", "LM Link CLI is reachable")
 
     async def _preferred_device(self) -> ProbeOutcome:
+        if self.config.provider == "openrouter":
+            return ProbeOutcome("ready", "Inference is managed by OpenRouter")
         output = (await self._lmlink_output()).casefold()
         preferred = self.config.lmstudio.preferred_device_name.strip()
         if preferred and preferred.casefold() in output:
@@ -328,8 +346,8 @@ class ProductionReadinessProbes:
             dict.fromkeys(
                 key
                 for key in (
-                    self.config.lmstudio.text_model,
-                    self.config.lmstudio.vision_model,
+                    self.config.text_model,
+                    self.config.vision_model,
                 )
                 if key
             )
@@ -338,12 +356,12 @@ class ProductionReadinessProbes:
     async def _model_discovery(self) -> ProbeOutcome:
         selected = self._selected_model_keys()
         if not selected:
-            return ProbeOutcome("failed", "No LM Studio model is selected")
+            return ProbeOutcome("failed", "No model is selected for the active provider")
         available = {model.key for model in await self._models()}
         missing = [key for key in selected if key not in available]
         if missing:
             return ProbeOutcome("failed", "One or more selected models are unavailable")
-        vision_key = self.config.lmstudio.vision_model
+        vision_key = self.config.vision_model
         if vision_key:
             details = next(
                 (model for model in await self._details() if model.key == vision_key),
@@ -363,6 +381,8 @@ class ProductionReadinessProbes:
         return ProbeOutcome("ready", f"Discovered {len(selected)} selected model key(s)")
 
     async def _duplicate_instances(self) -> ProbeOutcome:
+        if self.config.provider == "openrouter":
+            return ProbeOutcome("ready", "Remote model instances are managed by OpenRouter")
         selected = self._selected_model_keys()
         if not selected:
             return ProbeOutcome("failed", "No model selection is available to inspect")
@@ -402,23 +422,26 @@ class ProductionReadinessProbes:
         return ProbeOutcome("ready", f"Loaded and warmed {len(warmed)} unique model(s)")
 
     async def _mcp(self, integration: str) -> ProbeOutcome:
-        if (
-            integration == "mcp/duckduckgo"
-            and self.config.search.provider != "duckduckgo"
-        ):
-            return ProbeOutcome(
-                "warning",
-                f"Configured provider {self.config.search.provider} is not supported; retrieval is disabled",
-            )
+        if self.config.search.mode == "off" or self.config.mcp.backend == "off":
+            return ProbeOutcome("ready", "Retrieval disabled in settings")
+        if self.config.provider == "openrouter" and self.config.mcp.backend == "lmstudio":
+            return ProbeOutcome("warning", "Select native MCP to use retrieval with OpenRouter")
+        label = {CONTEXT7_ID: "Context7 MCP", FIRECRAWL_ID: "Firecrawl MCP"}.get(integration, integration)
         probe = self.mcp_probe
         if probe is None:
             return ProbeOutcome(
                 "warning",
-                f"{integration} connectivity was not verified without a tool request",
+                f"{label} connectivity was not verified without a tool request",
             )
         if not await probe(integration):
-            return ProbeOutcome("failed", f"{integration} connectivity check failed")
-        return ProbeOutcome("ready", f"{integration} connectivity check passed")
+            return ProbeOutcome("failed", f"{label} connectivity check failed")
+        verification_limit = (
+            "search credentials and credits were not verified"
+            if integration == FIRECRAWL_ID else "a documentation lookup was not run"
+        )
+        return ProbeOutcome(
+            "ready", f"{label} connection and required tools checked; {verification_limit}",
+        )
 
     async def _hotkeys(self) -> ProbeOutcome:
         if self._hotkey_task is None:
@@ -459,7 +482,7 @@ class ProductionReadinessProbes:
 
     async def _streaming_ttft(self) -> ProbeOutcome:
         warmed = await self._warm_models()
-        key = self.config.lmstudio.text_model or self.config.lmstudio.vision_model
+        key = self.config.text_model or self.config.vision_model
         first_delta_ms = warmed.get(key)
         return streaming_ttft_outcome(
             first_delta_ms,

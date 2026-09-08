@@ -103,7 +103,7 @@ def run_verification(
             raise RuntimeError("Bundled STT model is required for CUDA verification")
     model_options: dict[str, object] = {
         "device": "cuda",
-        "compute_type": "float16",
+        "compute_type": config.audio.compute_type,
     }
     model_source = "configured"
     if resolved_model != config.audio.stt_model:
@@ -133,6 +133,7 @@ def run_verification(
     return {
         "status": "ok",
         "device": "cuda",
+        "compute_type": config.audio.compute_type,
         "model_source": model_source,
         "fixture_seconds": round(fixture_seconds, 6),
         "model_load_seconds": round(model_load_seconds, 6),

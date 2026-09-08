@@ -1,14 +1,16 @@
 from __future__ import annotations
 
 import re
+import sys
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from enum import StrEnum
 from threading import Condition, Lock, RLock, get_ident
 from types import MappingProxyType
-from typing import Literal, Protocol
+from typing import TYPE_CHECKING, Literal, Protocol
 
-from interview_assistant.events import EventBus
+if TYPE_CHECKING:
+    from interview_assistant.events import EventBus
 
 
 class HotkeyAction(StrEnum):
@@ -109,6 +111,14 @@ def _normalize_final(value: str) -> str:
 def _event_key_name(key: object) -> str:
     if isinstance(key, str):
         return _strip_key_prefix(key)
+    if sys.platform == "win32":
+        virtual_key = getattr(key, "vk", None)
+        if isinstance(virtual_key, int) and (
+            0x30 <= virtual_key <= 0x39 or 0x41 <= virtual_key <= 0x5A
+        ):
+            # Windows char depends on Ctrl/Shift and the active layout (Ctrl+S
+            # can be '\x13' or 'ы'). VK identity also stays stable on release.
+            return chr(virtual_key).casefold()
     character = getattr(key, "char", None)
     if isinstance(character, str) and character:
         return _strip_key_prefix(character)
@@ -427,6 +437,21 @@ class HotkeyManager:
                 ),
                 None,
             )
+            if action is None and sys.platform == "win32":
+                # Keep explicitly configured character shortcuts (e.g. ctrl+ы
+                # or ctrl+shift+!) when no binding uses the stable VK name.
+                character = getattr(key, "char", None)
+                if isinstance(character, str) and character:
+                    try:
+                        literal = HotkeyChord(chord.modifiers, _normalize_final(character))
+                    except ValueError:
+                        pass
+                    else:
+                        action = next(
+                            (candidate for candidate, binding in self._bindings.items()
+                             if binding == literal),
+                            None,
+                        )
             if action is not None:
                 self._latched_final_keys.add(final_key)
                 emission_thread = get_ident()

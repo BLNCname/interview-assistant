@@ -3,9 +3,6 @@
     "context7": {
       "url": "https://mcp.context7.com/mcp"
     },
-    "duckduckgo": {
-      "command": "C:\\absolute\\path\\duckduckgo-mcp-server.exe",
-      "args": []
-    }
+    "firecrawl": {"url": "https://mcp.firecrawl.dev/v2/mcp"}
   }
 }

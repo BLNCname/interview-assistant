@@ -4,7 +4,8 @@ import asyncio
 from collections import deque
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from hashlib import sha256
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from threading import Lock
@@ -24,6 +25,7 @@ CaptureStatus = Literal["captured", "protected", "duplicate", "disallowed"]
 BackendFactory = Callable[[], CaptureBackend]
 FrameSaver = Callable[[NDArray[np.uint8], Path, int], None]
 _ResultT = TypeVar("_ResultT")
+_FrameFingerprint = tuple[tuple[int, ...], str, bytes]
 
 _AUTOMATIC_CAPTURE_KINDS: frozenset[QuestionKind] = frozenset(
     {"coding", "system_design", "screen_analysis"}
@@ -67,7 +69,12 @@ async def _await_completion(
 
 
 class CaptureWorker:
-    """Perform event-driven captures on one backend-owning worker thread."""
+    """Perform event-driven captures on one backend-owning worker thread.
+
+    Reuse requires matching raw pixel SHA-256, dimensions and dtype from the last
+    successfully saved frame. Perceptual similarity is insufficient: even a small
+    code edit must produce a new JPEG. Protected frames are always rejected first.
+    """
 
     def __init__(
         self,
@@ -99,7 +106,7 @@ class CaptureWorker:
         self._retained: deque[Path] = deque()
         self._retained_lock = Lock()
         self._backend: CaptureBackend | None = None
-        self._previous_usable_hash: str | None = None
+        self._previous_frame_fingerprint: _FrameFingerprint | None = None
         self._shutdown_requested = False
         self._shutdown_task: asyncio.Task[None] | None = None
 
@@ -157,7 +164,7 @@ class CaptureWorker:
                         operation_error = error
                 with self._retained_lock:
                     self._retained.clear()
-                self._previous_usable_hash = None
+                self._previous_frame_fingerprint = None
                 try:
                     self._temporary_directory.cleanup()
                 except Exception as error:
@@ -170,9 +177,23 @@ class CaptureWorker:
         if self._backend is None:
             self._backend = self._backend_factory()
         frame = self._backend.capture()
-        assessment = self._validator.classify(frame, self._previous_usable_hash)
-        if assessment.status != "available":
-            return CaptureResult(assessment.status, None, assessment)
+        assessment = self._validator.classify(frame)
+        if assessment.status == "protected":
+            return CaptureResult("protected", None, assessment)
+
+        fingerprint: _FrameFingerprint = (
+            frame.shape,
+            frame.dtype.str,
+            sha256(memoryview(np.ascontiguousarray(frame))).digest(),
+        )
+        if fingerprint == self._previous_frame_fingerprint:
+            previous_path: Path | None = None
+            # The fingerprint belongs to the latest saved frame, never an older one.
+            with self._retained_lock:
+                latest = self._retained[-1] if self._retained else None
+            if latest is not None and latest.is_file():
+                previous_path = latest
+            return CaptureResult("duplicate", previous_path, replace(assessment, status="duplicate"))
 
         path = self._temp_path / f"{uuid4()}.jpg"
         try:
@@ -181,7 +202,7 @@ class CaptureWorker:
             path.unlink(missing_ok=True)
             raise
 
-        self._previous_usable_hash = assessment.perceptual_hash
+        self._previous_frame_fingerprint = fingerprint
         with self._retained_lock:
             self._retained.append(path)
             while len(self._retained) > self._max_retained:

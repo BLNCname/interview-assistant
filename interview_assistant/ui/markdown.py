@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from typing import Any
 
 from PyQt6.QtCore import QUrl
 from PyQt6.QtGui import QFont, QTextCharFormat, QTextCursor, QTextDocument, QTextFormat
-from PyQt6.QtWidgets import QTextBrowser
+from PyQt6.QtWidgets import QTextBrowser, QWidget
 
 _IMAGE = re.compile(
     r"(?<!\\)!\[([^\]\r\n]*)\]\(\s*(?:<[^>\r\n]*>|[^)\r\n]*)\s*\)",
@@ -35,9 +36,9 @@ code, pre { font-family: "Cascadia Mono", "Consolas", monospace; }
 class SafeMarkdownBrowser(QTextBrowser):
     """A text browser that never resolves model-provided resources."""
 
-    def __init__(self, *args: object, **kwargs: object) -> None:
+    def __init__(self, parent: QWidget | None = None, **kwargs: Any) -> None:
         self._resource_requests: list[tuple[int, QUrl]] = []
-        super().__init__(*args, **kwargs)
+        super().__init__(parent, **kwargs)
         self.setOpenLinks(False)
         self.setOpenExternalLinks(False)
 
@@ -58,6 +59,7 @@ class ScrollState:
 
 def capture_scroll_state(browser: QTextBrowser) -> ScrollState:
     scrollbar = browser.verticalScrollBar()
+    assert scrollbar is not None
     maximum = scrollbar.maximum()
     return ScrollState(
         was_at_bottom=scrollbar.value() >= maximum,
@@ -67,6 +69,7 @@ def capture_scroll_state(browser: QTextBrowser) -> ScrollState:
 
 def restore_scroll_state(browser: QTextBrowser, state: ScrollState) -> None:
     scrollbar = browser.verticalScrollBar()
+    assert scrollbar is not None
     if state.was_at_bottom:
         scrollbar.setValue(scrollbar.maximum())
     else:
@@ -234,6 +237,7 @@ def render_safe_markdown(
     scroll_state = capture_scroll_state(browser)
 
     document = browser.document()
+    assert document is not None
     document.setDefaultStyleSheet(_COMPACT_STYLESHEET)
     document.setMarkdown(_neutralize_images(markdown), _MARKDOWN_FEATURES)
     document.setDefaultStyleSheet(_COMPACT_STYLESHEET)

@@ -203,6 +203,32 @@ async def test_production_adapter_supplies_full_catalog_without_fake_preferred_s
     assert hotkeys.started == hotkeys.stopped == 1
 
 
+async def test_unavailable_firecrawl_is_named_and_does_not_block_interview() -> None:
+    requested = []
+
+    async def unavailable(integration: str) -> bool:
+        requested.append(integration)
+        return False
+
+    probes, _ = _probes(mcp_probe=unavailable)
+    checks = build_readiness_checks(probes.as_mapping())
+    report = await ReadinessRunner(
+        tuple(check for check in checks if check.name == "firecrawl_mcp")
+    ).run()
+    assert requested == ["mcp/firecrawl"]
+    assert report.can_start
+    assert report.by_name("firecrawl_mcp").status == "warning"
+    assert "Firecrawl MCP" in report.by_name("firecrawl_mcp").message
+
+
+async def test_firecrawl_readiness_describes_probe_limits() -> None:
+    probes, _ = _probes()
+    outcome = await probes.as_mapping()["firecrawl_mcp"]()
+    assert outcome.status == "ready"
+    assert "connection and required tools checked" in outcome.message
+    assert "search credentials and credits were not verified" in outcome.message
+
+
 async def test_unavailable_stt_and_mcp_evidence_is_honest_warning() -> None:
     probes, _ = _probes(stt_fixture=None, mcp_probe=None)
     probes.stt_fixture = None
@@ -210,7 +236,7 @@ async def test_unavailable_stt_and_mcp_evidence_is_honest_warning() -> None:
 
     report = await ReadinessRunner(build_readiness_checks(probes.as_mapping())).run()
 
-    for name in ("stt_ru_fixture", "stt_en_fixture", "context7", "duckduckgo_mcp"):
+    for name in ("stt_ru_fixture", "stt_en_fixture", "context7", "firecrawl_mcp"):
         assert report.by_name(name).status == "warning"
         assert "not verified" in report.by_name(name).message.casefold()
     assert report.can_start
@@ -418,13 +444,14 @@ async def test_probe_mapping_values_are_async_and_side_effects_are_deferred() ->
     await probes.aclose()
 
 
-async def test_invalid_lmlink_json_is_blocking_without_guessing_its_schema() -> None:
+async def test_invalid_optional_lmlink_json_warns_without_guessing_its_schema() -> None:
     probes, _ = _probes()
     probes.lmlink_status = lambda: "LM Link is probably running"
 
     report = await ReadinessRunner(build_readiness_checks(probes.as_mapping())).run()
 
-    assert report.by_name("lmlink_status").status == "failed"
+    assert report.by_name("lmlink_status").status == "warning"
+    assert report.can_start
 
 
 async def test_selected_key_missing_from_native_details_is_not_called_duplicate_free() -> None:

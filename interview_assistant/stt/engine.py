@@ -42,6 +42,7 @@ class TranscriptionEngine(Protocol):
         *,
         beam_size: int,
         condition_on_previous_text: bool,
+        **decode_options: object,
     ) -> TranscriptionResult: ...
 
 
@@ -72,11 +73,15 @@ class WhisperEngine:
         *,
         device: str = "cuda",
         compute_type: str = "float16",
+        language: str = "auto",
         model_factory: _ModelFactory | None = None,
     ) -> None:
+        if language not in {"auto", "ru", "en"}:
+            raise ValueError("language must be auto, ru, or en")
         self.model_name = model_name
         self.device = device
         self.compute_type = compute_type
+        self.language = language
         self._model_factory = model_factory or _create_whisper_model
         self._model: _WhisperModel | None = None
         self._model_lock = Lock()
@@ -101,6 +106,9 @@ class WhisperEngine:
             "condition_on_previous_text": condition_on_previous_text,
             "multilingual": True,
         }
+        if self.language != "auto":
+            options["language"] = self.language
+            options["multilingual"] = False
         if beam_size == 1:
             options["temperature"] = 0.0
         options.update(decode_options)

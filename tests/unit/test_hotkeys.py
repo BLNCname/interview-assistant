@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from threading import Event, Thread
+from types import SimpleNamespace
 
 import pytest
 
@@ -84,6 +85,95 @@ def test_chord_has_stable_portable_text() -> None:
     chord = HotkeyChord.parse("Shift + Control + I")
 
     assert chord.to_portable_text() == "ctrl+shift+i"
+
+
+@pytest.mark.parametrize("character", ["\x13", "ы", "Ы", None])
+def test_windows_screenshot_uses_virtual_key_when_character_is_transformed(
+    monkeypatch, character,
+) -> None:
+    # pynput's Windows translator returns char and the original VK together.
+    monkeypatch.setattr(
+        "interview_assistant.utils.hotkeys.sys", SimpleNamespace(platform="win32"),
+        raising=False,
+    )
+    events = EventBus()
+    received: list[str] = []
+    events.screenshot_requested.connect(lambda: received.append("screenshot"))
+    factory = ListenerFactory()
+    manager = HotkeyManager(
+        events, DEFAULT_HOTKEY_BINDINGS, listener_factory=factory,
+    )
+    manager.start()
+    try:
+        listener = factory.listeners[0]
+        listener.on_press("Key.ctrl_l")
+        listener.on_press("Key.shift_l")
+        key = SimpleNamespace(char=character, vk=0x53, is_dead=False, _scan=0x1F)
+        listener.on_press(key)
+        listener.on_press(key)
+        assert received == ["screenshot"]
+
+        # Releasing Ctrl/Shift first changes the translated character on keyup.
+        listener.on_release("Key.shift_l")
+        listener.on_release("Key.ctrl_l")
+        listener.on_release(SimpleNamespace(char="s", vk=0x53, is_dead=False, _scan=0x1F))
+        listener.on_press("Key.ctrl_l")
+        listener.on_press("Key.shift_l")
+        listener.on_press(key)
+        assert received == ["screenshot", "screenshot"]
+    finally:
+        manager.stop()
+
+
+@pytest.mark.parametrize("binding", ["ctrl+shift+1", "ctrl+shift+!"])
+def test_windows_shifted_digit_preserves_virtual_and_literal_bindings(monkeypatch, binding) -> None:
+    monkeypatch.setattr(
+        "interview_assistant.utils.hotkeys.sys", SimpleNamespace(platform="win32"),
+        raising=False,
+    )
+    events = EventBus()
+    received: list[str] = []
+    events.pause_toggled.connect(lambda: received.append("pause"))
+    factory = ListenerFactory()
+    manager = HotkeyManager(
+        events, {HotkeyAction.PAUSE: binding}, listener_factory=factory,
+    )
+    manager.start()
+    try:
+        listener = factory.listeners[0]
+        listener.on_press("Key.ctrl_l")
+        listener.on_press("Key.shift_l")
+        listener.on_press(SimpleNamespace(char="!", vk=0x31, is_dead=False, _scan=0x02))
+        assert received == ["pause"]
+    finally:
+        manager.stop()
+
+
+@pytest.mark.parametrize(
+    "platform, vk", [("linux", 0x53), ("darwin", 0x53), ("win32", None), ("win32", 0x53)],
+)
+def test_virtual_key_mapping_preserves_explicit_character_bindings(
+    monkeypatch, platform, vk,
+) -> None:
+    monkeypatch.setattr(
+        "interview_assistant.utils.hotkeys.sys", SimpleNamespace(platform=platform),
+        raising=False,
+    )
+    events = EventBus()
+    received: list[str] = []
+    events.pause_toggled.connect(lambda: received.append("pause"))
+    factory = ListenerFactory()
+    manager = HotkeyManager(
+        events, {HotkeyAction.PAUSE: "ctrl+ы"}, listener_factory=factory,
+    )
+    manager.start()
+    try:
+        listener = factory.listeners[0]
+        listener.on_press("Key.ctrl_l")
+        listener.on_press(SimpleNamespace(char="ы", vk=vk, is_dead=False))
+        assert received == ["pause"]
+    finally:
+        manager.stop()
 
 
 def test_normalize_bindings_rejects_cross_action_collision() -> None:

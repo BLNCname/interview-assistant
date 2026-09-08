@@ -18,8 +18,41 @@ def test_force_next_is_one_shot_even_when_base_mode_is_auto() -> None:
     policy.force_next()
 
     forced = policy.integrations_for(static_question)
-    assert [integration.id for integration in forced] == ["mcp/duckduckgo"]
+    assert [integration.id for integration in forced] == ["mcp/firecrawl"]
     assert policy.integrations_for(static_question) == []
+
+
+@pytest.mark.parametrize("mode", ["auto", "forced"])
+def test_web_query_is_limited_after_sanitizing_personal_metadata(mode: str) -> None:
+    safe_question = "What is the latest Python release? " + "Release compatibility details. " * 30
+    raw_question = "My name is Alice Smith. Email: alice@example.com. " + safe_question
+    integration = SearchPolicy(mode).integrations_for(raw_question, "private full transcript")[0]
+
+    assert integration.id == "mcp/firecrawl"
+    assert integration.query == safe_question[:500].rstrip()
+    assert len(integration.query) <= 500
+    assert "Alice" not in integration.query
+    assert "alice@example.com" not in integration.query
+    assert "private full transcript" not in integration.query
+
+
+def test_auto_privacy_classification_checks_text_beyond_web_query_limit() -> None:
+    question = "What is the latest Python release? " + "details " * 100 + " internal system"
+    assert SearchPolicy("auto").integrations_for(question) == []
+
+
+def test_context7_documentation_query_is_not_cut_to_web_search_limit() -> None:
+    question = "How do I configure FastAPI lifespan? " + "Implementation constraints. " * 30
+    integration = SearchPolicy("auto").integrations_for(question)[0]
+    assert integration.id == "mcp/context7"
+    assert integration.query == question.strip()
+
+
+def test_firecrawl_capability_rejects_query_beyond_server_limit() -> None:
+    with pytest.raises(ValueError, match="query.*limit"):
+        retrieval_models._policy_search_integration(
+            "mcp/firecrawl", "x" * 501, ("firecrawl_search",),
+        )
 
 
 def test_force_next_is_retained_when_sanitization_removes_an_unusable_utterance() -> None:
@@ -29,7 +62,7 @@ def test_force_next_is_retained_when_sanitization_removes_an_unusable_utterance(
     assert policy.integrations_for("My name is Alice Smith.") == []
 
     forced = policy.integrations_for("Explain a binary search tree")
-    assert [integration.id for integration in forced] == ["mcp/duckduckgo"]
+    assert [integration.id for integration in forced] == ["mcp/firecrawl"]
     assert policy.integrations_for("Explain a binary search tree") == []
 
 
@@ -66,10 +99,27 @@ def test_specific_api_question_uses_context7_without_a_temporal_marker() -> None
     assert [item.id for item in integrations] == ["mcp/context7"]
 
 
-def test_current_library_version_question_uses_context7() -> None:
-    integrations = SearchPolicy("auto").integrations_for(
-        "What is the current FastAPI version?"
-    )
+@pytest.mark.parametrize("question", [
+    "What is the current FastAPI version?",
+    "What is the latest Python version?",
+    "Какая последняя версия Python?",
+    "Какая версия Python сейчас актуальна?",
+    "Какая последняя версия библиотеки FastAPI?",
+])
+def test_current_software_version_lookup_uses_web_search(question: str) -> None:
+    integrations = SearchPolicy("auto").integrations_for(question)
+
+    assert [item.id for item in integrations] == ["mcp/firecrawl"]
+    assert integrations[0].allowed_tools == ("firecrawl_search",)
+
+
+@pytest.mark.parametrize("question", [
+    "How do I configure lifespan in the latest FastAPI version?",
+    "Как использовать функцию match в версии Python 3.10?",
+    "Покажи документацию последней версии Python.",
+])
+def test_version_specific_api_and_documentation_still_use_context7(question: str) -> None:
+    integrations = SearchPolicy("auto").integrations_for(question)
 
     assert [item.id for item in integrations] == ["mcp/context7"]
 
@@ -82,13 +132,13 @@ def test_current_library_version_question_uses_context7() -> None:
         "Какие сегодня новости о выпуске Windows?",
     ],
 )
-def test_general_current_question_uses_duckduckgo(question: str) -> None:
+def test_general_current_question_uses_firecrawl(question: str) -> None:
     integrations = SearchPolicy("auto").integrations_for(question)
 
     assert len(integrations) == 1
-    assert integrations[0].id == "mcp/duckduckgo"
+    assert integrations[0].id == "mcp/firecrawl"
     assert integrations[0].query == question
-    assert integrations[0].allowed_tools == ("search",)
+    assert integrations[0].allowed_tools == ("firecrawl_search",)
 
 
 def test_static_question_exposes_no_tools() -> None:
@@ -145,9 +195,9 @@ def test_auto_does_not_route_declarative_current_or_documentation_text(
 @pytest.mark.parametrize(
     ("question", "expected_id"),
     [
-        ("Tell me the latest Python release.", "mcp/duckduckgo"),
+        ("Tell me the latest Python release.", "mcp/firecrawl"),
         ("Find the current FastAPI documentation.", "mcp/context7"),
-        ("Расскажи последние новости Python.", "mcp/duckduckgo"),
+        ("Расскажи последние новости Python.", "mcp/firecrawl"),
         ("Покажи актуальную документацию FastAPI.", "mcp/context7"),
     ],
 )
@@ -167,7 +217,7 @@ def test_off_mode_exposes_no_tools() -> None:
     ) == []
 
 
-def test_forced_mode_is_a_per_request_duckduckgo_override() -> None:
+def test_forced_mode_is_a_per_request_firecrawl_override() -> None:
     policy = SearchPolicy("forced")
 
     integrations = policy.integrations_for(
@@ -175,8 +225,8 @@ def test_forced_mode_is_a_per_request_duckduckgo_override() -> None:
     )
     second = policy.integrations_for("What is the latest Python release?")
 
-    assert [item.id for item in integrations] == ["mcp/duckduckgo"]
-    assert integrations[0].allowed_tools == ("search",)
+    assert [item.id for item in integrations] == ["mcp/firecrawl"]
+    assert integrations[0].allowed_tools == ("firecrawl_search",)
     assert second == []
 
 
@@ -197,7 +247,7 @@ def test_forced_override_is_consumed_by_only_one_concurrent_request() -> None:
         integration.id
         for result in results
         for integration in result
-    } == {"mcp/duckduckgo"}
+    } == {"mcp/firecrawl"}
 
 
 def test_auto_and_off_modes_remain_stable_across_repeated_calls() -> None:
@@ -207,7 +257,7 @@ def test_auto_and_off_modes_remain_stable_across_repeated_calls() -> None:
     first_auto = auto.integrations_for("What is the latest Python release?")
     second_auto = auto.integrations_for("What is the latest Python release?")
 
-    assert [item.id for item in first_auto] == ["mcp/duckduckgo"]
+    assert [item.id for item in first_auto] == ["mcp/firecrawl"]
     assert second_auto == first_auto
     assert off.integrations_for("What is the latest Python release?") == []
     assert off.integrations_for("What is the latest Python release?") == []
@@ -834,8 +884,8 @@ def test_integration_is_frozen_slotted_and_serializes_only_native_fields() -> No
         integration.id = "mcp/other"
     assert integration.to_lmstudio() == {
         "type": "plugin",
-        "id": "mcp/duckduckgo",
-        "allowed_tools": ["search"],
+        "id": "mcp/firecrawl",
+        "allowed_tools": ["firecrawl_search"],
     }
     assert "query" not in integration.to_lmstudio()
 
@@ -843,9 +893,9 @@ def test_integration_is_frozen_slotted_and_serializes_only_native_fields() -> No
 def test_raw_search_integration_construction_is_rejected() -> None:
     with pytest.raises(TypeError, match="sanitized"):
         SearchIntegration(
-            id="mcp/duckduckgo",
+            id="mcp/firecrawl",
             query="raw private transcript",
-            allowed_tools=("search",),
+            allowed_tools=("firecrawl_search",),
         )
 
 
@@ -856,9 +906,9 @@ def test_unsealed_sanitized_question_is_rejected() -> None:
 
     with pytest.raises(TypeError, match="sanitized"):
         SearchIntegration(
-            id="mcp/duckduckgo",
+            id="mcp/firecrawl",
             query=unsealed,
-            allowed_tools=("search",),
+            allowed_tools=("firecrawl_search",),
         )
 
 
@@ -873,9 +923,9 @@ def test_reused_proof_and_mac_cannot_seal_different_text() -> None:
 
     with pytest.raises(TypeError, match="sanitized"):
         SearchIntegration(
-            id="mcp/duckduckgo",
+            id="mcp/firecrawl",
             query=forged,
-            allowed_tools=("search",),
+            allowed_tools=("firecrawl_search",),
         )
 
 
@@ -895,9 +945,9 @@ def test_sanitized_question_subclass_lookalike_is_rejected() -> None:
 
     with pytest.raises(TypeError, match="sanitized"):
         SearchIntegration(
-            id="mcp/duckduckgo",
+            id="mcp/firecrawl",
             query=lookalike,
-            allowed_tools=("search",),
+            allowed_tools=("firecrawl_search",),
         )
 
 

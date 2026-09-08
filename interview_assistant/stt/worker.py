@@ -225,6 +225,8 @@ class StreamingSTTWorker:
         self._thread: Thread | None = None
         self._stopped = False
         self._last_error: Exception | None = None
+        self._next_source = AudioSource.SYSTEM
+        self._source_activity: dict[AudioSource, float] = {}
 
     @property
     def system_queue(self) -> Queue[AudioFrame]:
@@ -319,6 +321,7 @@ class StreamingSTTWorker:
                 except Exception as error:
                     self._record_error(error)
                 finally:
+                    self._source_activity[expected_source] = monotonic()
                     queue.task_done()
         finally:
             self._discard_pending_frames()
@@ -329,15 +332,43 @@ class StreamingSTTWorker:
         self,
     ) -> tuple[AudioSource, Queue[AudioFrame], AudioFrame] | None:
         while not self._stop_event.is_set():
-            for source in (AudioSource.SYSTEM, AudioSource.MICROPHONE):
+            self._finish_idle_sources()
+            other_source = (
+                AudioSource.MICROPHONE
+                if self._next_source is AudioSource.SYSTEM
+                else AudioSource.SYSTEM
+            )
+            for source in (self._next_source, other_source):
                 queue = self._queues[source]
                 try:
-                    return source, queue, queue.get_nowait()
+                    frame = queue.get_nowait()
                 except Empty:
-                    pass
+                    continue
+                # One busy source must not starve the other while decoding is slow.
+                self._next_source = (
+                    AudioSource.MICROPHONE
+                    if source is AudioSource.SYSTEM
+                    else AudioSource.SYSTEM
+                )
+                return source, queue, frame
             self._input_available.wait(timeout=_QUEUE_POLL_SECONDS)
             self._input_available.clear()
         return None
+
+    def _finish_idle_sources(self) -> None:
+        # WASAPI loopback can stop delivering packets when playback ends. Waiting
+        # only for a silence frame would leave the last question partial forever.
+        now = monotonic()
+        for source, state in self._states.items():
+            last_activity = self._source_activity.get(source)
+            if (
+                state.started_at is not None
+                and last_activity is not None
+                and now - last_activity >= self._silence_duration_seconds
+                and self._queues[source].empty()
+                and not self._stop_requested.is_set()
+            ):
+                self._finish_utterance(source, state)
 
     def _process_frame(self, frame: AudioFrame) -> None:
         if frame.sample_rate != _TARGET_SAMPLE_RATE:

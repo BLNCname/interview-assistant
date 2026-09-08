@@ -253,8 +253,9 @@ async def test_question_to_streaming_overlay_loads_shared_model_once(
     assert registry.load_count == 1
     assert client.payloads[0]["model"] == "instance:qwen-vl"
     assert client.payloads[0]["store"] is False
-    assert "подготовленного кандидата" in str(client.payloads[0]["input"])
-    assert "обычно не превышай 120 слов" in str(client.payloads[0]["input"])
+    assert "реплики кандидата" in client.payloads[0]["system_prompt"]
+    assert "120 слов" in client.payloads[0]["system_prompt"]
+    assert "реплики кандидата" not in str(client.payloads[0]["input"])
     assert audio.started == stt.started == hotkeys.started == 1
 
     await runtime.shutdown()
@@ -437,7 +438,7 @@ async def test_external_unload_recovers_and_replays_only_recovery_context(
     replay_input = client.payloads[1]["input"]
     assert isinstance(replay_input, list)
     replay_prompt = replay_input[0]["content"]
-    assert "подготовленного кандидата" in replay_prompt
+    assert "реплики кандидата" in client.payloads[1]["system_prompt"]
     assert "Спроектируйте сервис коротких ссылок" in replay_prompt
     assert "This old context must never be replayed" not in replay_prompt
     assert app.ribbon.answer_text.endswith("Recovered API Gateway")
@@ -596,17 +597,17 @@ async def test_auto_search_uses_sealed_two_stage_retrieval_without_overlay_leaka
         "integrations": [
             {
                 "type": "plugin",
-                "id": "mcp/duckduckgo",
-                "allowed_tools": ["search"],
+                "id": "mcp/firecrawl",
+                "allowed_tools": ["firecrawl_search"],
             }
         ],
         "store": False,
     }
     assert "Python 3.14" in str(answer["input"])
-    assert "untrusted reference data" in str(answer["input"])
+    assert "untrusted reference data" in answer["system_prompt"]
     assert app.ribbon.answer_text == "Final API Gateway"
     assert "Python 3.14" not in app.ribbon.answer_text
-    assert app.ribbon.source_texts == ("mcp/duckduckgo",)
+    assert app.ribbon.source_texts == ("mcp/firecrawl",)
 
     await runtime.shutdown()
 

@@ -6,7 +6,9 @@ param(
 
     [string]$InstallPath = "",
 
-    [string]$ReportPath = ""
+    [string]$ReportPath = "",
+
+    [string]$InventoryPath = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -16,7 +18,8 @@ $root = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot "..")).Path
 $buildRoot = [IO.Path]::GetFullPath((Join-Path $root "build"))
 New-Item -ItemType Directory -Force -Path $buildRoot | Out-Null
 if ([string]::IsNullOrWhiteSpace($InstallPath)) {
-    $InstallPath = Join-Path $buildRoot "installer-smoke"
+    $runName = "installer-smoke-" + [Guid]::NewGuid().ToString("N")
+    $InstallPath = Join-Path (Join-Path $buildRoot $runName) "installer-smoke"
 }
 elseif (-not [IO.Path]::IsPathRooted($InstallPath)) {
     $InstallPath = Join-Path $root $InstallPath
@@ -28,10 +31,11 @@ if (
     -not $smoke.StartsWith($buildPrefix, [StringComparison]::OrdinalIgnoreCase) -or
     (Split-Path -Leaf $smoke) -ne "installer-smoke"
 ) {
-    throw "The installer smoke path must be the workspace build/installer-smoke directory."
+    throw "The installer smoke path must end in installer-smoke under the workspace build directory."
 }
+$runRoot = Split-Path -Parent $smoke
 if ([string]::IsNullOrWhiteSpace($ReportPath)) {
-    $ReportPath = Join-Path $buildRoot "installer-smoke.json"
+    $ReportPath = Join-Path $runRoot "installer-smoke.json"
 }
 elseif (-not [IO.Path]::IsPathRooted($ReportPath)) {
     $ReportPath = Join-Path $root $ReportPath
@@ -41,7 +45,16 @@ if (-not (Test-Path -LiteralPath $InstallerPath -PathType Leaf)) {
 }
 $installer = (Resolve-Path -LiteralPath $InstallerPath).Path
 $manifest = Join-Path $root "packaging\stt_model_manifest.json"
-$inventory = Join-Path $root "packaging\dist_inventory.json"
+if ([string]::IsNullOrWhiteSpace($InventoryPath)) {
+    $InventoryPath = Join-Path $root "packaging\dist_inventory.json"
+}
+elseif (-not [IO.Path]::IsPathRooted($InventoryPath)) {
+    $InventoryPath = Join-Path $root $InventoryPath
+}
+if (-not (Test-Path -LiteralPath $InventoryPath -PathType Leaf)) {
+    throw "The installer smoke distribution inventory is missing."
+}
+$inventory = (Resolve-Path -LiteralPath $InventoryPath).Path
 $validator = Join-Path $root "scripts\validate_release_dist.py"
 $python = Join-Path $root ".venv\Scripts\python.exe"
 foreach ($requiredFile in @($manifest, $inventory, $validator, $python)) {
@@ -50,17 +63,45 @@ foreach ($requiredFile in @($manifest, $inventory, $validator, $python)) {
     }
 }
 
-if (Test-Path -LiteralPath $smoke) {
-    Remove-Item -LiteralPath $smoke -Recurse -Force
+$installLog = Join-Path $runRoot "installer-smoke-install.log"
+$uninstallLog = Join-Path $runRoot "installer-smoke-uninstall.log"
+$diagnosticsOutput = Join-Path $runRoot "installed-diagnostics.json"
+$missingConfig = Join-Path $runRoot "installed-smoke-missing.yaml"
+foreach ($newPath in @(
+    $smoke, $installLog, $uninstallLog, $diagnosticsOutput, $missingConfig, $ReportPath
+)) {
+    if (Test-Path -LiteralPath $newPath) {
+        throw "An installer smoke output already exists; choose a new run directory."
+    }
 }
-$installLog = Join-Path $buildRoot "installer-smoke-install.log"
-$uninstallLog = Join-Path $buildRoot "installer-smoke-uninstall.log"
-$diagnosticsOutput = Join-Path $buildRoot "installed-diagnostics.json"
-$missingConfig = Join-Path $buildRoot "installed-smoke-missing.yaml"
-Remove-Item `
-    -LiteralPath $installLog,$uninstallLog,$diagnosticsOutput,$missingConfig `
-    -Force `
-    -ErrorAction SilentlyContinue
+
+# A directory junction must not redirect the installer outside the workspace.
+$ancestor = $runRoot
+while ($ancestor.StartsWith($buildRoot, [StringComparison]::OrdinalIgnoreCase)) {
+    if (Test-Path -LiteralPath $ancestor) {
+        $item = Get-Item -LiteralPath $ancestor -Force
+        if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) {
+            throw "The installer smoke path must not contain directory links."
+        }
+    }
+    if ($ancestor -eq $buildRoot) { break }
+    $ancestor = Split-Path -Parent $ancestor
+}
+
+# /DIR does not isolate Inno Setup's AppId-based uninstall registration.
+$uninstallKey = "{9CE7901A-56E8-49CB-A8ED-8D5CF4F97C7D}_is1"
+foreach ($registryRoot in @(
+    "Registry::HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Uninstall",
+    "Registry::HKEY_CURRENT_USER\Software\Wow6432Node\Microsoft\Windows\CurrentVersion\Uninstall",
+    "Registry::HKEY_LOCAL_MACHINE\Software\Microsoft\Windows\CurrentVersion\Uninstall",
+    "Registry::HKEY_LOCAL_MACHINE\Software\Wow6432Node\Microsoft\Windows\CurrentVersion\Uninstall"
+)) {
+    if (Test-Path -LiteralPath "$registryRoot\$uninstallKey" -ErrorAction Stop) {
+        throw "Interview Assistant is already registered; run installer smoke in a clean Windows environment."
+    }
+}
+New-Item -ItemType Directory -Force -Path $runRoot | Out-Null
+New-Item -ItemType Directory -Force -Path (Split-Path -Parent $ReportPath) | Out-Null
 
 $install = Start-Process `
     -FilePath $installer `
@@ -68,6 +109,10 @@ $install = Start-Process `
         "/VERYSILENT",
         "/SUPPRESSMSGBOXES",
         "/NORESTART",
+        "/NORESTARTAPPLICATIONS",
+        "/NOCLOSEAPPLICATIONS",
+        "/NOICONS",
+        '/TASKS=""',
         "/SP-",
         ('/DIR="' + $smoke + '"'),
         ('/LOG="' + $installLog + '"')
@@ -148,6 +193,8 @@ $result = [PSCustomObject]@{
     Frozen = $diagnosticsReport.frozen
     ModelInventoryAndHashesValidated = $true
     InstallTreeRemoved = $true
+    InventoryPath = $inventory
+    InstallPath = $smoke
 }
 $result | ConvertTo-Json -Depth 3 | Set-Content -LiteralPath $ReportPath -Encoding UTF8
 $result

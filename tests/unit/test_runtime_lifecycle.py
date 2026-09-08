@@ -9,11 +9,13 @@ from time import monotonic
 from weakref import ref
 
 import pytest
+import numpy as np
+from numpy.typing import NDArray
 from PyQt6.QtWidgets import QApplication
 
 from interview_assistant.app import InterviewApplication
 from interview_assistant.audio.models import AudioSource
-from interview_assistant.capture.worker import CaptureResult
+from interview_assistant.capture.worker import CaptureResult, CaptureStatus, CaptureWorker
 from interview_assistant.config import AppConfig
 from interview_assistant.diagnostics.readiness import CheckResult, ReadinessReport
 from interview_assistant.events import EventBus
@@ -127,6 +129,29 @@ class _BlockingClient(_Client):
         yield ChatEvent(type="chat.start")
         yield ChatEvent(type="message.delta", content="answer")
         yield ChatEvent(type="chat.end", result={})
+
+
+class _FailSecondAnswerClient(_Client):
+    async def stream_chat(
+        self,
+        payload: Mapping[str, object],
+    ) -> AsyncIterator[ChatEvent]:
+        if len(self.payloads) == 1:
+            self.payloads.append(dict(payload))
+            raise RuntimeError("model generation failed")
+        async for event in super().stream_chat(payload):
+            yield event
+
+
+class _FrameSequenceBackend:
+    def __init__(self, frames: list[NDArray[np.uint8]]) -> None:
+        self.frames = iter(frames)
+
+    def capture(self) -> NDArray[np.uint8]:
+        return next(self.frames).copy()
+
+    def close(self) -> None:
+        pass
 
 
 class _TimeoutRetrievalClient(_Client):
@@ -251,6 +276,22 @@ class _ReplacingFailureCapture(_ParityCapture):
         return await super().capture_for_event(kind, manual=manual)
 
 
+class _RepeatedManualCapture(_ParityCapture):
+    def __init__(
+        self, path: Path, *, repeated_status: CaptureStatus = "duplicate",
+        repeated_path: Path | None = None,
+    ) -> None:
+        super().__init__(path)
+        self.repeated_status = repeated_status
+        self.repeated_path = repeated_path
+
+    async def capture_for_event(self, kind: str, *, manual: bool = False) -> CaptureResult:
+        if manual and self.manual_count:
+            self.manual_count += 1
+            return CaptureResult(self.repeated_status, self.repeated_path, None)
+        return await super().capture_for_event(kind, manual=manual)
+
+
 class _OverlappingManualCapture(_ParityCapture):
     def __init__(self, first_path: Path, second_path: Path) -> None:
         super().__init__(first_path)
@@ -321,7 +362,7 @@ def _runtime(
     audio: _Service | None = None,
     stt: _Service | None = None,
     hotkeys: _Service | None = None,
-    capture: _SlowShutdownCapture | _ReplacingCapture | _ParityCapture | None = None,
+    capture: _SlowShutdownCapture | _ReplacingCapture | _ParityCapture | CaptureWorker | None = None,
     client: _Client | None = None,
     registry: _Registry | None = None,
 ):
@@ -633,7 +674,7 @@ async def test_hotkey_actions_cover_pause_overlay_capture_search_clear_and_histo
     app.events.forced_search_requested.emit()
     qtbot.wait(10)
     forced = services.search_policy.integrations_for("Explain a binary search tree")
-    assert [integration.id for integration in forced] == ["mcp/duckduckgo"]
+    assert [integration.id for integration in forced] == ["mcp/firecrawl"]
     assert services.search_policy.integrations_for("Explain a binary search tree") == []
 
     app.events.answer_reset.emit(99)
@@ -769,6 +810,234 @@ async def test_pending_screenshot_is_consumed_only_once(
     assert "data:image/jpeg;base64," in str(client.payloads[-2]["input"])
     assert "data:image/jpeg;base64," not in str(client.payloads[-1]["input"])
     await runtime.shutdown()
+
+
+async def test_no_vision_model_skips_auto_capture_and_discards_manual_attachment(
+    qtbot,
+    tmp_path: Path,
+) -> None:
+    app = InterviewApplication.for_test()
+    qtbot.addWidget(app.ribbon)
+    messages: list[str] = []
+    app.events.notification.connect(messages.append)
+    capture = _ParityCapture(tmp_path / "manual.jpg")
+    capture.path.write_bytes(b"manual image")
+    runtime, _, client = _runtime(app, capture=capture)
+    runtime.config.lmstudio.vision_model = None
+    await runtime.start()
+    try:
+        await runtime.submit_hypothesis(_hypothesis("Analyze the code on the screen"))
+        await runtime.capture_manual_screenshot()
+        await runtime.submit_hypothesis(_hypothesis("Implement a binary search function"))
+
+        assert len(client.payloads) == 2
+        assert capture.automatic_count == 0
+        assert capture.manual_count == 1
+        assert runtime.manual_image_path is None
+        assert all("data:image" not in str(payload) for payload in client.payloads)
+        assert "No vision model selected; answering without the screenshot." in messages
+        assert "Screenshot added to the request." not in messages
+    finally:
+        await runtime.shutdown()
+
+
+async def test_repeated_manual_duplicate_preserves_pending_image_once(
+    qtbot,
+    tmp_path: Path,
+) -> None:
+    app = InterviewApplication.for_test()
+    qtbot.addWidget(app.ribbon)
+    messages: list[str] = []
+    app.events.notification.connect(messages.append)
+    capture = _RepeatedManualCapture(tmp_path / "manual.jpg")
+    capture.path.write_bytes(b"manual image")
+    runtime, _, client = _runtime(app, capture=capture)
+    await runtime.start()
+    try:
+        await runtime.capture_manual_screenshot()
+        await runtime.capture_manual_screenshot()
+
+        assert runtime.manual_image_path == capture.path
+        assert messages[-1] == "Screenshot is ready for the next request."
+        await runtime.submit_hypothesis(_hypothesis("What is shown?"))
+        await runtime.submit_hypothesis(_hypothesis("Explain it again"))
+
+        assert capture.manual_count == 2
+        assert runtime.manual_image_path is None
+        assert "data:image/jpeg;base64," in str(client.payloads[-2]["input"])
+        assert "data:image/jpeg;base64," not in str(client.payloads[-1]["input"])
+    finally:
+        await runtime.shutdown()
+
+
+@pytest.mark.parametrize("previous_generation_failed", [False, True])
+async def test_automatic_duplicate_keeps_latest_image_after_previous_generation(
+    qtbot,
+    previous_generation_failed: bool,
+) -> None:
+    app = InterviewApplication.for_test()
+    qtbot.addWidget(app.ribbon)
+    notifications: list[str] = []
+    app.events.notification.connect(notifications.append)
+    first = np.random.default_rng(27).integers(32, 224, (120, 160, 3), dtype=np.uint8)
+    latest = np.random.default_rng(28).integers(32, 224, (120, 160, 3), dtype=np.uint8)
+    backend = _FrameSequenceBackend([first, latest, latest])
+    capture = CaptureWorker(backend_factory=lambda: backend)
+    client = _FailSecondAnswerClient() if previous_generation_failed else _Client()
+    runtime, _, _ = _runtime(app, capture=capture, client=client)
+    await runtime.start()
+    try:
+        for _ in range(3):
+            await runtime.submit_hypothesis(_hypothesis("Analyze the code on the screen"))
+
+        assert len(client.payloads) == 3
+        images: list[str] = []
+        for payload in client.payloads:
+            items = payload["input"]
+            assert isinstance(items, list)
+            images.append(items[1]["data_url"])
+        assert images[0] != images[1]
+        assert images[2] == images[1]
+        assert len(capture.retained_paths) == 2
+        assert ("Answer generation failed." in notifications) == previous_generation_failed
+        assert all(str(capture.temp_directory) not in str(payload) for payload in client.payloads)
+    finally:
+        await runtime.shutdown()
+
+
+async def test_manual_duplicate_reuses_auto_capture_after_pending_image_is_consumed(qtbot) -> None:
+    app = InterviewApplication.for_test()
+    qtbot.addWidget(app.ribbon)
+    frame = np.random.default_rng(28).integers(32, 224, (120, 160, 3), dtype=np.uint8)
+    capture = CaptureWorker(backend_factory=lambda: _FrameSequenceBackend([frame] * 3))
+    runtime, _, client = _runtime(app, capture=capture)
+    await runtime.start()
+    try:
+        await runtime.submit_hypothesis(_hypothesis("Analyze the code on the screen"))
+        assert len(capture.retained_paths) == 1
+        latest = capture.retained_paths[0]
+        first_input = client.payloads[0]["input"]
+        assert isinstance(first_input, list)
+        for _ in range(2):
+            assert runtime.manual_image_path is None
+            await runtime.capture_manual_screenshot()
+            assert runtime.manual_image_path == latest
+            await runtime.submit_hypothesis(_hypothesis("What is shown?"))
+            items = client.payloads[-1]["input"]
+            assert isinstance(items, list)
+            assert items[1]["data_url"] == first_input[1]["data_url"]
+        assert runtime.manual_image_path is None
+        assert len(client.payloads) == 3
+        assert capture.retained_paths == (latest,)
+    finally:
+        await runtime.shutdown()
+
+
+async def test_manual_duplicate_prefers_current_result_path_over_older_pending(
+    qtbot, tmp_path: Path,
+) -> None:
+    app = InterviewApplication.for_test()
+    qtbot.addWidget(app.ribbon)
+    older = tmp_path / "older.jpg"
+    current = tmp_path / "current.jpg"
+    older.write_bytes(b"old")
+    current.write_bytes(b"current")
+    capture = _RepeatedManualCapture(older, repeated_path=current)
+    runtime, _, client = _runtime(app, capture=capture)
+    await runtime.start()
+    try:
+        await runtime.capture_manual_screenshot()
+        await runtime.capture_manual_screenshot()
+
+        assert runtime.manual_image_path == current
+        await runtime.submit_hypothesis(_hypothesis("What is shown?"))
+        items = client.payloads[-1]["input"]
+        assert isinstance(items, list)
+        assert items[1]["data_url"] == "data:image/jpeg;base64,Y3VycmVudA=="
+    finally:
+        await runtime.shutdown()
+
+
+@pytest.mark.parametrize("status", ["duplicate", "protected", "disallowed"])
+async def test_manual_unusable_explicit_result_does_not_restore_older_pending(
+    qtbot, tmp_path: Path, status: CaptureStatus,
+) -> None:
+    app = InterviewApplication.for_test()
+    qtbot.addWidget(app.ribbon)
+    older = tmp_path / "older.jpg"
+    current = tmp_path / "current.jpg"
+    older.write_bytes(b"old")
+    if status != "duplicate":
+        current.write_bytes(b"unusable")
+    capture = _RepeatedManualCapture(older, repeated_status=status, repeated_path=current)
+    runtime, _, _ = _runtime(app, capture=capture)
+    await runtime.start()
+    try:
+        await runtime.capture_manual_screenshot()
+        await runtime.capture_manual_screenshot()
+
+        assert runtime.manual_image_path is None
+        assert older.is_file()
+    finally:
+        await runtime.shutdown()
+
+
+@pytest.mark.parametrize("status", ["protected", "disallowed", "duplicate", "captured"])
+def test_unusable_capture_does_not_restore_a_stale_image(
+    qtbot, tmp_path: Path, status: CaptureStatus,
+) -> None:
+    app = InterviewApplication.for_test()
+    qtbot.addWidget(app.ribbon)
+    runtime, _, _ = _runtime(app)
+    path = tmp_path / "last.jpg"
+    path.write_bytes(b"last image")
+    if status in ("duplicate", "captured"):
+        path.unlink()
+
+    assert runtime._usable_image(CaptureResult(status, path, None)) is None
+
+
+async def test_cleared_capture_storage_invalidates_a_previous_duplicate(qtbot) -> None:
+    app = InterviewApplication.for_test()
+    qtbot.addWidget(app.ribbon)
+    frame = np.random.default_rng(28).integers(32, 224, (120, 160, 3), dtype=np.uint8)
+    capture = CaptureWorker(backend_factory=lambda: _FrameSequenceBackend([frame, frame]))
+    runtime, _, _ = _runtime(app, capture=capture)
+    try:
+        await capture.capture_for_event("screen_analysis")
+        duplicate = await capture.capture_for_event("screen_analysis")
+        assert runtime._usable_image(duplicate) is not None
+    finally:
+        await capture.shutdown()
+
+    assert capture.retained_paths == ()
+    assert runtime._usable_image(duplicate) is None
+
+
+@pytest.mark.parametrize("repeated_status", ["duplicate", "protected", "disallowed"])
+async def test_repeated_manual_capture_does_not_restore_unusable_pending_image(
+    qtbot,
+    tmp_path: Path,
+    repeated_status: CaptureStatus,
+) -> None:
+    app = InterviewApplication.for_test()
+    qtbot.addWidget(app.ribbon)
+    messages: list[str] = []
+    app.events.notification.connect(messages.append)
+    capture = _RepeatedManualCapture(tmp_path / "manual.jpg", repeated_status=repeated_status)
+    capture.path.write_bytes(b"manual image")
+    runtime, _, _ = _runtime(app, capture=capture)
+    await runtime.start()
+    try:
+        await runtime.capture_manual_screenshot()
+        if repeated_status == "duplicate":
+            capture.path.unlink()
+        await runtime.capture_manual_screenshot()
+
+        assert runtime.manual_image_path is None
+        assert "Screenshot was not captured" in messages[-1]
+    finally:
+        await runtime.shutdown()
 
 
 async def test_failed_new_screenshot_clears_stale_pending_image(

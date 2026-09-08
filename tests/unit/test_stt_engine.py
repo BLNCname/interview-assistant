@@ -322,6 +322,25 @@ class FakeWhisperModel:
         )
 
 
+@pytest.mark.parametrize("language", ["ru", "en"])
+def test_forced_language_reaches_both_partial_and_final_decoder(language: str) -> None:
+    model = FakeWhisperModel()
+    engine = WhisperEngine(language=language, model_factory=lambda *_args, **_kwargs: model)
+    for beam in (1, 3):
+        engine.transcribe(
+            np.ones(1_600, dtype=np.float32),
+            beam_size=beam,
+            condition_on_previous_text=False,
+        )
+    assert all(call["language"] == language for call in model.calls)
+    assert all(call["multilingual"] is False for call in model.calls)
+
+
+def test_unsupported_configured_language_is_rejected_before_loading() -> None:
+    with pytest.raises(ValueError, match="language"):
+        WhisperEngine(language="invalid")
+
+
 def test_cuda_model_factory_configures_runtime_before_whisper(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

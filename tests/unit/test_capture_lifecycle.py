@@ -9,10 +9,11 @@ from uuid import UUID
 
 import numpy as np
 from numpy.typing import NDArray
-from PIL import Image
+from PIL import Image, ImageDraw
 import pytest
 
 from interview_assistant.capture.backend import MSSCaptureBackend
+from interview_assistant.capture.frame_validator import FrameValidator
 from interview_assistant.capture.worker import CaptureWorker
 from interview_assistant.transcript.detector import QuestionKind
 
@@ -241,17 +242,15 @@ async def test_protected_frame_is_skipped_without_replacing_usable_prior() -> No
     assert protected.status == "protected"
     assert protected.path is None
     assert after_protected.status == "duplicate"
-    assert after_protected.path is None
+    assert after_protected.path == first.path
     assert worker.retained_paths == (first.path,)
     assert tuple(worker.temp_directory.iterdir()) == (first.path,)
     await worker.shutdown()
 
 
-async def test_perceptual_duplicate_produces_no_second_jpeg() -> None:
+async def test_identical_pixels_produce_no_second_jpeg() -> None:
     frame = _visual_frame(28)
-    changed = frame.copy()
-    changed[50, 80] = 255
-    factory = FakeBackendFactory([frame, changed])
+    factory = FakeBackendFactory([frame, frame.copy()])
     worker = CaptureWorker(backend_factory=factory)
 
     first = await worker.capture_for_event("screen_analysis")
@@ -259,9 +258,71 @@ async def test_perceptual_duplicate_produces_no_second_jpeg() -> None:
 
     assert first.status == "captured"
     assert duplicate.status == "duplicate"
-    assert duplicate.path is None
+    assert duplicate.path == first.path
     assert tuple(worker.temp_directory.iterdir()) == (first.path,)
     await worker.shutdown()
+
+
+async def test_changed_answer_with_duplicate_perceptual_hash_saves_current_pixels() -> None:
+    frames = []
+    for text in ("answer = 1", "answer = 2"):
+        screen = Image.new("RGB", (640, 360), color="white")
+        ImageDraw.Draw(screen).text((30, 30), text, fill="black")
+        frames.append(np.asarray(screen, dtype=np.uint8))
+    validator = FrameValidator()
+    previous_hash = validator.classify(frames[0]).perceptual_hash
+    assert validator.classify(frames[1], previous_hash).status == "duplicate"
+    worker = CaptureWorker(backend_factory=FakeBackendFactory([*frames, frames[1].copy()]))
+    try:
+        first = await worker.capture_for_event("screen_analysis")
+        changed = await worker.capture_for_event("screen_analysis")
+        repeated = await worker.capture_for_event("screen_analysis")
+
+        assert first.status == changed.status == "captured"
+        assert first.path is not None and changed.path is not None
+        assert first.path != changed.path
+        assert first.path.read_bytes() != changed.path.read_bytes()
+        assert repeated.status == "duplicate"
+        assert repeated.path == changed.path
+        assert worker.retained_paths == (first.path, changed.path)
+    finally:
+        await worker.shutdown()
+
+
+async def test_equal_pixel_bytes_with_different_dimensions_are_a_new_capture() -> None:
+    frame = _visual_frame(28)
+    reshaped = frame.reshape(160, 120, 3)
+    worker = CaptureWorker(backend_factory=FakeBackendFactory([frame, reshaped]))
+    try:
+        first = await worker.capture_for_event("screen_analysis")
+        second = await worker.capture_for_event("screen_analysis")
+
+        assert first.status == second.status == "captured"
+        assert second.path is not None and second.path != first.path
+        with Image.open(second.path) as image:
+            assert image.size == (120, 160)
+    finally:
+        await worker.shutdown()
+
+
+async def test_duplicate_with_missing_latest_jpeg_never_falls_back_to_an_older_screen() -> None:
+    latest = _visual_frame(28)
+    factory = FakeBackendFactory([_visual_frame(27), latest, latest])
+    worker = CaptureWorker(backend_factory=factory)
+    try:
+        first = await worker.capture_for_event("screen_analysis")
+        second = await worker.capture_for_event("screen_analysis")
+        assert first.path is not None and second.path is not None
+        assert first.path != second.path
+        second.path.unlink()
+
+        duplicate = await worker.capture_for_event("screen_analysis")
+
+        assert duplicate.status == "duplicate"
+        assert duplicate.path is None
+        assert first.path.is_file()
+    finally:
+        await worker.shutdown()
 
 
 async def test_accepted_frames_are_uuid_named_temporary_jpegs() -> None:

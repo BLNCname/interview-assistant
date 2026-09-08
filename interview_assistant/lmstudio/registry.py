@@ -70,10 +70,10 @@ class ModelRegistry:
     def __init__(
         self,
         client: ModelRegistryClient,
-        preferred_device_name: str = "Strix Halo",
+        preferred_device_name: str = "",
     ) -> None:
         self._client = client
-        self._preferred_device_name = preferred_device_name
+        self._preferred_device_name = preferred_device_name.strip()
         self._instances: dict[str, ModelInstance] = {}
         self._locks: dict[str, asyncio.Lock] = {}
         self._cache_generations: dict[str, int] = {}
@@ -186,19 +186,21 @@ class ModelRegistry:
         key: str,
         *sources: BaseModel | None,
     ) -> str | None:
-        found = False
+        found: str | None = None
         for source in sources:
             if source is None:
                 continue
             for actual in self._device_names(source.model_extra or {}):
-                found = True
-                if actual != self._preferred_device_name:
+                # Device affinity is opt-in; preserve reported metadata otherwise.
+                if self._preferred_device_name and actual != self._preferred_device_name:
                     raise UnexpectedModelDeviceError(
                         key,
                         self._preferred_device_name,
                         actual,
                     )
-        return self._preferred_device_name if found else None
+                if found is None and isinstance(actual, str) and actual.strip():
+                    found = actual.strip()
+        return found
 
     @staticmethod
     def _device_names(extra: Mapping[str, object]) -> list[object]:

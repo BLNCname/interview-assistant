@@ -8,6 +8,7 @@ import shutil
 import stat
 import subprocess
 import sys
+import tomllib
 import zipfile
 from pathlib import Path
 
@@ -16,9 +17,7 @@ import yaml
 
 
 ROOT = Path(__file__).parents[2]
-README_PATH = ROOT / "README.md"
-START_HERE_PATH = ROOT / "START_HERE.md"
-CHECKSUMS_PATH = ROOT / "SHA256SUMS.txt"
+HISTORICAL_CHECKSUMS_PATH = ROOT / "SHA256SUMS.txt"
 GITIGNORE_PATH = ROOT / ".gitignore"
 ISS_PATH = ROOT / "packaging" / "interview_assistant.iss"
 INSTALLER_SCRIPT_PATH = ROOT / "scripts" / "build_installer.ps1"
@@ -28,11 +27,8 @@ GITATTRIBUTES_PATH = ROOT / ".gitattributes"
 DIST_VALIDATOR_PATH = ROOT / "scripts" / "validate_release_dist.py"
 INVENTORY_GENERATOR_PATH = ROOT / "scripts" / "generate_release_inventory.py"
 DIST_INVENTORY_PATH = ROOT / "packaging" / "dist_inventory.json"
-CURRENT_RELEASE_REPORT_PATH = (
+HISTORICAL_RELEASE_REPORT_PATH = (
     ROOT / "docs" / "validation" / "release-verification-2026-08-02-v0.1.1.md"
-)
-CURRENT_RELEASE_REPORT_LINK = (
-    "docs/validation/release-verification-2026-08-02-v0.1.1.md"
 )
 HISTORY_SCANNER_PATH = ROOT / "scripts" / "scan_release_git_history.py"
 INSTALLER_SMOKE_PATH = ROOT / "scripts" / "smoke_installer.ps1"
@@ -43,17 +39,21 @@ APP_ID = "9CE7901A-56E8-49CB-A8ED-8D5CF4F97C7D"
 
 
 def test_release_version_defaults_are_consistent() -> None:
-    assert 'version = "0.1.1"' in (ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    project = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    version = project["project"]["version"]
+    components = tuple(map(int, version.split(".")))
+    assert len(components) == 3
+    windows_version = str((*components, 0))
     version_info = (ROOT / "packaging" / "version_info.txt").read_text(encoding="utf-8")
-    assert "filevers=(0, 1, 1, 0)" in version_info
-    assert "prodvers=(0, 1, 1, 0)" in version_info
-    assert "StringStruct(u'FileVersion', u'0.1.1')" in version_info
-    assert "StringStruct(u'ProductVersion', u'0.1.1')" in version_info
-    assert '#define AppVersion "0.1.1"' in ISS_PATH.read_text(encoding="utf-8")
-    assert '[string]$Version = "0.1.1"' in INSTALLER_SCRIPT_PATH.read_text(
+    assert f"filevers={windows_version}" in version_info
+    assert f"prodvers={windows_version}" in version_info
+    assert f"StringStruct(u'FileVersion', u'{version}')" in version_info
+    assert f"StringStruct(u'ProductVersion', u'{version}')" in version_info
+    assert f'#define AppVersion "{version}"' in ISS_PATH.read_text(encoding="utf-8")
+    assert f'[string]$Version = "{version}"' in INSTALLER_SCRIPT_PATH.read_text(
         encoding="utf-8"
     )
-    assert '[string]$Version = "0.1.1"' in ARCHIVE_SCRIPT_PATH.read_text(
+    assert f'[string]$Version = "{version}"' in ARCHIVE_SCRIPT_PATH.read_text(
         encoding="utf-8"
     )
 
@@ -68,71 +68,18 @@ EXPECTED_RELEASE_HOTKEYS = {
 }
 
 
-def test_instructor_readme_is_english_and_covers_clean_machine_workflows() -> None:
-    text = README_PATH.read_text(encoding="utf-8")
-    folded = text.casefold()
-
-    assert re.search(r"[А-Яа-яЁё]", text) is None
-    for heading in (
-        "## System requirements",
-        "## Install the ready-to-use application",
-        "## Configure LM Studio",
-        "## Build from source",
-        "## Run tests and diagnostics",
-        "## Troubleshooting",
-    ):
-        assert heading in text
-    for required in (
-        "InterviewAssistant-Setup-0.1.1-win64.exe",
-        "uv sync --extra dev --extra cuda --frozen",
-        "scripts\\build.ps1",
-        "scripts\\build_installer.ps1",
-        "dropbox-dash/faster-whisper-large-v3-turbo",
-        "0a363e9161cbc7ed1431c9597a8ceaf0c4f78fcf",
-        "windows credential manager",
-        "participant consent",
-    ):
-        assert required.casefold() in folded
-
-
-def test_start_here_is_a_short_english_installer_entry_point() -> None:
-    text = START_HERE_PATH.read_text(encoding="utf-8")
-
-    assert re.search(r"[А-Яа-яЁё]", text) is None
-    assert "InterviewAssistant-Setup-0.1.1-win64.exe" in text
-    assert "README.md" in text
-    assert "InterviewAssistant.exe" not in text
-    assert "InterviewAssistant-source-0.1.0.zip" not in text
-
-
-def test_root_checksum_manifest_contains_only_the_installer() -> None:
-    lines = CHECKSUMS_PATH.read_text(encoding="ascii").splitlines()
+def test_historical_root_checksum_manifest_matches_v011_verification_report() -> None:
+    # This retained handoff is historical. Current release assets and their
+    # complete multipart checksum manifest are produced by build_installer.
+    lines = HISTORICAL_CHECKSUMS_PATH.read_text(encoding="ascii").splitlines()
 
     assert len(lines) == 1
     assert re.fullmatch(
         r"[0-9A-F]{64}  InterviewAssistant-Setup-0\.1\.1-win64\.exe",
         lines[0],
     )
-
-
-def test_readme_links_the_current_release_verification_report() -> None:
-    text = README_PATH.read_text(encoding="utf-8")
-
-    expected_link = f"[`{CURRENT_RELEASE_REPORT_LINK}`]({CURRENT_RELEASE_REPORT_LINK})"
-    assert expected_link in text
-
-
-def test_readme_release_digest_matches_checksum_and_current_report() -> None:
-    text = README_PATH.read_text(encoding="utf-8")
-    checksum = CHECKSUMS_PATH.read_text(encoding="ascii").split()[0]
-    digest_match = re.search(
-        r"Expected SHA-256:\s*```text\s*([0-9A-F]{64})\s*```",
-        text,
-    )
-
-    assert digest_match is not None
-    assert digest_match.group(1) == checksum
-    assert checksum in CURRENT_RELEASE_REPORT_PATH.read_text(encoding="utf-8")
+    checksum = lines[0].split()[0]
+    assert checksum in HISTORICAL_RELEASE_REPORT_PATH.read_text(encoding="utf-8")
 
 
 def test_gitignore_exposes_duplicate_handoff_clutter() -> None:
@@ -503,7 +450,8 @@ def test_inno_setup_is_per_user_versioned_and_deletes_only_owned_upgrade_files()
     assert "ArchitecturesInstallIn64BitMode=x64compatible" in source
     assert "OutputDir={#OutputPath}" in source
     assert "OutputBaseFilename=InterviewAssistant-Setup-{#AppVersion}-win64" in source
-    assert "Compression=lzma2/ultra64" in source
+    assert '#define AppCompression "lzma2/ultra64"' in source
+    assert "Compression={#AppCompression}" in source
     assert "SolidCompression=yes" in source
     assert ("SetupIconFile={#SourcePath}\\..\\assets\\branding\\interview-assistant.ico") in source
     assert 'Source: "{#DistPath}\\*"; DestDir: "{app}"' in source
@@ -533,7 +481,7 @@ def test_installer_builder_validates_dist_bundle_and_invokes_supplied_iscc() -> 
     assert '$ErrorActionPreference = "Stop"' in source
     assert "Set-StrictMode -Version Latest" in source
     assert "[Parameter(Mandatory" in source
-    for parameter in ("$IsccPath", "$Version", "$DistPath", "$OutputPath"):
+    for parameter in ("$IsccPath", "$Version", "$DistPath", "$OutputPath", "$Compression"):
         assert parameter in source
     assert "Resolve-Path -LiteralPath $IsccPath" in source
     assert "InterviewAssistant.exe" in source
@@ -692,6 +640,7 @@ def test_source_archive_is_standalone_sanitized_and_model_overlay_is_exact(
         assert archived_config["lmstudio"]["host"] == "127.0.0.1"
         assert archived_config["lmstudio"]["text_model"] == ""
         assert archived_config["lmstudio"]["vision_model"] == ""
+        assert archived_config["search"]["provider"] == "firecrawl"
         assert archived_config["hotkeys"] == EXPECTED_RELEASE_HOTKEYS
         assert "checked-in-runtime-value" not in archived_config_text
         assert "uncommitted-runtime-secret" not in archived_config_text

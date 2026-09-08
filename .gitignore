@@ -17,6 +17,11 @@ screenshots/
 .superpowers/
 .worktrees/
 interview_assistant.log
+.env
+.env.*
+!.env.example
+.cache/
+/config/mcp.json
 
 # Instructor delivery installer: visible in the folder, intentionally untracked.
 /InterviewAssistant-Setup-*-win64.exe

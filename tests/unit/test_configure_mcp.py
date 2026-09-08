@@ -1,11 +1,13 @@
 import json
 import re
-from pathlib import Path, PureWindowsPath
+from pathlib import Path
 
 import pytest
 
 
 CONTEXT7_URL = "https://mcp.context7.com/mcp"
+EXA_URL = "https://mcp.exa.ai/mcp"
+FIRECRAWL_URL = "https://mcp.firecrawl.dev/v2/mcp"
 
 
 def _executable(tmp_path: Path, name: str = "duckduckgo-mcp-server.exe") -> Path:
@@ -14,11 +16,11 @@ def _executable(tmp_path: Path, name: str = "duckduckgo-mcp-server.exe") -> Path
     return executable.resolve()
 
 
-def _desired_config(executable: Path) -> dict[str, object]:
+def _desired_config() -> dict[str, object]:
     return {
         "mcpServers": {
             "context7": {"url": CONTEXT7_URL},
-            "duckduckgo": {"command": str(executable), "args": []},
+            "firecrawl": {"url": FIRECRAWL_URL},
         }
     }
 
@@ -26,17 +28,12 @@ def _desired_config(executable: Path) -> dict[str, object]:
 def test_configure_mcp_writes_only_the_exact_documented_config(tmp_path: Path) -> None:
     from scripts.configure_mcp import configure_mcp
 
-    executable = _executable(tmp_path)
-
-    output_path = configure_mcp(tmp_path, executable)
+    output_path = configure_mcp(tmp_path)
 
     assert output_path == tmp_path / "mcp.json"
-    assert json.loads(output_path.read_text(encoding="utf-8")) == _desired_config(
-        executable
-    )
+    assert json.loads(output_path.read_text(encoding="utf-8")) == _desired_config()
     assert output_path.read_bytes().endswith(b"\n")
     assert {path.name for path in tmp_path.iterdir()} == {
-        executable.name,
         "mcp.json",
     }
 
@@ -46,7 +43,6 @@ def test_known_config_is_backed_up_with_collision_safe_utc_names(
 ) -> None:
     from scripts.configure_mcp import configure_mcp
 
-    executable = _executable(tmp_path)
     old_executable = _executable(tmp_path, "old-duckduckgo.exe")
     config_path = tmp_path / "mcp.json"
     original = {
@@ -57,8 +53,8 @@ def test_known_config_is_backed_up_with_collision_safe_utc_names(
     }
     config_path.write_text(json.dumps(original), encoding="utf-8")
 
-    configure_mcp(tmp_path, executable)
-    configure_mcp(tmp_path, executable)
+    configure_mcp(tmp_path)
+    configure_mcp(tmp_path)
 
     backups = sorted(tmp_path.glob("mcp.json.backup-*"))
     assert len(backups) == 2
@@ -74,9 +70,7 @@ def test_known_config_is_backed_up_with_collision_safe_utc_names(
         json.loads(path.read_text(encoding="utf-8")) == original
         for path in backups
     )
-    assert json.loads(config_path.read_text(encoding="utf-8")) == _desired_config(
-        executable
-    )
+    assert json.loads(config_path.read_text(encoding="utf-8")) == _desired_config()
 
 
 @pytest.mark.parametrize(
@@ -131,21 +125,20 @@ def test_invalid_existing_config_fails_before_backup_or_write(
 ) -> None:
     from scripts.configure_mcp import MCPConfigError, configure_mcp
 
-    executable = _executable(tmp_path)
     config_path = tmp_path / "mcp.json"
     raw = existing if isinstance(existing, str) else json.dumps(existing)
     config_path.write_text(raw, encoding="utf-8")
     original_bytes = config_path.read_bytes()
 
     with pytest.raises(MCPConfigError) as captured:
-        configure_mcp(tmp_path, executable)
+        configure_mcp(tmp_path)
 
     expected_markers = {
         "invalid-json": "valid json",
         "unexpected-top-level": "top-level",
         "unknown-server": "unknown",
         "secret-field": "secret-like",
-        "relative-command": "absolute existing file",
+        "relative-command": "absolute path",
         "invalid-server-schema": "schema",
     }
     message = str(captured.value).casefold()
@@ -156,12 +149,11 @@ def test_invalid_existing_config_fails_before_backup_or_write(
     assert list(tmp_path.glob(".mcp.json.*.tmp")) == []
 
 
-def test_existing_missing_absolute_command_fails_before_backup(
+def test_removed_legacy_executable_does_not_block_migration(
     tmp_path: Path,
 ) -> None:
-    from scripts.configure_mcp import MCPConfigError, configure_mcp
+    from scripts.configure_mcp import configure_mcp
 
-    executable = _executable(tmp_path)
     missing = (tmp_path / "missing.exe").resolve()
     config_path = tmp_path / "mcp.json"
     existing = {
@@ -172,32 +164,33 @@ def test_existing_missing_absolute_command_fails_before_backup(
     config_path.write_text(json.dumps(existing), encoding="utf-8")
     original_bytes = config_path.read_bytes()
 
-    with pytest.raises(MCPConfigError, match="existing file"):
-        configure_mcp(tmp_path, executable)
+    configure_mcp(tmp_path)
 
-    assert config_path.read_bytes() == original_bytes
-    assert list(tmp_path.glob("mcp.json.backup-*")) == []
+    assert json.loads(config_path.read_text()) == _desired_config()
+    backups = list(tmp_path.glob("mcp.json.backup-*"))
+    assert len(backups) == 1
+    assert backups[0].read_bytes() == original_bytes
 
 
-@pytest.mark.parametrize("kind", ["relative", "missing", "directory"])
-def test_requested_executable_must_be_an_absolute_existing_file(
-    tmp_path: Path,
-    kind: str,
-) -> None:
-    from scripts.configure_mcp import MCPConfigError, configure_mcp
+def test_exa_config_is_backed_up_and_migrated_to_keyless_firecrawl(tmp_path: Path) -> None:
+    from scripts.configure_mcp import configure_mcp
 
-    if kind == "relative":
-        executable = Path("duckduckgo-mcp-server.exe")
-    elif kind == "missing":
-        executable = (tmp_path / "missing.exe").resolve()
-    else:
-        executable = tmp_path.resolve()
+    config_path = tmp_path / "mcp.json"
+    original = {
+        "mcpServers": {
+            "context7": {"url": CONTEXT7_URL},
+            "exa": {"url": EXA_URL},
+        }
+    }
+    config_path.write_text(json.dumps(original), encoding="utf-8")
+    original_bytes = config_path.read_bytes()
 
-    with pytest.raises(MCPConfigError, match="absolute existing file"):
-        configure_mcp(tmp_path, executable)
+    configure_mcp(tmp_path)
 
-    assert not (tmp_path / "mcp.json").exists()
-    assert list(tmp_path.glob("mcp.json.backup-*")) == []
+    assert json.loads(config_path.read_text()) == _desired_config()
+    backups = list(tmp_path.glob("mcp.json.backup-*"))
+    assert len(backups) == 1
+    assert backups[0].read_bytes() == original_bytes
 
 
 def test_atomic_replace_failure_preserves_original_and_removes_temp_file(
@@ -206,7 +199,6 @@ def test_atomic_replace_failure_preserves_original_and_removes_temp_file(
 ) -> None:
     from scripts import configure_mcp as configure_module
 
-    executable = _executable(tmp_path)
     config_path = tmp_path / "mcp.json"
     original = {"mcpServers": {"context7": {"url": CONTEXT7_URL}}}
     config_path.write_text(json.dumps(original), encoding="utf-8")
@@ -218,7 +210,7 @@ def test_atomic_replace_failure_preserves_original_and_removes_temp_file(
     monkeypatch.setattr(configure_module.os, "replace", fail_replace)
 
     with pytest.raises(OSError, match="atomic replacement failure"):
-        configure_module.configure_mcp(tmp_path, executable)
+        configure_module.configure_mcp(tmp_path)
 
     assert config_path.read_bytes() == original_bytes
     assert len(list(tmp_path.glob("mcp.json.backup-*"))) == 1
@@ -231,14 +223,10 @@ def test_cli_boundary_accepts_only_explicit_paths(
 ) -> None:
     from scripts.configure_mcp import main
 
-    executable = _executable(tmp_path)
-
     exit_code = main(
         [
             "--config-dir",
             str(tmp_path),
-            "--duckduckgo-executable",
-            str(executable),
         ]
     )
 
@@ -255,16 +243,75 @@ def test_repository_template_is_exact_valid_and_secret_free() -> None:
     assert payload == {
         "mcpServers": {
             "context7": {"url": CONTEXT7_URL},
-            "duckduckgo": {
-                "command": "C:\\absolute\\path\\duckduckgo-mcp-server.exe",
-                "args": [],
-            },
+            "firecrawl": {"url": FIRECRAWL_URL},
         }
     }
-    assert PureWindowsPath(
-        payload["mcpServers"]["duckduckgo"]["command"]
-    ).is_absolute()
     assert not any(
         marker in raw.casefold()
         for marker in ("api_key", "apikey", "token", "secret", "headers", "env")
     )
+
+
+def test_clean_setup_needs_no_local_server_executable(tmp_path: Path) -> None:
+    from scripts.configure_mcp import configure_mcp
+
+    result = configure_mcp(tmp_path)
+    assert json.loads(result.read_text()) == _desired_config()
+    assert {item.name for item in tmp_path.iterdir()} == {"mcp.json"}
+
+
+@pytest.mark.parametrize("server_name", ["context7", "exa", "firecrawl"])
+def test_unknown_remote_endpoint_is_not_overwritten(tmp_path: Path, server_name: str) -> None:
+    from scripts.configure_mcp import MCPConfigError, configure_mcp
+
+    original = json.dumps(
+        {"mcpServers": {server_name: {"url": "https://untrusted.example/mcp"}}}
+    )
+    (tmp_path / "mcp.json").write_text(original)
+    with pytest.raises(MCPConfigError, match="schema"):
+        configure_mcp(tmp_path)
+    assert (tmp_path / "mcp.json").read_text() == original
+    assert not list(tmp_path.glob("mcp.json.backup-*"))
+
+
+@pytest.mark.parametrize(
+    "definition",
+    [
+        None,
+        {"url": FIRECRAWL_URL, "headers": {"Authorization": "Bearer fc-placeholder"}},
+        {"url": "https://mcp.firecrawl.dev/fc-placeholder/v2/mcp"},
+        {"url": "https://mcp.firecrawl.dev/v2/mcp-search"},
+        {"command": "npx", "args": ["firecrawl-mcp"]},
+    ],
+)
+def test_custom_firecrawl_config_is_not_overwritten(tmp_path: Path, definition: object) -> None:
+    from scripts.configure_mcp import MCPConfigError, configure_mcp
+
+    config_path = tmp_path / "mcp.json"
+    config_path.write_text(
+        json.dumps({"mcpServers": {"firecrawl": definition}}), encoding="utf-8"
+    )
+    original_bytes = config_path.read_bytes()
+
+    with pytest.raises(MCPConfigError) as captured:
+        configure_mcp(tmp_path)
+
+    assert "fc-placeholder" not in str(captured.value)
+    assert config_path.read_bytes() == original_bytes
+    assert not list(tmp_path.glob("mcp.json.backup-*"))
+    assert not list(tmp_path.glob(".mcp.json.*.tmp"))
+
+
+@pytest.mark.parametrize("server_name", ["context7", "exa", "duckduckgo"])
+def test_null_legacy_definition_is_not_overwritten(tmp_path: Path, server_name: str) -> None:
+    from scripts.configure_mcp import MCPConfigError, configure_mcp
+
+    config_path = tmp_path / "mcp.json"
+    config_path.write_text(json.dumps({"mcpServers": {server_name: None}}), encoding="utf-8")
+    original_bytes = config_path.read_bytes()
+
+    with pytest.raises(MCPConfigError, match="schema"):
+        configure_mcp(tmp_path)
+
+    assert config_path.read_bytes() == original_bytes
+    assert not list(tmp_path.glob("mcp.json.backup-*"))

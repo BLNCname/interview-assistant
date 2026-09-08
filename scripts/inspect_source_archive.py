@@ -43,7 +43,7 @@ FORBIDDEN_SEGMENTS = frozenset(
 
 def _git(repository: Path, *arguments: str, allowed: tuple[int, ...] = (0,)) -> str:
     process = subprocess.run(
-        ["git", "-C", str(repository), *arguments],
+        ["git", "-c", "core.longpaths=true", "-C", str(repository), *arguments],
         check=False,
         capture_output=True,
         text=True,
@@ -56,7 +56,7 @@ def _git(repository: Path, *arguments: str, allowed: tuple[int, ...] = (0,)) -> 
 
 def _git_bytes(repository: Path, *arguments: str) -> bytes:
     process = subprocess.run(
-        ["git", "-C", str(repository), *arguments],
+        ["git", "-c", "core.longpaths=true", "-C", str(repository), *arguments],
         check=False,
         capture_output=True,
         timeout=60,

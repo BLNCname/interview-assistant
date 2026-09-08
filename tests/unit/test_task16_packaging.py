@@ -5,6 +5,7 @@ import importlib.util
 import json
 import subprocess
 import sys
+import tomllib
 import wave
 from collections.abc import Iterator
 from pathlib import Path
@@ -30,6 +31,14 @@ BRAND_ICO_PATH = ROOT / "assets" / "branding" / "interview-assistant.ico"
 REQUIREMENTS_PATH = ROOT / "requirements.txt"
 GITIGNORE_PATH = ROOT / ".gitignore"
 UV_LOCK_PATH = ROOT / "uv.lock"
+
+
+def test_runtime_dependencies_keep_official_mcp_without_homemade_search() -> None:
+    project = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))["project"]
+    dependencies = project["dependencies"]
+    assert any(item.startswith("mcp>=") for item in dependencies)
+    assert not any(item.startswith(("ddgs", "primp")) for item in dependencies)
+    assert not (ROOT / "interview_assistant" / "retrieval" / "web_search_server.py").exists()
 
 
 def test_liquid_glass_branding_assets_are_release_ready() -> None:
@@ -274,16 +283,17 @@ def test_requirements_file_delegates_to_canonical_pyproject_metadata() -> None:
     )
 
 
-def test_readme_documents_the_frozen_uv_workflow_truthfully() -> None:
-    source = (ROOT / "README.md").read_text(encoding="utf-8")
+def test_build_document_uses_frozen_uv_sync_with_declared_extras() -> None:
+    source = (ROOT / "docs/BUILD_RU.md").read_text(encoding="utf-8")
+    project = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    commands = [line.split() for line in source.splitlines() if line.startswith("uv sync ")]
 
-    assert "uv sync --extra dev --frozen" in source
-    assert "uv lock --check" in source
-    assert "https://docs.astral.sh/uv/concepts/projects/sync/" in source
-    assert "requirements.txt" in source
-    assert "not a lockfile" in source
-    assert "does not guarantee a byte-for-byte identical EXE" in source
-    assert 'pip install -e ".[dev]"' not in source
+    assert commands
+    for command in commands:
+        assert "--frozen" in command
+        extras = {command[index + 1] for index, token in enumerate(command) if token == "--extra"}
+        assert {"dev", "cuda"} <= extras
+        assert extras <= project["project"]["optional-dependencies"].keys()
 
 
 def test_packaging_spec_is_explicitly_unignored() -> None:
@@ -293,18 +303,17 @@ def test_packaging_spec_is_explicitly_unignored() -> None:
     assert "!packaging/interview_assistant.spec" in source
 
 
-def test_readme_and_gitignore_cover_lightweight_and_offline_stt_builds() -> None:
-    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+def test_build_document_pins_and_validates_the_offline_stt_bundle() -> None:
+    source = (ROOT / "docs/BUILD_RU.md").read_text(encoding="utf-8")
     ignored = GITIGNORE_PATH.read_text(encoding="utf-8").splitlines()
+    manifest = json.loads(STT_MANIFEST_PATH.read_text(encoding="utf-8"))
 
     assert "models/" in ignored
-    assert ".\\scripts\\build.ps1 -SttModelPath" in readme
-    assert "A build without `-SttModelPath` remains lightweight" in readme
-    assert "does not download model weights" in readme
-    assert "One multilingual `large-v3-turbo` model serves RU/EN" in readme
-    assert "0a363e9161cbc7ed1431c9597a8ceaf0c4f78fcf" in readme
-    assert "`README.md` model card" in readme
-    assert "`MIT` license" in readme
+    assert ".\\scripts\\build.ps1 -SttModelPath $ModelPath" in source
+    assert f"hf.exe download {manifest['repository']}" in source
+    assert f"--revision {manifest['revision']}" in source
+    assert "-m interview_assistant.stt.bundle" in source
+    assert "--validate-bundle $ModelPath --require-all-files" in source
 
 
 def test_bundled_stt_fixture_is_deterministic_two_second_pcm() -> None:
@@ -469,12 +478,17 @@ def test_cuda_verifier_configures_runtime_before_whisper_import(
     assert calls == ["configure_cuda_runtime", "WhisperModel"]
 
 
+@pytest.mark.parametrize("precision", ["float16", "int8_float16"])
 def test_cuda_verifier_uses_configured_model_and_reports_timing_without_text(
     tmp_path: Path,
+    precision: str,
 ) -> None:
     module = _load_cuda_module()
     config_path = tmp_path / "config.yaml"
-    config_path.write_text("audio:\n  stt_model: bilingual-test-model\n", encoding="utf-8")
+    config_path.write_text(
+        f"audio:\n  stt_model: bilingual-test-model\n  compute_type: {precision}\n",
+        encoding="utf-8",
+    )
     model = _Model()
     factory_calls: list[tuple[str, str, str]] = []
 
@@ -491,10 +505,11 @@ def test_cuda_verifier_uses_configured_model_and_reports_timing_without_text(
         clock=lambda: next(ticks),
     )
 
-    assert factory_calls == [("bilingual-test-model", "cuda", "float16")]
+    assert factory_calls == [("bilingual-test-model", "cuda", precision)]
     assert report == {
         "status": "ok",
         "device": "cuda",
+        "compute_type": precision,
         "model_source": "configured",
         "fixture_seconds": 2.0,
         "model_load_seconds": 1.25,
@@ -713,13 +728,3 @@ def test_primary_documents_do_not_claim_stealth_or_capture_bypass(document: str)
         "невидимый overlay",
     )
     assert not any(claim in text for claim in forbidden)
-
-
-def test_readme_links_observed_acceptance_without_treating_self_test_as_evidence() -> None:
-    text = (ROOT / "README.md").read_text(encoding="utf-8")
-
-    assert "scripts/teams_acceptance.md" in text
-    assert "docs/validation/acceptance-template.md" in text
-    assert "benchmark_session.py --mode self-test" in text
-    assert "benchmark_session.py --mode event-input" in text
-    assert "overall_acceptance: NOT_RUN" in text

@@ -176,33 +176,37 @@ READINESS_CHECK_NAMES = (
     "duplicate_instances",
     "model_load_warmup",
     "context7",
-    "duckduckgo_mcp",
+    "firecrawl_mcp",
     "hotkeys",
     "display_affinity",
     "event_capture",
     "streaming_ttft",
 )
 
-_OPTIONAL_CHECKS = frozenset({"context7", "duckduckgo_mcp", "event_capture"})
+_OPTIONAL_CHECKS = frozenset({
+    "context7", "firecrawl_mcp", "event_capture", "lmlink_status", "preferred_device",
+})
 _CHECK_CONFIGURATION: Mapping[str, tuple[float, str]] = {
     "windows_dwm": (2.0, "Enable Windows Desktop Window Manager composition."),
     "system_audio": (3.0, "Select an available system-audio loopback device."),
     "microphone": (3.0, "Select an available microphone and grant access."),
-    "cuda_stt": (8.0, "Verify the NVIDIA CUDA STT runtime on the primary PC."),
-    "stt_ru_fixture": (15.0, "Run the bundled Russian STT readiness fixture."),
-    "stt_en_fixture": (15.0, "Run the bundled English STT readiness fixture."),
-    "lmstudio_auth": (5.0, "Check the LM Studio host and stored API token."),
-    "lmlink_status": (5.0, "Start LM Link on the Strix Halo inference host."),
+    "cuda_stt": (120.0, "Verify the STT device, compute type and local model files."),
+    "stt_ru_fixture": (120.0, "Run the bundled Russian STT readiness fixture."),
+    "stt_en_fixture": (120.0, "Run the bundled English STT readiness fixture."),
+    "lmstudio_auth": (5.0, "Check the active provider and its API key/token."),
+    "lmlink_status": (5.0, "LM Link is optional; configure it only for remote LM Studio inference."),
     "preferred_device": (5.0, "Select the configured LM Link preferred device."),
-    "model_discovery": (8.0, "Refresh models exposed by LM Studio."),
+    "model_discovery": (8.0, "Refresh models exposed by the selected provider."),
     "duplicate_instances": (5.0, "Reuse one loaded instance for identical model keys."),
-    "model_load_warmup": (45.0, "Load and warm the selected unique model keys."),
+    "model_load_warmup": (120.0, "Load and warm the selected unique model keys."),
     "context7": (5.0, "Start or reconfigure the Context7 MCP server."),
-    "duckduckgo_mcp": (5.0, "Start or reconfigure the DuckDuckGo MCP server."),
+    "firecrawl_mcp": (
+        5.0, "Check FIRECRAWL_API_KEY, internet access and the Firecrawl MCP endpoint configuration.",
+    ),
     "hotkeys": (3.0, "Resolve conflicting or unavailable global hotkeys."),
     "display_affinity": (3.0, "Enable supported Windows capture exclusion for the overlay."),
     "event_capture": (5.0, "Verify event-driven capture; the hotkey remains available."),
-    "streaming_ttft": (20.0, "Check model warmup, LM Link, and streaming latency."),
+    "streaming_ttft": (120.0, "Check provider availability and streaming latency."),
 }
 
 

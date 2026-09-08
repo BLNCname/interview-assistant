@@ -1,4 +1,4 @@
-"""Safely generate LM Studio's bounded MCP server configuration."""
+"""Generate the official Context7 and Firecrawl remote MCP configuration."""
 
 from __future__ import annotations
 
@@ -14,7 +14,10 @@ from typing import Any
 
 
 CONTEXT7_URL = "https://mcp.context7.com/mcp"
-KNOWN_SERVERS = frozenset({"context7", "duckduckgo"})
+FIRECRAWL_URL = "https://mcp.firecrawl.dev/v2/mcp"
+EXA_URL = "https://mcp.exa.ai/mcp"
+# Accept old generated search entries only to back them up and replace them.
+KNOWN_SERVERS = frozenset({"context7", "firecrawl", "exa", "duckduckgo"})
 
 _SECRET_KEY_NAMES = {
     "apikey",
@@ -52,15 +55,10 @@ class MCPConfigError(ValueError):
 
 def configure_mcp(
     config_dir: str | Path,
-    duckduckgo_executable: str | Path,
 ) -> Path:
     """Validate inputs, back up a known config, and atomically write mcp.json."""
 
     directory = Path(config_dir)
-    executable = _validated_executable(
-        Path(duckduckgo_executable),
-        label="DuckDuckGo executable",
-    )
     if not directory.exists() or not directory.is_dir():
         raise MCPConfigError("Config directory must be an existing directory")
 
@@ -78,7 +76,7 @@ def configure_mcp(
     payload = {
         "mcpServers": {
             "context7": {"url": CONTEXT7_URL},
-            "duckduckgo": {"command": str(executable), "args": []},
+            "firecrawl": {"url": FIRECRAWL_URL},
         }
     }
     serialized = (
@@ -89,14 +87,6 @@ def configure_mcp(
         _write_backup(config_path, existing_bytes)
     _atomic_write(config_path, serialized)
     return config_path
-
-
-def _validated_executable(path: Path, *, label: str) -> Path:
-    if not path.is_absolute() or not path.exists() or not path.is_file():
-        raise MCPConfigError(f"{label} must be an absolute existing file")
-    if path.is_symlink():
-        raise MCPConfigError(f"{label} must be an absolute existing file")
-    return path.resolve(strict=True)
 
 
 def _validate_existing_config(raw: bytes) -> None:
@@ -119,7 +109,7 @@ def _validate_existing_config(raw: bytes) -> None:
         raise MCPConfigError("Existing mcp.json contains an unknown MCP server")
 
     context7 = servers.get("context7")
-    if context7 is not None:
+    if "context7" in servers:
         if (
             not isinstance(context7, dict)
             or set(context7) != {"url"}
@@ -127,8 +117,26 @@ def _validate_existing_config(raw: bytes) -> None:
         ):
             raise MCPConfigError("Existing Context7 server has an invalid schema")
 
+    exa = servers.get("exa")
+    if "exa" in servers:
+        if (
+            not isinstance(exa, dict)
+            or set(exa) != {"url"}
+            or exa.get("url") != EXA_URL
+        ):
+            raise MCPConfigError("Existing Exa server has an invalid schema")
+
+    if "firecrawl" in servers:
+        firecrawl = servers["firecrawl"]
+        if (
+            not isinstance(firecrawl, dict)
+            or set(firecrawl) != {"url"}
+            or firecrawl.get("url") != FIRECRAWL_URL
+        ):
+            raise MCPConfigError("Existing Firecrawl server has an invalid schema")
+
     duckduckgo = servers.get("duckduckgo")
-    if duckduckgo is not None:
+    if "duckduckgo" in servers:
         if (
             not isinstance(duckduckgo, dict)
             or set(duckduckgo) != {"command", "args"}
@@ -138,10 +146,10 @@ def _validate_existing_config(raw: bytes) -> None:
             raise MCPConfigError(
                 "Existing DuckDuckGo server has an invalid schema"
             )
-        _validated_executable(
-            Path(duckduckgo["command"]),
-            label="Existing DuckDuckGo command",
-        )
+        # The executable is never launched and may already have been removed.
+        # Validate the old generated shape before backing up and dropping it.
+        if not Path(duckduckgo["command"]).is_absolute():
+            raise MCPConfigError("Existing DuckDuckGo command must be an absolute path")
 
 
 def _reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -205,19 +213,13 @@ def _atomic_write(config_path: Path, data: bytes) -> None:
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Write a bounded LM Studio mcp.json configuration."
+        description="Write official Context7 and keyless Firecrawl MCP endpoints."
     )
     parser.add_argument(
         "--config-dir",
         required=True,
         type=Path,
-        help="Existing LM Studio configuration directory.",
-    )
-    parser.add_argument(
-        "--duckduckgo-executable",
-        required=True,
-        type=Path,
-        help="Absolute path to an already-installed DuckDuckGo MCP executable.",
+        help="Existing destination directory; LM Studio is optional.",
     )
     return parser
 
@@ -228,7 +230,6 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         output_path = configure_mcp(
             args.config_dir,
-            args.duckduckgo_executable,
         )
     except MCPConfigError as error:
         parser.error(str(error))

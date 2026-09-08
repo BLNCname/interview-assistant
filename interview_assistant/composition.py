@@ -4,7 +4,7 @@ import asyncio
 import ctypes
 import subprocess
 import sys
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from importlib import import_module
 from pathlib import Path
@@ -21,8 +21,11 @@ from interview_assistant.audio.devices import AudioDeviceService
 from interview_assistant.audio.worker import AudioWorker
 from interview_assistant.capture.frame_validator import FrameValidator
 from interview_assistant.capture.worker import CaptureWorker
-from interview_assistant.config import AppConfig, SecretStore
+from interview_assistant.config import (
+    AppConfig, SecretStore, environment_values, resolve_environment_path,
+)
 from interview_assistant.diagnostics.probes import ProductionReadinessProbes
+from interview_assistant.diagnostics.speech import SpeechFixtureProbe
 from interview_assistant.diagnostics.readiness import (
     ReadinessReport,
     ReadinessRunner,
@@ -30,7 +33,7 @@ from interview_assistant.diagnostics.readiness import (
 )
 from interview_assistant.events import EventBus
 from interview_assistant.lmstudio.client import LMStudioClient, is_loopback_host
-from interview_assistant.lmstudio.models import ModelInstance
+from interview_assistant.lmstudio.models import ChatEvent, ModelInstance
 from interview_assistant.lmstudio.payload import build_chat_payload
 from interview_assistant.lmstudio.registry import ModelRegistry
 from interview_assistant.orchestration.coordinator import RequestCoordinator
@@ -46,6 +49,7 @@ from interview_assistant.stt.worker import StreamingSTTWorker
 from interview_assistant.transcript.detector import QuestionDetector
 from interview_assistant.transcript.store import TranscriptStore
 from interview_assistant.ui.settings import (
+    SecretStoreProtocol,
     SettingsBinding,
     SettingsChoice,
     SettingsWindow,
@@ -58,10 +62,18 @@ class ControllerSecretStore(Protocol):
     def get_lm_token(self) -> str | None: ...
 
 
-class ProductionSecretStore(ControllerSecretStore, Protocol):
-    def has_lm_token(self) -> bool: ...
+class MCPSecretStore(Protocol):
+    def get_firecrawl_token(self) -> str | None: ...
 
-    def set_lm_token(self, value: str) -> None: ...
+    def get_context7_token(self) -> str | None: ...
+
+
+class ProductionSecretStore(ControllerSecretStore, MCPSecretStore, SecretStoreProtocol, Protocol):
+    pass
+
+
+class _StreamingClient(Protocol):
+    def stream_chat(self, payload: Mapping[str, object]) -> AsyncIterator[ChatEvent]: ...
 
 
 class _CTranslate2Module(Protocol):
@@ -112,7 +124,7 @@ class _UnconfiguredAudioWorker:
         return None
 
 
-async def _warm_model(client: LMStudioClient, instance: ModelInstance) -> float | None:
+async def _warm_model(client: _StreamingClient, instance: ModelInstance) -> float | None:
     payload = build_chat_payload(
         instance.instance_id,
         "Reply with the single word OK.",
@@ -269,11 +281,27 @@ def build_production_components(
     cuda_device_count: Callable[[], int] = _cuda_device_count,
     lmlink_status: Callable[[], str] = _lmlink_status_json,
     stt_engine: TranscriptionEngine | None = None,
+    secret_store: MCPSecretStore | None = None,
 ) -> ProductionComponents:
     """Build the real dependency graph without opening hardware or network resources."""
 
-    if not is_loopback_host(config.lmstudio.host):
+    if config.provider == "lmstudio" and not is_loopback_host(config.lmstudio.host):
         raise ValueError("Production LM Studio host must be an explicit loopback address")
+
+    retrieval_environment = environment_values(config.env_path)
+    if config.mcp.backend == "native":
+        active_secrets = secret_store if secret_store is not None else SecretStore(
+            env_path=config.env_path,
+        )
+        for name, read_secret in (
+            ("FIRECRAWL_API_KEY", active_secrets.get_firecrawl_token),
+            ("CONTEXT7_API_KEY", active_secrets.get_context7_token),
+        ):
+            value = read_secret()
+            if value:
+                retrieval_environment[name] = value
+            else:
+                retrieval_environment.pop(name, None)
 
     ingress = RuntimeHypothesisIngress(loop)
     system_id = config.audio.system_device_id
@@ -295,7 +323,8 @@ def build_production_components(
         stt_engine
         if stt_engine is not None
         else WhisperEngine(
-            config.audio.stt_model, device="cuda", compute_type="float16"
+            config.audio.stt_model, device=config.audio.device,
+            compute_type=config.audio.compute_type, language=config.audio.language,
         )
     )
     stt = StreamingSTTWorker(
@@ -314,17 +343,38 @@ def build_production_components(
             near_black_ratio_threshold=config.capture.black_frame_threshold,
         )
     )
-    client = LMStudioClient(
-        config.lmstudio.host,
-        config.lmstudio.port,
-        token,
+    from interview_assistant.providers.openrouter import OpenRouterClient, OpenRouterRegistry
+
+    client: OpenRouterClient | LMStudioClient
+    registry: OpenRouterRegistry | ModelRegistry
+    if config.provider == "openrouter":
+        client = OpenRouterClient(
+            token, timeout_seconds=config.openrouter.timeout_seconds,
+            max_tokens=config.openrouter.max_tokens, temperature=config.openrouter.temperature,
+        )
+        registry = OpenRouterRegistry(client)
+    else:
+        client = LMStudioClient(config.lmstudio.host, config.lmstudio.port, token)
+        registry = ModelRegistry(client, config.lmstudio.preferred_device_name)
+    retrieval = None
+    if config.mcp.backend == "native":
+        from interview_assistant.retrieval.mcp_client import NativeMCPClient
+
+        retrieval = NativeMCPClient(
+            Path(config.mcp.config_path) if config.mcp.config_path else None,
+            timeout_seconds=config.search.timeout_seconds,
+            environ=retrieval_environment,
+        )
+    hotkeys = HotkeyManager(
+        application.events,
+        {action.value: chord for action, chord in config.hotkeys.as_bindings().items()},
     )
-    registry = ModelRegistry(client, config.lmstudio.preferred_device_name)
-    hotkeys = HotkeyManager(application.events, config.hotkeys.as_bindings())
     coordinator = RequestCoordinator(application.events, client)
-    search_mode = (
-        config.search.mode if config.search.provider == "duckduckgo" else "off"
-    )
+    search_mode = config.search.mode
+    if config.mcp.backend == "off" or (
+        config.provider == "openrouter" and config.mcp.backend == "lmstudio"
+    ):
+        search_mode = "off"
 
     async def warm_for_runtime(instance: ModelInstance) -> None:
         await _warm_model(client, instance)
@@ -342,6 +392,7 @@ def build_production_components(
         search_policy=SearchPolicy(search_mode),
         warm_up=warm_for_runtime,
         hypothesis_ingress=ingress,
+        retrieval=retrieval,
     )
     runtime = ApplicationRuntime(application, config, services)
     ingress.bind(runtime.submit_hypothesis)
@@ -349,8 +400,11 @@ def build_production_components(
     async def warm_for_probe(instance: ModelInstance) -> float | None:
         return await _warm_model(client, instance)
 
+    stt_probe_lock = asyncio.Lock()
+
     async def warm_stt_for_probe() -> None:
-        await _warm_stt_engine(engine)
+        async with stt_probe_lock:
+            await _warm_stt_engine(engine)
 
     probes = ProductionReadinessProbes(
         config,
@@ -365,6 +419,8 @@ def build_production_components(
         cuda_device_count=cuda_device_count,
         stt_warm_up=warm_stt_for_probe,
         lmlink_status=lmlink_status,
+        mcp_probe=retrieval.probe if retrieval is not None else None,
+        stt_fixture=SpeechFixtureProbe(engine, lock=stt_probe_lock),
     )
     readiness_runner = ReadinessRunner(build_readiness_checks(probes.as_mapping()))
     readiness = _ReadinessWithCaptureCleanup(
@@ -423,11 +479,13 @@ class ApplicationController(QObject):
 
     def _update_live_hotkeys(
         self,
-        bindings: Mapping[HotkeyAction | str, str],
+        bindings: Mapping[HotkeyAction, str],
     ) -> None:
         components = self._components
         if components is not None:
-            components.runtime.update_hotkey_bindings(bindings)
+            components.runtime.update_hotkey_bindings(
+                {action.value: chord for action, chord in bindings.items()},
+            )
 
     async def initialize(self) -> None:
         if self._closing:
@@ -474,7 +532,11 @@ class ApplicationController(QObject):
             self.application.ribbon.apply_config(self.config.overlay)
 
             try:
-                token = await asyncio.to_thread(self.secret_store.get_lm_token)
+                token_reader = (
+                    getattr(self.secret_store, "get_openrouter_token")
+                    if self.config.provider == "openrouter" else self.secret_store.get_lm_token
+                )
+                token = await asyncio.to_thread(token_reader)
                 components = self._component_factory(self.config, token)
             except Exception:
                 self._show_readiness_dependency_failure()
@@ -800,24 +862,23 @@ def create_production_controller(
     raw_path = config_path if config_path is not None else default_config_path()
     path = raw_path.expanduser().resolve()
     startup_message: str | None = None
-    if not path.exists():
+    env_path = resolve_environment_path(path)
+    try:
+        config = AppConfig.load(path, env_path=env_path)
+        if not path.exists():
+            startup_message = "Configuration file is missing; choose settings and Save."
+    except Exception:
         config = AppConfig()
-        startup_message = "Configuration file is missing; choose settings and Save."
-    else:
-        try:
-            config = AppConfig.load(path)
-        except Exception:
-            config = AppConfig()
-            startup_message = (
-                "Configuration could not be loaded; the existing file was not changed."
-            )
+        startup_message = (
+            "Configuration could not be loaded; the existing file was not changed."
+        )
 
     active_settings = (
         settings_store
         if settings_store is not None
         else QSettings("InterviewAssistant", "InterviewAssistant")
     )
-    active_secrets = secret_store if secret_store is not None else SecretStore()
+    active_secrets = secret_store if secret_store is not None else SecretStore(env_path=env_path)
     application = InterviewApplication(
         qt_app,
         EventBus(),
@@ -844,6 +905,7 @@ def create_production_controller(
             candidate,
             token,
             loop=loop,
+            secret_store=active_secrets,
         )
 
     controller = ApplicationController(

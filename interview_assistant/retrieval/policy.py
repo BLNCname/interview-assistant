@@ -7,8 +7,9 @@ from urllib.parse import parse_qsl, unquote, urlencode, urlsplit, urlunsplit
 from .models import (
     CONTEXT7_ID,
     CONTEXT7_TOOLS,
-    DUCKDUCKGO_ID,
-    DUCKDUCKGO_TOOLS,
+    FIRECRAWL_ID,
+    FIRECRAWL_QUERY_LIMIT,
+    FIRECRAWL_TOOLS,
     SearchIntegration,
     _policy_search_integration,
 )
@@ -233,7 +234,7 @@ class SearchPolicy:
         self._forced_available = mode == "forced"
 
     def force_next(self) -> None:
-        """Permit exactly one DuckDuckGo search for the next usable question."""
+        """Permit exactly one Firecrawl search for the next usable question."""
 
         with self._forced_lock:
             self._forced_available = True
@@ -267,7 +268,7 @@ class SearchPolicy:
             return []
 
         if forced:
-            return [_duckduckgo(query)]
+            return [_firecrawl(query)]
         if _INTERNAL_TERMS.search(query):
             return []
         if not _has_question_intent(query):
@@ -275,7 +276,7 @@ class SearchPolicy:
         if _is_context7_question(query):
             return [_context7(query)]
         if _requires_current_information(query):
-            return [_duckduckgo(query)]
+            return [_firecrawl(query)]
         return []
 
 
@@ -283,8 +284,11 @@ def _context7(query: str) -> SearchIntegration:
     return _policy_search_integration(CONTEXT7_ID, query, CONTEXT7_TOOLS)
 
 
-def _duckduckgo(query: str) -> SearchIntegration:
-    return _policy_search_integration(DUCKDUCKGO_ID, query, DUCKDUCKGO_TOOLS)
+def _firecrawl(query: str) -> SearchIntegration:
+    # Routing/privacy decisions inspect the complete sanitized question first.
+    # Bound only the web request, before sealing it for the MCP client.
+    query = query[:FIRECRAWL_QUERY_LIMIT].rstrip()
+    return _policy_search_integration(FIRECRAWL_ID, query, FIRECRAWL_TOOLS)
 
 
 def _has_question_intent(query: str) -> bool:
@@ -305,6 +309,10 @@ def _is_context7_question(query: str) -> bool:
         return False
     if has_docs:
         return True
+    # Finding the currently released version needs web evidence; API usage or
+    # explicit documentation requests still belong to the documentation service.
+    if has_current and has_version and not has_operation:
+        return False
     if has_context and (has_operation or has_current or has_version):
         return has_current or has_version or has_question_intent
     if has_software and has_version:

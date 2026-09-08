@@ -39,7 +39,7 @@ def _config() -> AppConfig:
                 "text_model": "qwen-vl",
                 "vision_model": "qwen-vl",
             },
-            "search": {"mode": "auto", "provider": "duckduckgo"},
+            "search": {"mode": "auto", "provider": "firecrawl"},
         }
     )
 
@@ -173,13 +173,15 @@ async def test_production_composition_uses_saved_hotkeys(qtbot) -> None:
     app.shutdown()
 
 
-async def test_unsupported_searxng_provider_is_disabled_and_reported_as_warning(
-    qtbot,
+@pytest.mark.parametrize("legacy_provider", ["exa", "duckduckgo", "searxng"])
+async def test_legacy_search_config_routes_to_firecrawl_in_production(
+    qtbot, legacy_provider: str,
 ) -> None:
     app = InterviewApplication.for_test()
     qtbot.addWidget(app.ribbon)
-    config = _config()
-    config.search.provider = "searxng"
+    raw_config = _config().model_dump()
+    raw_config["search"]["provider"] = legacy_provider
+    config = AppConfig.model_validate(raw_config)
     components = build_production_components(
         app,
         config,
@@ -190,15 +192,13 @@ async def test_unsupported_searxng_provider_is_disabled_and_reported_as_warning(
         lmlink_status=lambda: "{}",
     )
 
-    assert (
-        components.runtime.services.search_policy.integrations_for(
-            "What is the latest Python release?"
-        )
-        == []
+    integrations = components.runtime.services.search_policy.integrations_for(
+        "What is the latest Python release?"
     )
-    outcome = await components.probes.as_mapping()["duckduckgo_mcp"]()
-    assert outcome.status == "warning"
-    assert "searxng" in outcome.message.casefold()
+    assert config.search.provider == "firecrawl"
+    assert [integration.id for integration in integrations] == ["mcp/firecrawl"]
+    assert integrations[0].allowed_tools == ("firecrawl_search",)
+    assert "firecrawl_mcp" in components.probes.as_mapping()
 
     await components.aclose()
     app.shutdown()

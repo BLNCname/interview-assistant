@@ -1,569 +1,207 @@
 # Interview Assistant
 
-![Interview Assistant logo](assets/branding/interview-assistant-logo.png)
+![Логотип](assets/branding/interview-assistant-logo.png)
 
-> **Educational cybersecurity coursework.** Use this application only with the informed
-> consent of every participant and in accordance with the rules of the interview, class,
-> meeting platform, and local law. It is not intended for covert recording or assistance.
+Windows-приложение для тренировки интервью и учебных демонстраций по кибербезопасности. Оно распознаёт речь собеседника и пользователя, выделяет вопросы и показывает потоковый ответ модели в компактной панели. Используйте его с согласия участников и в рамках правил занятия или интервью.
 
-Interview Assistant is a Windows desktop application for consent-based interview practice and
-laboratory demonstrations. It captures a WASAPI system-audio loopback and a microphone as
-separate speakers, transcribes Russian and English speech locally with `faster-whisper`, detects
-direct and indirect questions, and streams a concise candidate-style answer from LM Studio into
-a capture-excluded Liquid Ribbon overlay.
+**[Скачать установщик — Releases](https://github.com/BLNCname/interview-assistant/releases/latest)** · [Требования к GPU и VRAM](docs/HARDWARE_RU.md) · [Запуск и сборка из исходников](docs/BUILD_RU.md)
 
-The repository is both the source submission and the audit trail for the coursework. A verified
-installer is kept in the repository root so an instructor can run the application without first
-installing Python or project dependencies.
+Распознавание работает локально на встроенной модели `large-v3-turbo`. Для ответов можно выбрать **OpenRouter** или **LM Studio**. Поиск через официальные **Firecrawl MCP** и **Context7 MCP** встроен в приложение: отдельные MCP-плагины и Node.js не нужны. Все четыре ключа вводятся в интерфейсе; `.env` для обычной установки не требуется.
 
-## Overview
+## Возможности
 
-Core capabilities include:
+- Раздельное распознавание системного звука и микрофона: собеседник и пользователь.
+- Русский, английский и автоматический выбор языка.
+- Краткие ответы в разговорном стиле; промпт просит не выдумывать личный опыт кандидата.
+- Поиск в интернете через Firecrawl и документации библиотек через Context7.
+- Ручные скриншоты и захват по типу вопроса для модели с поддержкой изображений.
+- Автономные самопроверки при запуске и отдельная диагностика оборудования и сервисов.
 
-- separate `Interviewer` and `You` audio streams;
-- local CUDA speech-to-text with the pinned `large-v3-turbo` CTranslate2 model;
-- bounded Russian and English question/request detection;
-- manual context submission and one-shot screen capture;
-- streaming text and vision requests through the LM Studio native v1 REST API;
-- optional Context7 and DuckDuckGo MCP retrieval through LM Studio;
-- safe Markdown rendering in a high-contrast, resizable Liquid Ribbon;
-- click-through passive mode and a configurable edit-mode hotkey;
-- Windows display-affinity capture exclusion where supported;
-- readiness diagnostics for audio, CUDA, LM Studio, LM Link, models, capture, and hotkeys;
-- fail-closed release validation for the bundled STT model and packaged runtime.
+![Панель ответа](docs/images/ribbon.png)
 
-## What is included
+Скриншоты инструкции сняты с виджетов приложения с демонстрационными настройками. Настоящих ключей на них нет; ответ на иллюстрации подготовлен для примера.
 
-The root installer is:
+## 1. Требования
 
-```text
-InterviewAssistant-Setup-0.1.1-win64.exe
-```
-
-It contains:
-
-- the Interview Assistant application;
-- its frozen Python, PyQt6, and native dependencies;
-- the CUDA 12/cuDNN libraries required by the packaged STT stack;
-- the pinned `large-v3-turbo` STT model;
-- the application prompt, branding, and diagnostic audio fixture.
-
-It does **not** contain:
-
-- an NVIDIA display driver;
-- LM Studio or LM Link;
-- an interview LLM or vision-model weights;
-- MCP servers or MCP credentials;
-- an LM Studio API token;
-- microphone permissions, audio-device selections, or other machine configuration.
-
-The source tree contains the application, tests, packaging definitions, exact dependency lock,
-STT manifest, release inventory, and verification documentation. The large portable runtime and
-a duplicate ZIP of the repository are intentionally not included in this handoff.
-
-## Architecture
-
-```text
-System audio (WASAPI loopback) ─┐
-                                ├─> local CUDA STT ─> question detector ─┐
-Microphone ─────────────────────┘                                        │
-                                                                         v
-Screen capture (only when needed or requested) ───────────────> context builder
-                                                                         │
-                                                                         v
-                                                          LM Studio on 127.0.0.1
-                                                                         │
-                                              local model or LM Link remote model
-                                                                         │
-                                                                         v
-                                                       capture-excluded Liquid Ribbon
-```
-
-Audio capture, STT, screen capture, question detection, and the UI run on the Windows computer
-where Interview Assistant is installed. LM Studio also exposes its API on that computer through
-loopback. Inference may run locally or on another computer through LM Link; the original Strix
-Halo deployment is one supported topology, not a mandatory hardware requirement.
-
-## System requirements
-
-### Ready-to-use installation
-
-- Windows 11 x64 with Desktop Window Manager composition enabled.
-- A current NVIDIA GPU driver and a CUDA-capable NVIDIA GPU supported by the bundled
-  CTranslate2 runtime. Production STT uses CUDA with `float16`; CPU-only operation does not pass
-  the production readiness gate.
-- At least 10 GB of free disk space during installation. LM Studio and LLM files require
-  additional space.
-- A microphone, Windows microphone permission, and a working WASAPI loopback endpoint for the
-  system-output device.
-- A display configuration supported by Windows Desktop Window Manager. Capture exclusion depends
-  on Windows support for `WDA_EXCLUDEFROMCAPTURE`.
-- LM Studio 0.4 or newer and at least one compatible instruction model. A multimodal model is
-  required when answers must use screenshots.
-- Enough system RAM and model VRAM for the selected LM Studio model. The project does not enforce
-  a universal memory minimum because requirements vary substantially by model and quantization.
-
-The installer already provides application libraries, the STT model, and CUDA/cuDNN user-space
-libraries. It cannot install or replace the NVIDIA display driver.
-
-### LM Studio inference
-
-LM Studio must run an API server on the same Windows computer at `127.0.0.1` (port `1234` by
-default). A model can execute on that computer, or LM Link can route it to a connected machine.
-LM Link is optional for local inference and required only for remote inference.
-
-Useful official references:
-
-- [LM Studio local server](https://lmstudio.ai/docs/developer/core/server)
-- [LM Studio native REST API](https://lmstudio.ai/docs/developer/rest)
-- [LM Studio authentication](https://lmstudio.ai/docs/developer/core/authentication)
-- [LM Link status](https://lmstudio.ai/docs/cli/link/link-status)
-
-### Building from source
-
-A clean development computer requires:
-
-- Windows 11 x64 and PowerShell 5.1 or newer;
-- [Git for Windows](https://git-scm.com/download/win);
-- x64 CPython 3.11 or 3.12 from [python.org](https://www.python.org/downloads/windows/);
-- [`uv`](https://docs.astral.sh/uv/getting-started/installation/);
-- internet access for locked dependencies and the STT model download;
-- a current NVIDIA driver for real CUDA/STT verification;
-- [Inno Setup 6](https://jrsoftware.org/isinfo.php) only when creating an installer;
-- approximately 20 GB of free working space when dependencies, model files, PyInstaller output,
-  and installer-compression staging coexist.
-
-Microsoft Visual C++ runtime requirements are supplied by the installed Python/native wheels or
-the frozen package. A C/C++ compiler is not normally required because the locked dependencies
-have Windows wheels for the supported Python versions.
-
-## Install the ready-to-use application
-
-1. Copy the complete repository folder to a local drive. Do not run the installer directly from
-   inside an archive or a cloud-preview window.
-2. Open PowerShell in the repository root and verify the installer checksum:
-
-   ```powershell
-   $expected = (Get-Content .\SHA256SUMS.txt).Split()[0]
-   $actual = (Get-FileHash .\InterviewAssistant-Setup-0.1.1-win64.exe -Algorithm SHA256).Hash
-   if ($actual -ne $expected) { throw "Installer checksum mismatch" }
-   $actual
-   ```
-
-3. Run `InterviewAssistant-Setup-0.1.1-win64.exe` and complete the installation wizard.
-4. Windows SmartScreen may display an unknown-publisher warning because this academic build is
-   not signed with a commercial code-signing certificate. Verify the checksum before choosing to
-   run it.
-5. Install and configure LM Studio before starting an interview session.
-
-The installer creates a normal Windows application and uninstaller. Python, `uv`, Git, and Inno
-Setup are not required when using the ready-to-use installer.
-
-## Configure LM Studio
-
-1. Install LM Studio 0.4 or newer from [lmstudio.ai](https://lmstudio.ai/).
-2. Download a compatible instruction model. Use a vision-capable model for screenshot questions.
-3. Open **Developer**, start the Local Server, and keep it bound to `127.0.0.1`. The default URL is
-   `http://127.0.0.1:1234`.
-4. If authentication is enabled, create a token under **Developer > Server Settings > Manage
-   Tokens**. Copy it once and enter it in Interview Assistant Settings.
-5. Do not place the token in `config.yaml`. Interview Assistant stores it in Windows Credential
-   Manager under the `InterviewAssistant` service.
-6. For remote inference, sign in to LM Studio on both computers, enable LM Link, and check:
-
-   ```powershell
-   lms link status --json
-   ```
-
-7. Select the preferred LM Link device in LM Studio. A remote device such as Strix Halo is
-   optional; a local model is valid.
-8. If MCP is required, configure it separately in LM Studio. MCP services and keys are not part of
-   this repository or installer.
-
-The application intentionally accepts only loopback LM Studio hosts. Do not expose the API on a
-LAN merely to connect Interview Assistant; LM Link is responsible for remote inference routing.
-
-## First launch and readiness checks
-
-1. Launch Interview Assistant from the Start menu.
-2. In Settings, select a system-audio loopback device and a different microphone device.
-3. Select `Auto (Russian / English)` or a fixed recognition language.
-4. Select the text model and vision model exposed by LM Studio. The same multimodal model may be
-   used for both; the model registry reuses one loaded instance for an identical key.
-5. Enter the LM Studio token if server authentication is enabled.
-6. Choose the preferred LM Link device only when remote inference is used.
-7. Select **Run checks**.
-
-Readiness failures block **Start**. Warnings identify checks that could not be conclusively
-verified or performance thresholds that were missed; review their remediation text before
-continuing. The bundled STT model must load on CUDA, the selected audio devices must be available,
-LM Studio authentication/model discovery must succeed, and the capture/hotkey probes must start.
-
-Useful command-line diagnostics from a source checkout are described below. The installed GUI is
-the primary interface for device/model selection.
-
-## Controls and configurable hotkeys
-
-All hotkeys are visible and editable under **Settings > Hotkeys**. Changes are validated as a
-complete seven-action map and applied live without restarting the session. The defaults are
-fallbacks; rely on the values shown in Settings after customization.
-
-| Action | Default |
+| Компонент | Требование |
 |---|---|
-| Submit the current conversation context | `Ctrl+Shift+Space` |
-| Capture a screenshot for the next request | `Ctrl+Shift+S` |
-| Pause or resume recognition | `Ctrl+Shift+P` |
-| Hide or show the Ribbon | `Ctrl+Shift+O` |
-| Enter or leave Ribbon edit mode | `Ctrl+Shift+I` |
-| Force web search for the next request | `Ctrl+Shift+W` |
-| Clear the current answer and history | `Ctrl+Shift+C` |
+| ОС | Windows 11 x64 |
+| Диск | Около 10 ГБ свободного места для скачивания, установки и временных файлов; модели LM Studio требуют дополнительного места |
+| Звук | Системный аудиовыход и микрофон, разрешение Windows на использование микрофона |
+| STT на GPU | NVIDIA с совместимым драйвером; минимальные и рекомендуемые профили — в [таблице оборудования](docs/HARDWARE_RU.md) |
+| STT на CPU | Режим CPU + Int8; NVIDIA не нужна, скорость проверяется на конкретном процессоре |
+| Ответы | Ключ и доступная модель OpenRouter либо API LM Studio с загруженной моделью |
+| Скриншоты | Модель с поддержкой изображений в поле Vision model |
 
-The Ribbon starts in passive click-through mode, so mouse input reaches the application behind
-it. Toggle edit mode to move, resize, scroll, or select text, then toggle it again to restore
-click-through behavior. Hiding the Ribbon does not stop audio capture, STT, or request processing.
+Установщик содержит Python, Qt, библиотеки CUDA/cuDNN и STT-модель. Драйвер NVIDIA, LM Studio и веса модели для генерации ответов устанавливаются отдельно. Для облачного варианта LM Studio не требуется.
 
-A manual screenshot is one-shot: the UI reports capture progress, readiness for the next request,
-and successful attachment. A protected, black, or otherwise unusable frame is rejected instead of
-being sent to the model.
+Для STT рекомендуем **8 ГБ VRAM**: например, RTX 3060 Ti/4060 на настольном ПК или RTX 4060 Laptop. **6 ГБ** (RTX 2060 или RTX 4050 Laptop) — только ориентир для пробного запуска; гарантированный минимум на этих картах не измерен. Желательно оставить около 3 ГБ свободной VRAM перед загрузкой STT.
 
-## Build from source
+VRAM для STT и локальной LLM складываются. Для компьютера с **RTX 3060 Ti 8 ГБ** разумный старт — CUDA + Int8/Float16, ответы через OpenRouter. Физические испытания на 3060 Ti не проводились: результаты на RTX 5070 Ti не являются замером её скорости. Конкретные настольные и мобильные GPU, объём свободной памяти и ограничения приведены в [HARDWARE_RU.md](docs/HARDWARE_RU.md).
 
-The following procedure starts from a clean Windows machine. Run all commands in PowerShell.
+## 2. Скачать и установить
 
-### 1. Install development prerequisites
+1. Откройте [последний релиз](https://github.com/BLNCname/interview-assistant/releases/latest). Если репозиторий приватный, войдите под аккаунтом с доступом к нему.
+2. В **Assets** скачайте `InterviewAssistant-Setup-0.1.2-win64.exe`, **все одноимённые файлы `-*.bin`** и `SHA256SUMS.txt` в одну папку. Архивы `Source code` для установки не нужны.
+3. Не переименовывайте части и не переносите `.exe` отдельно от `.bin`. Это один установщик, разделённый на файлы из-за ограничения размера вложения GitHub.
+4. Проверьте файлы в PowerShell из папки загрузки:
 
-Install Git, x64 CPython 3.11 or 3.12, and `uv`. One official `uv` option is:
+   ```powershell
+   Get-Content .\SHA256SUMS.txt | ForEach-Object {
+       $parts = $_ -split '\s+', 2
+       $name = $parts[1].TrimStart('*')
+       if ((Get-FileHash -LiteralPath $name -Algorithm SHA256).Hash -ne $parts[0]) {
+           throw "Контрольная сумма не совпала: $name"
+       }
+   }
+   ```
 
-```powershell
-winget install --id astral-sh.uv -e
-```
+5. Запустите `.exe` и пройдите мастер установки. По умолчанию используется `%LOCALAPPDATA%\Programs\InterviewAssistant`, установка для текущего пользователя.
+6. Запустите **Interview Assistant** через меню «Пуск».
 
-Alternatively use the reviewed standalone installer command from the
-[official uv installation guide](https://docs.astral.sh/uv/getting-started/installation/).
-Install Inno Setup 6 only if you intend to compile an installer.
+Учебный релиз не подписан сертификатом издателя: Windows может показать предупреждение SmartScreen. Сверяйте источник и контрольные суммы. Для обычного запуска приложения не требуется создавать входящее правило брандмауэра.
 
-Clone or copy the repository, then enter its root:
+## 3. Модель и ключ провайдера
 
-```powershell
-git clone <repository-url> interview-assistant
-Set-Location .\interview-assistant
-```
+Откройте **Settings → Models**. Названия пунктов интерфейса пока английские.
 
-For an offline instructor handoff without a remote URL, copy the supplied repository directory and
-open PowerShell there. The included `.git` history is sufficient for source inspection.
+![Выбор провайдера и ключ](docs/images/models.png)
 
-### 2. Create the locked environment
+### OpenRouter — без LM Studio
 
-```powershell
-uv lock --check
-uv sync --extra dev --extra cuda --frozen
-```
+1. Получите ключ в [OpenRouter](https://openrouter.ai/settings/keys) и выберите доступную вашему аккаунту модель в [каталоге](https://openrouter.ai/models). Стоимость и ограничения зависят от модели и провайдера.
+2. В `Provider` выберите **OpenRouter (cloud)**.
+3. Вставьте ключ в `API key / token`.
+4. В `Text model` введите точный ID из каталога. Поле допускает ручной ввод; значение на иллюстрации — пример, а не гарантированно доступная бесплатная модель.
+5. Для скриншотов укажите модель с поддержкой изображений в `Vision model`. Для работы только с речью оставьте поле пустым.
+6. Нажмите **Save**.
 
-This creates `.venv` and installs the dependency versions resolved in `uv.lock`. The project
-supports CPython `>=3.11,<3.13`. `requirements.txt` is only a compatibility shim (`-e .`); it is
-not a lockfile and is not the reproducibility path. If an auditor needs only linting and tests
-without the optional NVIDIA user-space wheels, the smaller environment is:
+STT остаётся локальным. Выбранный контекст разговора и прикреплённые скриншоты отправляются в OpenRouter и далее выбранному провайдеру. Наличие ключа само по себе не гарантирует доступную квоту.
 
-```powershell
-uv sync --extra dev --frozen
-```
+### LM Studio — локальная модель
 
-See the [official uv project-sync documentation](https://docs.astral.sh/uv/concepts/projects/sync/)
-for frozen synchronization semantics. The lockfile makes dependency resolution reproducible for
-the supported interpreter range; it does not guarantee a byte-for-byte identical EXE across
-different Windows, Python, SDK, or PyInstaller toolchains.
+1. Установите [LM Studio](https://lmstudio.ai/), скачайте и загрузите подходящую instruction-модель.
+2. В **Developer** включите API-сервер на `127.0.0.1:1234`. Оставьте его работающим. [Официальная инструкция](https://lmstudio.ai/docs/developer/core/server).
+3. Если включена аутентификация, создайте токен в настройках сервера. [Документация аутентификации](https://lmstudio.ai/docs/developer/core/authentication).
+4. В ассистенте выберите **LM Studio (local)** и вставьте токен в `API key / token`. При отключённой аутентификации токен не нужен.
+5. Нажмите **Save**, дождитесь окончания диагностики и обновления списка моделей. Выберите `Text model`, при необходимости `Vision model`, и сохраните снова. Кнопка **Run checks** повторяет проверку вручную.
 
-### 3. Obtain the pinned STT model
+Одну мультимодальную модель можно выбрать для обоих полей. LM Link — дополнительный вариант размещения модели на другой машине, а не обязательный компонент. Ассистент обращается к LM Studio через loopback. Нестандартный порт задаётся параметром `LMSTUDIO_PORT` в дополнительной конфигурации.
 
-The cleaned source tree does not duplicate the 1.6 GB STT model already present in the installer.
-Download the exact model and revision declared in `packaging/stt_model_manifest.json`:
+### Хранение и замена ключей
 
-```powershell
-$ModelPath = Join-Path $PWD "models\stt\large-v3-turbo"
-.\.venv\Scripts\hf.exe download `
-  dropbox-dash/faster-whisper-large-v3-turbo `
-  --revision 0a363e9161cbc7ed1431c9597a8ceaf0c4f78fcf `
-  --local-dir $ModelPath
-```
+Ключи из интерфейса сохраняются в **Windows Credential Manager** для текущего пользователя под сервисом `InterviewAssistant`. Они не записываются в `config.yaml`. Поля маскируют ввод и очищаются после сохранения; пустое поле оставляет сохранённый ключ.
 
-The Hugging Face CLI `--revision` and `--local-dir` options are documented in the
-[official CLI guide](https://huggingface.co/docs/huggingface_hub/en/guides/cli). Validate all six
-manifest entries before using the bundle:
+Чтобы заменить ключ, вставьте новый и нажмите **Save**. Для удаления отметьте `Remove stored key` и сохраните. Если дополнительно задан ключ в `.env` или переменных окружения, после удаления сохранённого ключа используется этот резервный источник.
 
-```powershell
-.\.venv\Scripts\python.exe -m interview_assistant.stt.bundle `
-  --validate-bundle $ModelPath `
-  --require-all-files
-```
+Приоритет **секретов**: сохранённый GUI-ключ → переменная процесса → `.env`. Ключи LM Studio и OpenRouter хранятся отдельно; сохраняйте введённый ключ перед переключением провайдера.
 
-Validation checks exact filenames, sizes, and SHA-256 values. A mismatched model is rejected.
-One multilingual `large-v3-turbo` model serves RU/EN recognition. The six-file release bundle
-includes its `README.md` model card and is distributed under the model repository's `MIT` license.
+## 4. Поиск и MCP
 
-### 4. Run from source
+Откройте **Settings → General**.
 
-Start LM Studio first, then run:
+![Firecrawl и Context7](docs/images/general.png)
 
-```powershell
-.\.venv\Scripts\python.exe .\main.py
-```
+1. В `Tools and retrieval` выберите **Application MCP** (встроенный клиент).
+2. Вставьте ключ из [кабинета Firecrawl](https://www.firecrawl.dev/app) в `Firecrawl API key`.
+3. При наличии ключа [Context7](https://context7.com/) вставьте его в `Context7 API key (optional)`. Без ключа доступ зависит от ограничений сервиса.
+4. В `Web search` выберите автоматический поиск или отключите его.
+5. Нажмите **Save**, затем **Run checks**.
 
-The application creates or migrates its user configuration at:
+| Сервис | Официальный адрес | Назначение |
+|---|---|---|
+| [Firecrawl MCP](https://docs.firecrawl.dev/mcp-server) | `https://mcp.firecrawl.dev/v2/mcp` | Интернет-поиск через firecrawl_search |
+| [Context7 / Upstash](https://github.com/upstash/context7) | `https://mcp.context7.com/mcp` | Поиск библиотеки и документации |
 
-```text
-%LOCALAPPDATA%\InterviewAssistant\InterviewAssistant\config.yaml
-```
+Приложение запрашивает до пяти результатов, не запускает scrape/crawl/agent-задания. В поиск передаётся очищенный текущий вопрос, а не весь диалог или изображение. Актуальные квоты и цены смотрите в кабинете и [документации Firecrawl](https://docs.firecrawl.dev/features/search). В наших испытаниях доступ без ключа на этой сети был отклонён, поэтому для воспроизводимого запуска используйте свой ключ.
 
-The tracked root `config.yaml` and `packaging/source_release_config.yaml` are secret-free examples,
-not locations for API tokens.
+Проверка MCP устанавливает соединение и получает список инструментов; она не делает платный поиск и не подтверждает остаток кредитов. При ошибке поиска ассистент может ответить без найденных сведений. Тайм-аут не гарантирует отсутствие списания кредитов. Для медленного соединения можно задать `SEARCH_TIMEOUT_SECONDS=30`; стандартный бюджет — 5 секунд.
 
-### 5. Build the portable application
+`Tools and retrieval → Disabled` отключает интеграции. MCP через LM Studio оставлен для совместимости; для обычной установки выбирайте Application MCP.
 
-A build without `-SttModelPath` remains lightweight: it does not download model weights and does
-not bundle the Whisper model. This is useful for inspecting whether the source compiles:
+## 5. Звук и STT
 
-```powershell
-.\scripts\build.ps1
-```
+![Устройства и экономный режим STT](docs/images/audio.png)
 
-Create a verified PyInstaller onedir build containing the pinned STT model with:
+В **Audio**:
 
-```powershell
-.\scripts\build.ps1 -SttModelPath $ModelPath -VerifyCuda `
-  -ConfigPath .\packaging\source_release_config.yaml
-```
+1. `System audio` — loopback активных наушников/динамиков, в которых слышен собеседник или запись.
+2. `Microphone` — отдельный вход вашего микрофона, иначе реплики могут дублироваться.
+3. `Speech recognition device` — **NVIDIA GPU (CUDA)**.
+4. `Speech recognition precision` — **Int8 + Float16 (less GPU memory)** для меньшего расхода VRAM. В новой конфигурации может быть выбран Float16; переключите явно.
+5. В **General → Recognition language** выберите автоматическое распознавание либо русский/английский.
 
-The equivalent execution-policy-explicit invocation is:
+Без подходящей NVIDIA выберите **CPU** и **Int8**. Автоматического скрытого перехода на CPU при ошибке CUDA нет. Подробнее — [минимальная VRAM и GPU для ноутбуков и настольных ПК](docs/HARDWARE_RU.md).
 
-```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\build.ps1 `
-  -SttModelPath $ModelPath `
-  -VerifyCuda `
-  -ConfigPath .\packaging\source_release_config.yaml
-```
+## 6. Проверка и первый запуск
 
-The result is:
+1. Нажмите **Save**, затем **Run checks**.
+2. Откройте **Diagnostics**. Проверяется звук, STT с распознаванием коротких RU/EN-фраз, провайдер, модели, MCP, захват и горячие клавиши.
+3. Первая загрузка STT в память занимает больше времени. Проверка модели может послать короткий запрос провайдеру.
+4. Исправьте строки с ошибками, повторите проверку и нажмите **Start**, когда кнопка станет доступной.
+5. Включите запись интервью или начните согласованную тренировку. Если вопрос не обнаружен автоматически, нажмите `Ctrl+Shift+Space`.
 
-```text
-dist\InterviewAssistant\InterviewAssistant.exe
-dist\InterviewAssistant\_internal\
-```
+При обычном старте выполняются быстрые автономные проверки логики. Полный `pytest` при каждом запуске не выполняется. Успешная самопроверка не заменяет **Run checks** с настоящим оборудованием и ключами.
 
-The executable must remain beside `_internal`. `build.ps1` checks `uv.lock`, runs the test suite
-unless `-SkipTests` is explicitly supplied, performs a clean PyInstaller build, and runs frozen
-diagnostics. With `-VerifyCuda`, it also performs real inference using the bundled STT model.
+## Управление и скриншоты
 
-### 6. Build an installer
+Все сочетания изменяются в **Settings → Hotkeys**.
 
-Install Inno Setup 6, then locate `ISCC.exe` and run:
+| Действие | По умолчанию |
+|---|---|
+| Ответить по текущему контексту | Ctrl+Shift+Space |
+| Скриншот для следующего запроса | Ctrl+Shift+S |
+| Пауза / продолжение распознавания | Ctrl+Shift+P |
+| Скрыть / показать панель | Ctrl+Shift+O |
+| Режим перемещения и изменения размера панели | Ctrl+Shift+I |
+| Веб-поиск для следующего вопроса | Ctrl+Shift+W |
+| Очистить ответ и историю | Ctrl+Shift+C |
 
-```powershell
-$Iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
-powershell -ExecutionPolicy Bypass -File .\scripts\build_installer.ps1 `
-  -IsccPath $Iscc `
-  -DistPath .\dist\InterviewAssistant `
-  -OutputPath .\dist\installer
-```
+Панель пропускает клики в обычном режиме. Для перемещения, изменения размера, выделения текста и прокрутки включите редактирование через `Ctrl+Shift+I`. Скрытие панели не останавливает STT: для этого используйте паузу. Выход — через значок в области уведомлений Windows.
 
-The installer builder is intentionally fail-closed. Before invoking Inno Setup, it validates the
-entire portable tree against `packaging/dist_inventory.json` and independently verifies the STT
-manifest. That inventory authenticates the shipped, reviewed release. A clean build on a different
-Windows/Python/PyInstaller toolchain may compile correctly yet have different binary hashes and be
-rejected as *not the attested release*. Only after source tests, frozen diagnostics, bundled model
-validation, and a human review of the inventory diff may a deliberate release step regenerate it:
+**Ручной скриншот:** нажмите `Ctrl+Shift+S`, дождитесь готовности и отправьте следующий вопрос. Изображение прикрепляется однократно. Захватывается рабочий стол со всеми мониторами — заранее уберите лишние личные данные.
 
-```powershell
-.\.venv\Scripts\python.exe .\scripts\generate_release_inventory.py `
-  --dist .\dist\InterviewAssistant `
-  --output .\packaging\dist_inventory.json `
-  --application InterviewAssistant `
-  --replace
-```
+**Автоскриншот:** создаётся для вопросов, определённых как код, проектирование системы или анализ экрана, если выбран `Vision model`. Это захват по событию, а не таймер. Для конкретного кадра используйте ручную клавишу. Чёрные/защищённые кадры отклоняются; пригодный неизменившийся кадр может использоваться повторно.
 
-Do not silently regenerate the inventory merely to make an unknown build pass. Source audit, tests,
-diagnostics, and the portable build are sufficient to confirm that the checked-in code is
-executable; producing a new trusted installer requires a deliberate inventory review and all
-release gates documented under `docs/validation/`.
+Панель использует исключение из захвата Windows. Поведение зависит от ОС и программы записи; это не универсальная гарантия невидимости и не заменяет согласие участников.
 
-## Run tests and diagnostics
+## Дополнительно: .env
 
-Run the complete source quality gate:
+Для стандартной установки этот файл не нужен. Шаблон — [`.env.example`](.env.example). Создайте `.env` рядом с установленным `InterviewAssistant.exe` либо рядом с используемым `config.yaml`. Не сохраняйте его как `.env.txt`.
+
+Обычная конфигурация находится в `%LOCALAPPDATA%\InterviewAssistant\InterviewAssistant\config.yaml`.
+
+Приоритет **несекретных** параметров: переменные процесса → `.env` → YAML. Если выбранный в GUI режим после перезапуска меняется обратно, удалите соответствующее переопределение из `.env`. Для секретов сохранённый GUI-ключ имеет более высокий приоритет.
+
+`MCP_CONFIG` задаёт собственные доверенные определения серверов вместо встроенных. Поддерживаются контракты firecrawl/context7; [образец](config/mcp.template.json). Команды локальных серверов запускаются с правами пользователя. Для обычной установки файл не нужен.
+
+## Решение проблем
+
+| Симптом | Что проверить |
+|---|---|
+| Start недоступна | Save → Run checks, ошибки в Diagnostics |
+| CUDA/STT не готовы | Драйвер, свободная VRAM; CUDA + Int8/Float16 либо CPU + Int8. Не копируйте случайные DLL |
+| Нет ответа | API и ID модели LM Studio либо ключ, квота и модель OpenRouter |
+| Нет моделей LM Studio | Сервер должен работать; сохраните токен и повторите проверку |
+| Нет голоса собеседника | Выбранный loopback должен соответствовать текущему устройству вывода Windows |
+| Замена ключа не применяется | Save → Run checks. После удаления GUI-ключа проверьте резервный ключ в .env/окружении |
+| Поиск недоступен | Ключ, баланс, лимиты, интернет; при медленном соединении увеличьте SEARCH_TIMEOUT_SECONDS |
+| Скриншот не учитывается | Поддержка изображений у Vision model; после захвата нужен следующий запрос |
+| Установщик просит часть | Скачайте все .bin того же релиза рядом с .exe, сохранив имена |
+
+Автономная диагностика из папки установленного приложения:
 
 ```powershell
-.\.venv\Scripts\python.exe -m pytest -q
-.\.venv\Scripts\python.exe -m ruff check .
-.\.venv\Scripts\python.exe -m mypy interview_assistant main.py
-.\.venv\Scripts\python.exe -m compileall -q interview_assistant scripts main.py
+.\InterviewAssistant.exe --self-test
+.\InterviewAssistant.exe --diagnostics --no-gui --diagnostics-output .\diagnostics.json
 ```
 
-Run side-effect-limited source diagnostics and write a JSON report:
+## Ограничения и испытания
 
-```powershell
-.\.venv\Scripts\python.exe .\main.py `
-  --diagnostics `
-  --no-gui `
-  --diagnostics-output .\diagnostics.json
-```
+Контекст ограничен: последние реплики и предыдущий ответ сокращаются по бюджету. **Семантического сжатия диалога отдельным агентом сейчас нет**; старые факты могут теряться. Модель может ошибаться даже после поиска, поэтому содержание ответов нужно проверять.
 
-Run a real CUDA/STT fixture after preparing `$ModelPath`:
+В [нагрузочных испытаниях](docs/validation/stress-and-release-2026-09-08.md) конкретной конфигурации LM Studio сложные вопросы дали первый текст за 7,3–13,6 с и полный ответ за 10,3–18,2 с. Серия поиска списала 12 кредитов Firecrawl. Это результаты отдельного прогона, а не гарантии скорости и расхода. OpenRouter с реальным ключом не испытывался; интеграция проверена автоматическими контрактными тестами.
 
-```powershell
-.\.venv\Scripts\python.exe .\scripts\verify_cuda.py `
-  --config .\packaging\source_release_config.yaml `
-  --bundle-root .\dist\InterviewAssistant\_internal `
-  --fixture .\assets\diagnostics\stt-smoke.wav `
-  --output .\cuda-stt.json
-```
+Другие отчёты: [STT и записи](docs/validation/recording-replay-2026-09-07.md), [качество ответов](docs/validation/heavy-answer-quality-2026-09-08.md), [релиз 0.1.2](docs/validation/release-0.1.2.md).
 
-For a packaged build:
-
-```powershell
-.\dist\InterviewAssistant\InterviewAssistant.exe `
-  --diagnostics `
-  --no-gui `
-  --diagnostics-output .\packaged-diagnostics.json
-```
-
-Automated diagnostics prove dependency, CUDA, STT, API, capture, and packaging contracts. They do
-not replace an observed target-machine session with real microphone/system audio, the selected LM
-Studio model, LM Link routing, and participant-consented screen content.
-
-For the observed Teams/target-hardware acceptance procedure, use
-[`scripts/teams_acceptance.md`](scripts/teams_acceptance.md) and record results with
-[`docs/validation/acceptance-template.md`](docs/validation/acceptance-template.md). A synthetic
-self-test deliberately remains unobserved:
-
-```powershell
-.\.venv\Scripts\python.exe .\scripts\benchmark_session.py --mode self-test
-```
-
-Its report keeps `overall_acceptance: NOT_RUN`. Only observed event evidence may be evaluated:
-
-```powershell
-.\.venv\Scripts\python.exe .\scripts\benchmark_session.py --mode event-input `
-  --events-input .\session-events.jsonl `
-  --report .\acceptance.jsonl `
-  --session-id instructor-observed-01
-```
-
-## Project structure
-
-```text
-interview_assistant/        Application runtime and domain modules
-  audio/                    WASAPI and microphone capture
-  capture/                  Event-driven screen capture and validation
-  context/                  Prompt and multimodal context construction
-  diagnostics/              Readiness contracts and production probes
-  lmstudio/                 Native REST client, model registry, lifecycle
-  retrieval/                Bounded MCP/search policy
-  stt/                      Pinned bundle validation and transcription workers
-  transcript/               Role-aware transcript and question detection
-  ui/                       Settings, safe Markdown, Ribbon, display affinity
-assets/                     Branding and diagnostic fixture
-packaging/                  PyInstaller/Inno definitions, manifests, inventory
-prompts/                    Packaged candidate-style system prompt
-scripts/                    Build, diagnostics, release, and validation tools
-tests/                      Unit, contract, and integration tests
-docs/                       Design, plans, acceptance, and release evidence
-main.py                     Windows application entry point
-pyproject.toml              Package metadata and dependency ranges
-uv.lock                     Canonical locked dependency resolution
-```
-
-## Security and privacy
-
-- Obtain participant consent before capturing audio, screens, or meeting content.
-- Audio and STT run locally on the primary Windows computer. Conversation context and an optional
-  screenshot are sent only to the configured loopback LM Studio API.
-- The HTTP client ignores system proxy variables for loopback requests.
-- LM Studio API tokens are stored in Windows Credential Manager, never in YAML or the repository.
-- Screenshots are event-driven and one-shot. Protected, nearly black, duplicate, and unusable
-  frames are rejected.
-- The Ribbon requests Windows capture exclusion and does not masquerade as a system process.
-- Tool/MCP output is treated as untrusted content. Retrieval is bounded by policy and configured
-  separately in LM Studio.
-- The shipped installer is unsigned. Verify `SHA256SUMS.txt` before execution.
-
-## Known limitations
-
-- Windows 11 x64 is the supported UI/audio/capture platform.
-- Production STT requires a compatible NVIDIA GPU and driver; the bundled CUDA libraries are not a
-  CPU fallback and are not a driver installer.
-- Display affinity is implemented by Windows and may not protect content in every capture product
-  or on unsupported Windows versions.
-- LM Studio does not guarantee that every physical placement detail is exposed through its REST
-  model response. Verify LM Link routing in LM Studio and on the inference host.
-- Automatic question detection is deliberately bounded. Use the manual context hotkey when a
-  conversational phrasing is not detected.
-- MCP availability and safety depend on the user's independent LM Studio configuration.
-- The release is not commercially code-signed, so SmartScreen warnings are expected.
-
-## Troubleshooting
-
-### Start remains disabled
-
-Run checks again and inspect every failed row. Confirm that the loopback and microphone devices
-still exist, Windows microphone access is enabled, CUDA exposes a device, the STT bundle loads,
-LM Studio authentication works, and the selected model identifiers are available.
-
-### CUDA or STT readiness fails
-
-Install a current NVIDIA driver, reboot if the driver installer requests it, and rerun diagnostics.
-Do not copy arbitrary CUDA DLLs into the application directory. From source, validate the exact
-model directory against `packaging/stt_model_manifest.json`.
-
-### LM Studio cannot be reached
-
-Start the server from the Developer page or run:
-
-```powershell
-lms server start --port 1234
-```
-
-Keep the host at `127.0.0.1`. If authentication is required, generate a new token and save it
-through Interview Assistant Settings.
-
-### LM Link device is not verified
-
-Run `lms link status --json`, confirm that both devices are signed in and connected, and choose the
-preferred device in LM Studio. Local inference does not require LM Link.
-
-### No system audio is available
-
-Select the loopback endpoint corresponding to the active Windows output device. If the output
-device changed after readiness ran, save the new selection and run checks again.
-
-### Windows SmartScreen warns about the installer
-
-This academic release is unsigned. Compare the installer's SHA-256 with `SHA256SUMS.txt`. Do not
-continue if the value differs.
-
-### Installer compilation rejects a locally built portable tree
-
-The strict inventory protects the reviewed release. A hash difference is expected when toolchain
-inputs differ and is not evidence that the source failed to compile. Review the generated portable
-application, tests, and diagnostics; update the release inventory only as an intentional new
-release with a complete review.
-
-## Release verification
-
-The shipped installer was built and tested on Windows with real CUDA STT, frozen diagnostics, a
-15-second GUI smoke test, an isolated install/diagnostics/uninstall cycle, and exact file/model
-inventory validation. The detailed evidence is recorded in
-[`docs/validation/release-verification-2026-08-02-v0.1.1.md`](docs/validation/release-verification-2026-08-02-v0.1.1.md).
-The final-review rebuild passed 854 tests with 5 skipped and ships a reviewed
-4,092-file, 304-directory distribution totaling 4,193,299,018 bytes. The root
-installer is 2,439,149,183 bytes.
-
-Verify the handoff installer at any time:
-
-```powershell
-Get-FileHash .\InterviewAssistant-Setup-0.1.1-win64.exe -Algorithm SHA256
-Get-Content .\SHA256SUMS.txt
-```
-
-Expected SHA-256:
-
-```text
-D17DD0C8AB35CABA5CF39435B812D64E57CE5D31E741EF0A19551E507D63E4E5
-```
+Для удаления: **Параметры Windows → Приложения → Interview Assistant → Удалить**. Конфигурация и ключи могут сохраняться для переустановки; при необходимости удалите ключи через Settings перед удалением приложения.

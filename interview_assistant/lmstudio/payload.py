@@ -2,6 +2,10 @@ from __future__ import annotations
 
 import base64
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from interview_assistant.context.models import ContextSnapshot
 
 
 _IMAGE_MIME_TYPES = {
@@ -52,3 +56,16 @@ def build_chat_payload(
         "input": request_input,
         "store": False,
     }
+
+
+def build_context_payload(
+    instance_id: str, context: "ContextSnapshot", image_path: Path | None = None,
+) -> dict[str, object]:
+    """Keep trusted instructions separate from transcript and retrieval evidence."""
+    instructions = "\n\n".join(item.text for item in context.items if item.kind == "system")
+    content = "\n\n".join(
+        f"{item.label}:\n{item.text}" for item in context.items if item.kind != "system"
+    )
+    payload = build_chat_payload(instance_id, content, image_path)
+    payload["system_prompt"] = instructions
+    return payload

@@ -9,14 +9,14 @@ lmstudio:
   port: 1234
   text_model: ""
   vision_model: ""
-  preferred_device_name: "Strix Halo"
+  preferred_device_name: ""
 capture:
   mode: event
   persistent_screenshots: false
   black_frame_threshold: 0.92
 search:
   mode: auto
-  provider: duckduckgo
+  provider: firecrawl
   timeout_seconds: 5.0
 overlay:
   opacity: 0.88

@@ -17,12 +17,12 @@ from interview_assistant.config import AppConfig
 from interview_assistant.context.builder import ContextBuilder
 from interview_assistant.lmstudio.lifecycle import ModelLifecycle, RecoveryRequest
 from interview_assistant.lmstudio.models import ModelInstance
-from interview_assistant.lmstudio.payload import build_chat_payload
+from interview_assistant.lmstudio.payload import build_context_payload as build_chat_payload
 from interview_assistant.orchestration.coordinator import (
     RequestCoordinator,
     RequestOutcome,
 )
-from interview_assistant.retrieval.models import SearchIntegration
+from interview_assistant.retrieval.models import CONTEXT7_ID, FIRECRAWL_ID, SearchIntegration
 from interview_assistant.retrieval.policy import SearchPolicy
 from interview_assistant.state import ApplicationState
 from interview_assistant.stt.engine import TranscriptHypothesis
@@ -33,6 +33,36 @@ from interview_assistant.transcript.detector import (
 )
 from interview_assistant.transcript.store import TranscriptStore
 from interview_assistant.utils.hotkeys import HotkeyAction
+
+
+def _retrieval_error_type(error: Exception) -> str:
+    from interview_assistant.retrieval.mcp_client import NativeMCPError
+
+    if isinstance(error, TimeoutError):
+        return "retrieval_timeout"
+    if isinstance(error, NativeMCPError) and error.code in (
+        "key_required", "credentials", "credits", "rate_limit", "timeout",
+    ):
+        return f"retrieval_{error.code}"
+    return "retrieval_unavailable"
+
+
+def _retrieval_unavailable_message(error_type: str | None, integration_id: str) -> str:
+    # Use finite error codes and fixed labels, never an upstream exception body.
+    provider = {FIRECRAWL_ID: "Firecrawl", CONTEXT7_ID: "Context7"}.get(integration_id, "Search")
+    key_name = "FIRECRAWL_API_KEY" if integration_id == FIRECRAWL_ID else "CONTEXT7_API_KEY"
+    reasons = {
+        "retrieval_key_required": f"{provider} requires an API key (configure {key_name})",
+        "retrieval_credentials": f"{provider} API key is missing or invalid (check {key_name})",
+        "retrieval_credits": f"{provider} credits or quota are exhausted",
+        "retrieval_rate_limit": f"{provider} rate limit reached",
+        "retrieval_timeout": f"{provider} request timed out",
+        "timeout": f"{provider} request timed out",
+    }
+    reason = reasons.get(error_type or "")
+    if reason is None:
+        return "Web retrieval unavailable; continuing without it."
+    return f"Web retrieval unavailable: {reason}; continuing without it."
 
 
 class AudioService(Protocol):
@@ -81,6 +111,12 @@ class RegistryService(Protocol):
 
 
 class ClientService(Protocol):
+    async def aclose(self) -> None: ...
+
+
+class RetrievalService(Protocol):
+    async def retrieve(self, integration: SearchIntegration) -> str: ...
+
     async def aclose(self) -> None: ...
 
 
@@ -206,6 +242,7 @@ class RuntimeServices:
     warm_up: WarmUp = _noop_warm_up
     recovery_sleeper: Sleeper = asyncio.sleep
     hypothesis_ingress: RuntimeHypothesisIngress | None = None
+    retrieval: RetrievalService | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -241,6 +278,7 @@ class ApplicationRuntime(QObject):
         self._paused = False
         self._desired_state = ApplicationState.STARTING
         self._recovered_search_results: dict[int, str] = {}
+        self._previous_answer: str | None = None
         self._actions_connected = False
         self._model_lifecycle: ModelLifecycle[_PreparedRequest] = ModelLifecycle(
             services.registry,
@@ -322,8 +360,8 @@ class ApplicationRuntime(QObject):
             dict.fromkeys(
                 key
                 for key in (
-                    self.config.lmstudio.text_model,
-                    self.config.lmstudio.vision_model,
+                    self.config.text_model,
+                    self.config.vision_model,
                 )
                 if key
             )
@@ -451,26 +489,45 @@ class ApplicationRuntime(QObject):
         manual_image_path = self._manual_image_path
         self._manual_image_path = None
         image_path = manual_image_path
-        if image_path is None:
+        if image_path is None and self.config.vision_model:
             capture = await self.services.capture.capture_for_event(question.kind)
             image_path = self._usable_image(capture)
+        if image_path is not None and not self.config.vision_model:
+            image_path = None
+            self.application.events.notification.emit(
+                "No vision model selected; answering without the screenshot."
+            )
 
-        text_model_key = self.config.lmstudio.text_model
+        text_model_key = self.config.text_model
         if not text_model_key:
-            text_model_key = self.config.lmstudio.vision_model
+            text_model_key = self.config.vision_model
         text_instance = self._instances[text_model_key]
         search_results: tuple[str, ...] = ()
-        integrations = self.services.search_policy.integrations_for(question.text)
+        backend_available = self.config.mcp.backend != "off" and not (
+            self.config.provider == "openrouter" and self.config.mcp.backend == "lmstudio"
+        )
+        integrations = (
+            self.services.search_policy.integrations_for(question.text)
+            if backend_available else ()
+        )
         if integrations:
             self._set_state(ApplicationState.SEARCHING)
-            retrieval_id = self.services.coordinator.submit_retrieval(
-                text_instance.instance_id,
-                integrations,
-            )
-            retrieval = await self._wait_with_timeout(
-                retrieval_id,
-                self.config.search.timeout_seconds,
-            )
+            if self.services.retrieval is not None:
+                try:
+                    text = await asyncio.wait_for(
+                        self.services.retrieval.retrieve(integrations[0]),
+                        timeout=self.config.search.timeout_seconds,
+                    )
+                    retrieval = RequestOutcome(0, "completed", text=text)
+                except Exception as error:
+                    retrieval = RequestOutcome(0, "failed", error_type=_retrieval_error_type(error))
+            else:
+                retrieval_id = self.services.coordinator.submit_retrieval(
+                    text_instance.instance_id, integrations,
+                )
+                retrieval = await self._wait_with_timeout(
+                    retrieval_id, self.config.search.timeout_seconds,
+                )
             if retrieval.status == "failed" and retrieval.error_type == "model_not_found":
                 await self._model_lifecycle.recover(
                     text_model_key,
@@ -499,7 +556,7 @@ class ApplicationRuntime(QObject):
                 self.application.ribbon.set_sources(integration.id for integration in integrations)
             else:
                 self.application.events.notification.emit(
-                    "Web retrieval unavailable; continuing without it."
+                    _retrieval_unavailable_message(retrieval.error_type, integrations[0].id)
                 )
                 self.application.ribbon.set_sources(())
         else:
@@ -509,26 +566,29 @@ class ApplicationRuntime(QObject):
             self.services.transcript_store,
             latest_question=question,
             search_results=search_results,
+            previous_answer=self._previous_answer,
         ).normal()
         model_key = (
-            self.config.lmstudio.vision_model
+            self.config.vision_model
             if image_path is not None
-            else self.config.lmstudio.text_model
+            else self.config.text_model
         )
         if not model_key:
-            model_key = self.config.lmstudio.text_model or self.config.lmstudio.vision_model
+            model_key = self.config.text_model or self.config.vision_model
         instance = self._instances[model_key]
         payload = await asyncio.to_thread(
             build_chat_payload,
             instance.instance_id,
-            context.prompt,
+            context,
             image_path,
         )
-        if manual_image_path is not None:
+        if manual_image_path is not None and image_path is not None:
             self.application.events.notification.emit("Screenshot added to the request.")
         self._set_state(ApplicationState.GENERATING)
         request_id = self.services.coordinator.submit(payload)
         outcome = await self.services.coordinator.wait(request_id)
+        if outcome.status == "completed":
+            self._previous_answer = outcome.text[:6000]
         if outcome.status == "failed" and outcome.error_type == "model_not_found":
             await self._model_lifecycle.recover(
                 model_key,
@@ -570,13 +630,14 @@ class ApplicationRuntime(QObject):
         payload = await asyncio.to_thread(
             build_chat_payload,
             instance.instance_id,
-            context.prompt,
+            context,
             prepared.image_path,
         )
         request_id = self.services.coordinator.submit(payload)
         outcome = await self.services.coordinator.wait(request_id)
         if outcome.status != "completed":
             raise RuntimeError("Recovered LM Studio request did not complete")
+        self._previous_answer = outcome.text[:6000]
 
     async def _wait_with_timeout(
         self,
@@ -604,7 +665,11 @@ class ApplicationRuntime(QObject):
         self._set_state(mapped)
 
     def _usable_image(self, result: CaptureResult) -> Path | None:
-        if result.status == "captured":
+        if (
+            result.status in ("captured", "duplicate")
+            and result.path is not None
+            and result.path.is_file()
+        ):
             return result.path
         if result.status == "protected":
             self.application.events.notification.emit(
@@ -663,6 +728,7 @@ class ApplicationRuntime(QObject):
             return
         self.application.ribbon.clear_answer()
         self.services.transcript_store.clear()
+        self._previous_answer = None
 
     @pyqtSlot()
     def _on_force_request(self) -> None:
@@ -717,6 +783,7 @@ class ApplicationRuntime(QObject):
             return
         self._manual_capture_generation += 1
         generation = self._manual_capture_generation
+        previous_image_path = self._manual_image_path
         self._manual_image_path = None
         self.application.events.notification.emit("Capturing screenshot...")
         try:
@@ -732,17 +799,27 @@ class ApplicationRuntime(QObject):
             return
         if generation != self._manual_capture_generation:
             return
-        if result.status != "captured" or result.path is None:
+        image_path = self._usable_image(result)
+        if (
+            image_path is None
+            and result.status == "duplicate"
+            and result.path is None
+            and previous_image_path is not None
+            and previous_image_path.is_file()
+        ):
+            image_path = previous_image_path
+        if image_path is None:
             self.application.events.notification.emit(
                 "Screenshot was not captured: screenshot unavailable."
             )
             return
-        self._manual_image_path = result.path
+        self._manual_image_path = image_path
         self.application.events.notification.emit(
             "Screenshot is ready for the next request."
         )
 
     def clear_history(self) -> None:
+        self._previous_answer = None
         self.services.transcript_store.clear()
 
     async def shutdown(self, *, close_application: bool = True) -> None:
@@ -851,6 +928,8 @@ class ApplicationRuntime(QObject):
         for name, operation in (
             ("capture", self.services.capture.shutdown),
             ("client", self.services.client.aclose),
+            *(([("retrieval", self.services.retrieval.aclose)])
+              if self.services.retrieval is not None else []),
         ):
             if name in self._shutdown_completed:
                 continue
@@ -861,6 +940,7 @@ class ApplicationRuntime(QObject):
             else:
                 self._shutdown_completed.add(name)
         self._manual_image_path = None
+        self._previous_answer = None
         self._started = False
 
         if errors:

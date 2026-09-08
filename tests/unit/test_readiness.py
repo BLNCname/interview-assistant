@@ -245,7 +245,7 @@ def test_catalog_is_complete_and_requires_injected_probes() -> None:
     assert tuple(check.name for check in checks) == READINESS_CHECK_NAMES
     assert calls == []
     assert not next(check for check in checks if check.name == "context7").required
-    assert not next(check for check in checks if check.name == "duckduckgo_mcp").required
+    assert not next(check for check in checks if check.name == "firecrawl_mcp").required
     assert not next(check for check in checks if check.name == "event_capture").required
     with pytest.raises(ValueError, match="Missing readiness probes"):
         build_readiness_checks({})

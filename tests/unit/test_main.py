@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from pathlib import Path
 
 import main as main_module
@@ -237,3 +238,58 @@ def test_main_exits_cleanly_when_qt_quits_during_initial_readiness(
     assert controller.initialized == 1
     assert controller.initialization_cancelled
     assert controller.shutdowns == 1
+
+
+def test_gui_uses_cli_config_and_removes_application_flags_from_qt(monkeypatch, tmp_path):
+    controller = _Controller()
+    selected = []
+    monkeypatch.setattr(main_module, "QApplication", _QtApplication)
+    monkeypatch.setattr(main_module, "QIcon", _Icon)
+    monkeypatch.setattr(main_module, "QEventLoop", _EventLoop)
+    monkeypatch.setattr(main_module.asyncio, "set_event_loop", lambda _loop: None)
+    monkeypatch.setattr(main_module, "create_production_controller",
+                        lambda _app, _loop, config_path: selected.append(config_path) or controller)
+    path = tmp_path / "custom.yaml"
+
+    assert main_module.main(["interview-assistant", "--config", str(path)]) == 0
+    assert selected == [path]
+    assert _QtApplication.created_argv == ["interview-assistant"]
+
+
+def test_self_test_returns_json_without_creating_gui_or_provider(monkeypatch, capsys, tmp_path):
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("self-test must not start GUI or provider services")
+
+    monkeypatch.setattr(main_module, "QApplication", forbidden)
+    monkeypatch.setattr(main_module, "create_production_controller", forbidden)
+    result = main_module.main(["interview-assistant", "--self-test", "--config",
+                               str(tmp_path / "config.yaml")])
+    report = json.loads(capsys.readouterr().out)
+    assert result == 0
+    assert report["status"] == "ok"
+    assert all(check["status"] == "passed" for check in report["checks"])
+
+
+def test_failed_startup_self_test_stops_before_gui_readiness(monkeypatch, capsys):
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("failed smoke checks must prevent GUI startup")
+
+    monkeypatch.setattr(main_module, "QApplication", forbidden)
+    monkeypatch.setattr(main_module, "run_fast_self_test", lambda **_kwargs: {
+        "status": "error", "checks": [{"id": "search_policy", "status": "failed"}],
+    }, raising=False)
+
+    assert main_module.main(["interview-assistant"]) == 1
+    assert "search_policy" in capsys.readouterr().out
+
+
+def test_retired_mcp_server_flag_is_rejected_before_self_tests_and_gui(monkeypatch, capsys):
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("Retired server command must not start any services")
+
+    monkeypatch.setattr(main_module, "QApplication", forbidden)
+    monkeypatch.setattr(main_module, "run_fast_self_test", forbidden, raising=False)
+    monkeypatch.setattr(main_module, "run_mcp_web_search_server", forbidden, raising=False)
+
+    assert main_module.main(["InterviewAssistant.exe", "--mcp-web-search-server"]) == 2
+    assert "--mcp-web-search-server" in capsys.readouterr().err

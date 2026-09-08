@@ -209,6 +209,36 @@ async def test_absent_device_metadata_is_allowed(origin: str) -> None:
 
 
 @pytest.mark.parametrize("origin", ["discovery", "load"])
+@pytest.mark.parametrize("preference", ["omitted", "config-default", "whitespace"])
+async def test_default_registry_accepts_another_gpu_and_preserves_reported_device(
+    origin: str, preference: str,
+) -> None:
+    from interview_assistant.config import AppConfig
+    from interview_assistant.lmstudio.registry import ModelRegistry
+
+    if origin == "discovery":
+        client = FakeLMStudioClient([[_model_details("qwen", _loaded_instance(
+            "qwen:existing", instance_extra={"device_name": "RTX 5070 Ti"},
+        ))]])
+    else:
+        client = FakeLMStudioClient([[], []], load_results={
+            "qwen": _load_result("qwen", result_extra={"device_name": "RTX 5070 Ti"}),
+        })
+    if preference == "omitted":
+        registry = ModelRegistry(client)
+    else:
+        selected = (
+            AppConfig().lmstudio.preferred_device_name if preference == "config-default" else "  "
+        )
+        registry = ModelRegistry(client, preferred_device_name=selected)
+
+    instance = await registry.ensure_ready("qwen")
+
+    assert instance.state == "ready"
+    assert instance.device_name == "RTX 5070 Ti"
+
+
+@pytest.mark.parametrize("origin", ["discovery", "load"])
 async def test_rejects_unexpected_device_from_discovery_or_load(origin: str) -> None:
     from interview_assistant.lmstudio.registry import (
         ModelRegistry,
@@ -241,7 +271,7 @@ async def test_rejects_unexpected_device_from_discovery_or_load(origin: str) -> 
         )
 
     with pytest.raises(UnexpectedModelDeviceError) as error:
-        await ModelRegistry(client).ensure_ready("qwen3.5")
+        await ModelRegistry(client, preferred_device_name="Strix Halo").ensure_ready("qwen3.5")
 
     assert error.value.key == "qwen3.5"
     assert error.value.expected_device_name == "Strix Halo"
@@ -283,7 +313,7 @@ async def test_validates_all_present_device_sources(origin: str) -> None:
         )
 
     with pytest.raises(UnexpectedModelDeviceError):
-        await ModelRegistry(client).ensure_ready("qwen3.5")
+        await ModelRegistry(client, preferred_device_name="Strix Halo").ensure_ready("qwen3.5")
 
 
 async def test_ignores_lookalike_undocumented_device_metadata() -> None:
@@ -546,7 +576,7 @@ async def test_failed_refresh_discards_stale_ready_cache_before_plain_retry(
             return outcome
 
     client = RefreshFailureClient()
-    registry = registry_module.ModelRegistry(client)
+    registry = registry_module.ModelRegistry(client, preferred_device_name="Strix Halo")
     cached = await registry.ensure_ready("qwen3.5")
     assert cached.instance_id == "qwen3.5:old"
 
