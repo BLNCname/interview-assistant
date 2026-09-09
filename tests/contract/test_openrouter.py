@@ -217,7 +217,19 @@ async def test_missing_key_fails_without_a_remote_request(token):
     async with provider.OpenRouterClient(token) as client:
         events = [event async for event in client.stream_chat(PAYLOAD)]
     assert len(events) == 1 and events[0].type == "error"
-    assert events[0].error.code == "authentication_error"
+    assert events[0].error.code == "missing_api_key"
+    assert not respx.calls
+
+
+@pytest.mark.parametrize("token", [None, "", "  "])
+@pytest.mark.parametrize("method_name", ["validate_credentials", "list_models"])
+@respx.mock
+async def test_discovery_without_key_reports_missing_configuration_before_network(token, method_name):
+    async with provider.OpenRouterClient(token) as client:
+        with pytest.raises(provider.OpenRouterError) as captured:
+            await getattr(client, method_name)()
+    assert captured.value.error.code == "missing_api_key"
+    assert captured.value.error.type == "invalid_request"
     assert not respx.calls
 
 
@@ -401,12 +413,13 @@ async def test_authentication_probe_checks_the_key_without_a_generation_request(
 async def test_authentication_probe_rejects_invalid_or_management_credentials(
     status, payload, code
 ):
-    respx.get(f"{BASE_URL}/key").respond(status, json=payload)
+    route = respx.get(f"{BASE_URL}/key").respond(status, json=payload)
     async with provider.OpenRouterClient("private-token") as client:
         with pytest.raises(provider.OpenRouterError) as captured:
             await client.validate_credentials()
     assert captured.value.error.code == code
     assert "private" not in str(captured.value)
+    assert route.call_count == 1
 
 
 @respx.mock

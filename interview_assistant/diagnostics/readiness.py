@@ -9,6 +9,37 @@ from typing import Literal
 ReadinessStatus = Literal["ready", "warning", "failed"]
 ReadinessProbe = Callable[[], Awaitable["ProbeOutcome"]]
 
+# Never display exception text here, even for typed provider exceptions. Only
+# these application-authored descriptions can cross the diagnostic UI boundary.
+_OPENROUTER_FAILURES = {
+    "missing_api_key": (
+        "OpenRouter API key is not configured. Select OpenRouter in Models, "
+        "then paste the key and run checks again."
+    ),
+    "authentication_error": (
+        "OpenRouter rejected the API key. Check that you pasted an active inference "
+        "key without quotes or the Bearer prefix, then Save."
+    ),
+    "permission_denied": (
+        "OpenRouter denied access. Check API key permissions, account access and "
+        "whether this is an inference key rather than a management key."
+    ),
+    "insufficient_credits": "OpenRouter has insufficient credits or the key's spending limit is reached.",
+    "rate_limit": "OpenRouter rate limit reached. Wait and run checks again.",
+    "connection_error": (
+        "OpenRouter connection failed. Check internet access, DNS and TLS; "
+        "a browser connection alone may use different network settings."
+    ),
+    "timeout": "OpenRouter request timed out. Check the connection and run checks again.",
+    "provider_unavailable": "OpenRouter or the selected provider is unavailable. Try again later.",
+    "model_not_found": (
+        "OpenRouter endpoint or model is unavailable. Check service access "
+        "and the exact selected model ID."
+    ),
+    "invalid_request": "OpenRouter rejected the model or request parameters. Check the selected model.",
+    "invalid_response": "OpenRouter returned an unexpected response. Check service and network access.",
+}
+
 
 @dataclass(frozen=True, slots=True)
 class ProbeOutcome:
@@ -120,6 +151,9 @@ class ReadinessRunner:
         return ReadinessReport(tuple(results))
 
     async def _run_check(self, check: ReadinessCheck) -> CheckResult:
+        # Keep network dependencies out of the cheap offline --self-test path.
+        from interview_assistant.providers.openrouter import OpenRouterError
+
         started = self._clock()
         timed_out = False
         try:
@@ -134,6 +168,11 @@ class ReadinessRunner:
             )
         except asyncio.CancelledError:
             raise
+        except OpenRouterError as error:
+            outcome = ProbeOutcome("failed", _OPENROUTER_FAILURES.get(
+                error.error.code or "",
+                "OpenRouter request failed. Check the provider settings and run checks again.",
+            ))
         except Exception as error:
             # Probe exception text may contain a token, URL, device name, or transcript.
             outcome = ProbeOutcome("failed", f"{type(error).__name__}: readiness probe failed")

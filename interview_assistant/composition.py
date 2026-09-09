@@ -136,11 +136,15 @@ async def _warm_model(client: _StreamingClient, instance: ModelInstance) -> floa
         if event.type == "message.delta" and first_delta_ms is None:
             first_delta_ms = (perf_counter() - started) * 1_000
         elif event.type == "error":
-            raise RuntimeError("LM Studio warm-up returned an error")
+            from interview_assistant.providers.openrouter import OpenRouterClient, OpenRouterError
+
+            if isinstance(client, OpenRouterClient) and event.error is not None:
+                raise OpenRouterError(event.error)
+            raise RuntimeError("Provider warm-up returned an error")
         elif event.type == "chat.end":
             saw_end = True
     if not saw_end:
-        raise RuntimeError("LM Studio warm-up ended without chat.end")
+        raise RuntimeError("Provider warm-up ended without chat.end")
     return first_delta_ms
 
 
@@ -917,5 +921,5 @@ def create_production_controller(
         loop=loop,
     )
     if startup_message is not None:
-        settings.show_notification(startup_message)
+        settings.show_notification(startup_message, configuration_issue=True)
     return controller

@@ -163,8 +163,9 @@ def test_environment_key_still_works_when_credential_manager_cannot_be_read(
     assert getattr(SecretStore(), f"get_{method}_token")() == "external-fallback"
 
 
+@pytest.mark.parametrize("action", ["save", "run_checks"])
 async def test_saving_model_provider_key_rebuilds_with_correct_fresh_credential(
-    qtbot, tmp_path, credential_backend,
+    qtbot, tmp_path, credential_backend, action,
 ):
     from interview_assistant.app import InterviewApplication
     from interview_assistant.composition import ApplicationController
@@ -177,6 +178,9 @@ async def test_saving_model_provider_key_rebuilds_with_correct_fresh_credential(
     received = []
 
     def build(candidate, token):
+        persisted = (tmp_path / "config.yaml").read_text(encoding="utf-8")
+        assert f"provider: {candidate.provider}" in persisted
+        assert token not in persisted
         received.append((candidate.provider, token))
         return _Components(_report())
 
@@ -190,7 +194,7 @@ async def test_saving_model_provider_key_rebuilds_with_correct_fresh_credential(
         ):
             window.provider_combo.setCurrentIndex(window.provider_combo.findData(provider))
             window.token_edit.setText(token)
-            assert window.save()
+            assert getattr(window, action)()
             task = controller._readiness_task
             assert task is not None
             await asyncio.wait_for(task, timeout=2)

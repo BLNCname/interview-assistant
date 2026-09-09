@@ -5,7 +5,7 @@ param(
     [Parameter(Mandatory = $true)][string]$InventoryPath,
     [Parameter(Mandatory = $true)][string]$CollectTocPath,
     [Parameter(Mandatory = $true)][string]$OutputPath,
-    [ValidatePattern('^\d+\.\d+\.\d+$')][string]$Version = '0.1.3',
+    [ValidatePattern('^\d+\.\d+\.\d+$')][string]$Version = '0.1.4',
     [string]$CachePath = ''
 )
 

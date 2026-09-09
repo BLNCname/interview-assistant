@@ -79,15 +79,15 @@ STT_COMPUTE_TYPE=int8_float16
   -DistPath dist/InterviewAssistant `
   -InventoryPath build/release-inventory.json `
   -CollectTocPath build/pyinstaller/interview_assistant/COLLECT-00.toc `
-  -OutputPath dist/online-installer-0.1.3 `
-  -Version 0.1.3
+  -OutputPath dist/online-installer-0.1.4 `
+  -Version 0.1.4
 ```
 
 `build_online_installer.ps1` проверяет исходный portable по описи и STT manifest, сопоставляет его файлы с закреплёнными wheel-архивами из `uv.lock`, получает и проверяет архивы, затем компилирует **один `Setup.exe`**. Код приложения и базовый Python включаются в него; публичные зависимости и модель загружаются во время установки. Не создавайте опись лишь ради обхода несовпадения неизвестных файлов.
 
 Кеш издателя по умолчанию — `build/online-installer-cache`; другой каталог задаётся через `-CachePath`. Это отдельный кеш от пользовательского `%LOCALAPPDATA%\InterviewAssistant\InstallerCache`. В каталоге результата также остаются manifest, журналы и `SHA256SUMS.txt` для проверки издателем. В Assets релиза публикуется только `Setup.exe`, а его SHA-256 переносится в описание релиза.
 
-Устройство загрузок, ограничения кеша и публичные источники описаны в [ONLINE_INSTALLER_RU.md](ONLINE_INSTALLER_RU.md). Старый `build_installer.ps1` сохранён для прежнего офлайн-формата и не является основным способом подготовки релиза 0.1.3.
+Устройство загрузок, ограничения кеша и публичные источники описаны в [ONLINE_INSTALLER_RU.md](ONLINE_INSTALLER_RU.md). Старый `build_installer.ps1` сохранён для прежнего офлайн-формата и не является основным способом подготовки релиза 0.1.4.
 
 Для проверки install → diagnostics → uninstall существует `scripts/smoke_installer.ps1`. Он использует отдельный каталог внутри `build` и отказывается работать при наличии установленного приложения с тем же AppId. Для сетевого выпуска дополнительно проверьте загрузку с пустым кешем, повторный запуск с кешем и отказ при повреждённом файле. Наличие собранного `Setup.exe` само по себе не подтверждает эти проверки.
 

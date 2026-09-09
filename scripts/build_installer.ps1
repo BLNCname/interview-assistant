@@ -5,7 +5,7 @@ param(
     [string]$IsccPath,
 
     [ValidatePattern("^[0-9A-Za-z][0-9A-Za-z._+-]*$")]
-    [string]$Version = "0.1.3",
+    [string]$Version = "0.1.4",
 
     [string]$DistPath = "",
 

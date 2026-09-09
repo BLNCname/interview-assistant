@@ -329,6 +329,7 @@ class SettingsWindow(QMainWindow):
             else QSettings("InterviewAssistant", "InterviewAssistant")
         )
         self._readiness_report: ReadinessReport | None = None
+        self._configuration_issue_notification = False
         self._selected_provider = binding.config.provider
         self._model_drafts = {
             name: (
@@ -1001,7 +1002,8 @@ class SettingsWindow(QMainWindow):
             self.readiness_status_label.setText("Readiness: ready")
             self._set_start_available(True, "Ready to start.")
 
-    def show_notification(self, message: str) -> None:
+    def show_notification(self, message: str, *, configuration_issue: bool = False) -> None:
+        self._configuration_issue_notification = configuration_issue
         self.notification_label.setText(str(message))
         self.notification_label.show()
         self.navigation_list.setCurrentRow(self.page_stack.indexOf(self.diagnostics_page))
@@ -1079,6 +1081,10 @@ class SettingsWindow(QMainWindow):
             self.context7_remove_token_checkbox,
         ):
             removal.setChecked(False)
+        if self._configuration_issue_notification:
+            self.notification_label.clear()
+            self.notification_label.hide()
+            self._configuration_issue_notification = False
         self._update_shared_instance_annotation()
         self.settings_saved.emit()
         if requires_readiness and request_readiness:

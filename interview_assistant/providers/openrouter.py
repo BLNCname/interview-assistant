@@ -242,7 +242,11 @@ class OpenRouterClient:
 
     def _require_token(self) -> None:
         if not self._has_token:
-            raise _status_error(401)
+            raise _error(
+                "missing_api_key",
+                "OpenRouter API key is not configured. Select OpenRouter and save your API key.",
+                kind="invalid_request",
+            )
 
     async def _get_json(self, path: str) -> dict:
         self._require_token()
