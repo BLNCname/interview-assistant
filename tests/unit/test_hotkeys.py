@@ -191,8 +191,7 @@ def test_chord_normalizes_left_right_modifiers_and_distinguishes_function_keys()
     right = HotkeyChord.parse("control+alt+f10")
 
     assert left == right
-    assert left.modifiers == frozenset({"ctrl", "alt"})
-    assert left.key == "f10"
+    assert left.keys == frozenset({"ctrl", "alt", "f10"})
     assert HotkeyChord.parse("ctrl+alt+f10") != HotkeyChord.parse("ctrl+alt+f11")
 
 
@@ -200,11 +199,9 @@ def test_chord_normalizes_left_right_modifiers_and_distinguishes_function_keys()
     "invalid",
     [
         "",
-        "a",
-        "f10",
-        "ctrl",
-        "ctrl+shift",
-        "ctrl+a+b",
+        "unknown_button",
+        "a+a",
+        "mouse_x9",
         "ctrl++a",
         "ctrl+control+a",
     ],
@@ -317,6 +314,28 @@ def test_all_actions_emit_only_their_event_bus_signal(qtbot) -> None:
         assert received[-1] == expected
 
     assert received == list(signal_names.values())
+
+
+def test_mouse_and_keyboard_chords_share_one_runtime_state():
+    events = EventBus()
+    calls = []
+    events.screenshot_requested.connect(lambda: calls.append("single"))
+    events.pause_toggled.connect(lambda: calls.append("mixed"))
+    factory = ListenerFactory()
+    manager = HotkeyManager(events, {"screenshot": "mouse_x1", "pause": "a+mouse_x1"},
+                            listener_factory=factory)
+    manager.start()
+    listener = factory.listeners[0]
+    listener.on_press("mouse_x1")
+    assert not calls
+    listener.on_press("a")
+    listener.on_press("a")
+    listener.on_release("mouse_x1")
+    listener.on_release("a")
+    listener.on_press("mouse_x1")
+    listener.on_release("mouse_x1")
+    manager.stop()
+    assert calls == ["mixed", "single"]
 
 
 def test_listener_lifecycle_is_idempotent_and_can_restart() -> None:

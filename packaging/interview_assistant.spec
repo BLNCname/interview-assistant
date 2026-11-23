@@ -6,7 +6,7 @@ import os
 import sys
 from pathlib import Path
 
-from PyInstaller.utils.hooks import collect_all, copy_metadata, get_package_paths
+from PyInstaller.utils.hooks import collect_all, collect_dynamic_libs, copy_metadata, get_package_paths
 
 
 ROOT = Path(SPECPATH).resolve().parent
@@ -56,6 +56,8 @@ DISTRIBUTIONS = (
     "keyring",
     "PyAudioWPatch",
     "pynput",
+    "openvino",
+    "onnxruntime-directml",
     "mcp",
     "python-dotenv",
     "nvidia-cuda-runtime-cu12",
@@ -93,10 +95,11 @@ datas = [
     (str(ROOT / "assets" / "diagnostics" / "stt-ru.wav"), "assets/diagnostics"),
     (str(ROOT / "assets" / "branding" / "interview-assistant.ico"), "assets/branding"),
     (str(MANIFEST_PATH), "packaging"),
+    (str(ROOT / "packaging" / "stt_catalog.json"), "packaging"),
     (str(ROOT / "prompts" / "interview_system.md"), "prompts"),
 ]
 datas.extend(_optional_stt_bundle_datas())
-binaries = []
+binaries = collect_dynamic_libs("openvino")
 hiddenimports = []
 for package in PACKAGES:
     # Collect the MCP client transports, leaving normal import analysis to keep
@@ -118,6 +121,7 @@ hiddenimports.extend(
         "keyring.backends.Windows",
         "keyring.backends.fail",
         "pynput.keyboard._win32",
+        "pynput.mouse._win32",
         "interview_assistant.diagnostics.selftest",
         "interview_assistant.diagnostics.cli",
     )

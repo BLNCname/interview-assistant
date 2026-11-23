@@ -1,0 +1,132 @@
+{
+  "tiny": {
+    "model": {
+      "repository": "Systran/faster-whisper-tiny",
+      "revision": "d90ca5fe260221311c53c58e660288d3deb8d356",
+      "files": [
+        {
+          "path": "config.json",
+          "size": 2249,
+          "sha256": "a73a28cdfe1c43ccc7202fa333d1f89c202477271407ae9a7f19afa52039cac8"
+        },
+        {
+          "path": "model.bin",
+          "size": 75538270,
+          "sha256": "dcb76c6586fc06cbdac6dd21f14cfd129cc4cdd9dce19bf4ffa62e59cbe6e6d1"
+        },
+        {
+          "path": "tokenizer.json",
+          "size": 2203239,
+          "sha256": "fb7b63191e9bb045082c79fd742a3106a12c99513ab30df4a0d47fa6cb6fd0ab"
+        },
+        {
+          "path": "vocabulary.txt",
+          "size": 459861,
+          "sha256": "34ce3fe1c5041027b3f8d42912270993f986dbc4bb34cf27f951e34a1e453913"
+        }
+      ]
+    },
+    "encoder": {
+      "repository": "onnx-community/whisper-tiny",
+      "revision": "ff4177021cc41f7db950912b73ea4fdf7d01d8e7",
+      "files": [
+        {
+          "path": "onnx/encoder_model_fp16.onnx",
+          "size": 16519192,
+          "sha256": "fc4bf9f3fadc450b128c3ef0711a4e61a55797447b6a700abe7fb97d9f549518"
+        }
+      ]
+    }
+  },
+  "base": {
+    "model": {
+      "repository": "Systran/faster-whisper-base",
+      "revision": "ebe41f70d5b6dfa9166e2c581c45c9c0cfc57b66",
+      "files": [
+        {
+          "path": "config.json",
+          "size": 2309,
+          "sha256": "56a6d8110d311f19c8f0471e562832c7527f146b567275bfca59fcf7c184da9a"
+        },
+        {
+          "path": "model.bin",
+          "size": 145217532,
+          "sha256": "d01c3014881c9c6f3133c182f3d2887eb6ca1c789a7538c5c007196857a0a6a9"
+        },
+        {
+          "path": "tokenizer.json",
+          "size": 2203239,
+          "sha256": "fb7b63191e9bb045082c79fd742a3106a12c99513ab30df4a0d47fa6cb6fd0ab"
+        },
+        {
+          "path": "vocabulary.txt",
+          "size": 459861,
+          "sha256": "34ce3fe1c5041027b3f8d42912270993f986dbc4bb34cf27f951e34a1e453913"
+        }
+      ]
+    },
+    "encoder": {
+      "repository": "onnx-community/whisper-base",
+      "revision": "27a07b4b52b3a4c5886134bb4320e93e1a4bbc7c",
+      "files": [
+        {
+          "path": "onnx/encoder_model_fp16.onnx",
+          "size": 41332612,
+          "sha256": "ffba51b20185377c1b89362b1128148d0132de936a32b200af973da2a11a5369"
+        }
+      ]
+    }
+  },
+  "small": {
+    "model": {
+      "repository": "Systran/faster-whisper-small",
+      "revision": "536b0662742c02347bc0e980a01041f333bce120",
+      "files": [
+        {
+          "path": "config.json",
+          "size": 2370,
+          "sha256": "b55496ac7940a7ae47d2c01eab40edfd8701feec1229d9cce3b40014383fb828"
+        },
+        {
+          "path": "model.bin",
+          "size": 483546902,
+          "sha256": "3e305921506d8872816023e4c273e75d2419fb89b24da97b4fe7bce14170d671"
+        },
+        {
+          "path": "tokenizer.json",
+          "size": 2203239,
+          "sha256": "fb7b63191e9bb045082c79fd742a3106a12c99513ab30df4a0d47fa6cb6fd0ab"
+        },
+        {
+          "path": "vocabulary.txt",
+          "size": 459861,
+          "sha256": "34ce3fe1c5041027b3f8d42912270993f986dbc4bb34cf27f951e34a1e453913"
+        }
+      ]
+    },
+    "encoder": {
+      "repository": "onnx-community/whisper-small",
+      "revision": "36050c46d777d46dc4b5f43f6d90574fc38f8732",
+      "files": [
+        {
+          "path": "onnx/encoder_model_fp16.onnx",
+          "size": 176607756,
+          "sha256": "5549cd8666ff4b694ceb128bfa48b95bdcceec29075cf2c2212f90002cc058de"
+        }
+      ]
+    }
+  },
+  "large-v3-turbo": {
+    "encoder": {
+      "repository": "onnx-community/whisper-large-v3-turbo",
+      "revision": "360ebcde2559d60bb474678be3c1de9ef347d01a",
+      "files": [
+        {
+          "path": "onnx/encoder_model_fp16.onnx",
+          "size": 1274342603,
+          "sha256": "fdadc70836e6b028fd5e580417c312208dad073d2d01e509e2d127c1373399d8"
+        }
+      ]
+    }
+  }
+}

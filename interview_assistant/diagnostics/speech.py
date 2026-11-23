@@ -1,6 +1,7 @@
 """Small bilingual speech checks against the same decoder used by the session."""
 
 import asyncio
+from difflib import SequenceMatcher
 import json
 from pathlib import Path
 import re
@@ -10,6 +11,10 @@ import wave
 import numpy as np
 
 from interview_assistant.stt.engine import TranscriptionEngine
+
+
+class FixtureWordMismatch(ValueError):
+    """A lightweight model recognized the sentence with word errors."""
 
 
 class SpeechFixtureProbe:
@@ -57,4 +62,13 @@ class SpeechFixtureProbe:
             language=language, multilingual=False,
         )
         words = set(re.findall(r"\w+", result.text.casefold()))
-        return bool(words) and all(word.casefold() in words for word in fixture["keywords"])
+        if all(word.casefold() in words for word in fixture["keywords"]):
+            return True
+        if getattr(self.engine, "model_name", "") in {"tiny", "base", "small"}:
+            expected = re.findall(r"\w+", fixture["text"].casefold())
+            heard = re.findall(r"\w+", result.text.casefold())
+            if len(words.intersection(fixture["keywords"])) >= 2 and SequenceMatcher(
+                None, " ".join(expected), " ".join(heard)
+            ).ratio() >= 0.8:
+                raise FixtureWordMismatch
+        return False

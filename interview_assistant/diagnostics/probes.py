@@ -246,6 +246,12 @@ class ProductionReadinessProbes:
         return ProbeOutcome("ready", "Selected microphone is available")
 
     async def _cuda_stt(self) -> ProbeOutcome:
+        if self.config.audio.device in {"openvino", "directml"}:
+            from interview_assistant.stt.download import GPU_ENCODERS
+
+            await self._warm_stt()
+            name = GPU_ENCODERS[self.config.audio.device]
+            return ProbeOutcome("ready", f"{name} GPU encoder and CPU decoder completed inference")
         if self.config.audio.device == "cpu":
             await self._warm_stt()
             return ProbeOutcome("warning", "CPU STT inference passed; expect higher latency")
@@ -271,6 +277,8 @@ class ProductionReadinessProbes:
         await self.stt_warm_up()
 
     async def _stt_language(self, language: str) -> ProbeOutcome:
+        from .speech import FixtureWordMismatch
+
         fixture = self.stt_fixture
         if fixture is None:
             return ProbeOutcome(
@@ -278,7 +286,10 @@ class ProductionReadinessProbes:
                 f"{language.upper()} STT fixture was not verified on this machine",
             )
         async with self._fixture_lock:
-            passed = await fixture(language)
+            try:
+                passed = await fixture(language)
+            except FixtureWordMismatch:
+                return ProbeOutcome("warning", f"{language.upper()} speech recognized with word errors. A larger model may improve accuracy.")
         if not passed:
             return ProbeOutcome("failed", f"{language.upper()} STT fixture did not pass")
         return ProbeOutcome("ready", f"{language.upper()} STT fixture passed")

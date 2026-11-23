@@ -5,7 +5,6 @@ import re
 
 import pytest
 from PyQt6.QtCore import QByteArray, QSettings, QSize, Qt
-from PyQt6.QtGui import QKeySequence
 from PyQt6.QtWidgets import QGroupBox, QLabel, QPushButton
 
 import interview_assistant.ui.settings as settings_ui
@@ -97,12 +96,60 @@ def _window(
 
 
 def _hotkey_text(window: SettingsWindow, action: HotkeyAction) -> str:
-    return (
-        window.hotkey_edits[action]
-        .keySequence()
-        .toString(QKeySequence.SequenceFormat.PortableText)
-        .casefold()
-    )
+    return window.hotkey_edits[action].binding.casefold()
+
+
+def test_audio_roles_refresh_and_old_wrong_role(qtbot, tmp_path):
+    window, _, _, _ = _window(qtbot, tmp_path)
+    window.system_device_combo.setCurrentIndex(window.system_device_combo.findData("mic-1"))
+    window.set_audio_choices((SettingsChoice("system-1", "USB headset", True),
+                              SettingsChoice("mic-1", "USB headset", False)))
+    assert window.system_device_combo.findData("mic-1") == -1
+    assert window.microphone_device_combo.findData("system-1") == -1
+    assert window.system_device_combo.currentData() is None
+
+
+def test_saved_stt_selection_survives_dotenv_defaults_and_legacy_duplicate(qtbot, tmp_path):
+    config_path = tmp_path / "settings.yaml"
+    config_path.write_text("audio: {system_device_id: '4', microphone_device_id: '4'}", encoding="utf-8")
+    (tmp_path / ".env").write_text("STT_DEVICE=cuda\nSTT_MODEL=large-v3-turbo\n", encoding="utf-8")
+    config = AppConfig.load(config_path)
+    assert config.audio.microphone_device_id is None
+    window, _, _, _ = _window(qtbot, tmp_path, config=config)
+    window.stt_device_combo.setCurrentIndex(window.stt_device_combo.findData("openvino"))
+    window.stt_model_combo.setCurrentIndex(window.stt_model_combo.findData("base"))
+    assert window.save()
+    config.save(config_path)
+    audio = AppConfig.load(config_path).audio
+    assert (audio.device, audio.stt_model, audio.compute_type) == ("openvino", "base", "int8")
+
+
+def test_shortcut_recorder_waits_for_last_release_and_saves_mouse(qtbot, tmp_path):
+    from PyQt6.QtCore import QTimer
+    from PyQt6.QtWidgets import QApplication
+    from interview_assistant.ui.hotkey_recorder import HotkeyRecorder
+
+    window, binding, _, _ = _window(qtbot, tmp_path)
+    button = window.hotkey_edits[HotkeyAction.PAUSE]
+    window.navigation_list.setCurrentRow(window.page_stack.indexOf(window.hotkeys_page))
+    window.show()
+    observed = []
+
+    def input_chord():
+        dialog = QApplication.activeModalWidget()
+        assert isinstance(dialog, HotkeyRecorder)
+        qtbot.keyPress(dialog, Qt.Key.Key_Control)
+        qtbot.mousePress(dialog.preview, Qt.MouseButton.BackButton)
+        qtbot.keyRelease(dialog, Qt.Key.Key_Control)
+        observed.append(dialog.isVisible())
+        qtbot.mouseRelease(dialog.preview, Qt.MouseButton.BackButton)
+
+    QTimer.singleShot(30, input_chord)
+    qtbot.mouseClick(button, Qt.MouseButton.LeftButton)
+    assert observed == [True]
+    assert button.binding == "ctrl+mouse_x1"
+    assert window.save()
+    assert binding.config.hotkeys.pause == "ctrl+mouse_x1"
 
 
 def test_settings_uses_approved_a1_sidebar_pages(qtbot, tmp_path) -> None:
@@ -297,7 +344,7 @@ def test_settings_exposes_every_hotkey_with_help_text(qtbot, tmp_path) -> None:
 
 def test_restore_default_hotkeys_updates_all_editors(qtbot, tmp_path) -> None:
     window, _, _, _ = _window(qtbot, tmp_path)
-    window.hotkey_edits[HotkeyAction.SCREENSHOT].setKeySequence("Ctrl+Alt+F11")
+    window.hotkey_edits[HotkeyAction.SCREENSHOT].set_binding("Ctrl+Alt+F11")
 
     window.restore_default_hotkeys()
 
@@ -307,8 +354,8 @@ def test_restore_default_hotkeys_updates_all_editors(qtbot, tmp_path) -> None:
 
 def test_duplicate_hotkeys_are_named_and_not_saved(qtbot, tmp_path) -> None:
     window, binding, _, _ = _window(qtbot, tmp_path)
-    window.hotkey_edits[HotkeyAction.FORCE_REQUEST].setKeySequence("Ctrl+Alt+F10")
-    window.hotkey_edits[HotkeyAction.SCREENSHOT].setKeySequence("Ctrl+Alt+F10")
+    window.hotkey_edits[HotkeyAction.FORCE_REQUEST].set_binding("Ctrl+Alt+F10")
+    window.hotkey_edits[HotkeyAction.SCREENSHOT].set_binding("Ctrl+Alt+F10")
 
     assert not window.save()
 
@@ -318,14 +365,14 @@ def test_duplicate_hotkeys_are_named_and_not_saved(qtbot, tmp_path) -> None:
 
 def test_valid_hotkeys_are_persisted_with_other_settings(qtbot, tmp_path) -> None:
     window, binding, _, _ = _window(qtbot, tmp_path)
-    window.hotkey_edits[HotkeyAction.OVERLAY_VISIBILITY].setKeySequence("Ctrl+Alt+F9")
+    window.hotkey_edits[HotkeyAction.OVERLAY_VISIBILITY].set_binding("Ctrl+Alt+F9")
 
     assert window.save()
 
     assert binding.config.hotkeys.overlay_visibility == "ctrl+alt+f9"
 
 
-@pytest.mark.parametrize("sequence", ["", "Ctrl", "Ctrl++"])
+@pytest.mark.parametrize("sequence", ["", "not_a_key", "Ctrl++"])
 def test_invalid_hotkey_identifies_its_settings_row(
     qtbot,
     tmp_path,
@@ -333,7 +380,7 @@ def test_invalid_hotkey_identifies_its_settings_row(
 ) -> None:
     window, binding, _, _ = _window(qtbot, tmp_path)
     action = HotkeyAction.FORCE_REQUEST
-    window.hotkey_edits[action].setKeySequence(sequence)
+    window.hotkey_edits[action].set_binding(sequence)
 
     assert not window.save()
 
@@ -364,7 +411,7 @@ def test_hotkey_only_save_updates_live_map_without_invalidating_readiness(
     reruns: list[bool] = []
     window.readiness_requested.connect(lambda: reruns.append(True))
 
-    window.hotkey_edits[HotkeyAction.SCREENSHOT].setKeySequence("Ctrl+Alt+F11")
+    window.hotkey_edits[HotkeyAction.SCREENSHOT].set_binding("Ctrl+Alt+F11")
     assert window.save()
 
     assert live_updates == [config.hotkeys.as_bindings()]
@@ -400,7 +447,7 @@ def test_run_checks_with_hotkey_only_edit_saves_and_requests_readiness_once(
     window.settings_saved.connect(lambda: saved.append(True))
     window.readiness_requested.connect(lambda: reruns.append(True))
 
-    window.hotkey_edits[HotkeyAction.SCREENSHOT].setKeySequence("Ctrl+Alt+F11")
+    window.hotkey_edits[HotkeyAction.SCREENSHOT].set_binding("Ctrl+Alt+F11")
     window.readiness_button.click()
 
     assert persisted == [config]
@@ -468,8 +515,8 @@ def test_run_checks_validation_failure_does_not_save_or_request_readiness(
     reruns: list[bool] = []
     window.settings_saved.connect(lambda: saved.append(True))
     window.readiness_requested.connect(lambda: reruns.append(True))
-    window.hotkey_edits[HotkeyAction.SCREENSHOT].setKeySequence("Ctrl+Alt+F11")
-    window.hotkey_edits[HotkeyAction.PAUSE].setKeySequence("Ctrl+Alt+F11")
+    window.hotkey_edits[HotkeyAction.SCREENSHOT].set_binding("Ctrl+Alt+F11")
+    window.hotkey_edits[HotkeyAction.PAUSE].set_binding("Ctrl+Alt+F11")
 
     window.readiness_button.click()
 
@@ -505,7 +552,7 @@ def test_hotkey_manager_failure_restores_previous_live_map_and_config(
         settings=QSettings(str(tmp_path / "manager-failure.ini"), QSettings.Format.IniFormat),
     )
     qtbot.addWidget(window)
-    window.hotkey_edits[HotkeyAction.SCREENSHOT].setKeySequence("Ctrl+Alt+F11")
+    window.hotkey_edits[HotkeyAction.SCREENSHOT].set_binding("Ctrl+Alt+F11")
 
     assert not window.save()
 
@@ -538,7 +585,7 @@ def test_hotkey_persistence_failure_restores_previous_live_map_and_config(
         settings=QSettings(str(tmp_path / "persistence-failure.ini"), QSettings.Format.IniFormat),
     )
     qtbot.addWidget(window)
-    window.hotkey_edits[HotkeyAction.SCREENSHOT].setKeySequence("Ctrl+Alt+F11")
+    window.hotkey_edits[HotkeyAction.SCREENSHOT].set_binding("Ctrl+Alt+F11")
 
     assert not window.save()
 
@@ -563,8 +610,8 @@ def test_custom_hotkeys_save_to_disk_and_reload(qtbot, tmp_path: Path) -> None:
         settings=QSettings(str(tmp_path / "reload.ini"), QSettings.Format.IniFormat),
     )
     qtbot.addWidget(window)
-    window.hotkey_edits[HotkeyAction.SCREENSHOT].setKeySequence("Ctrl+Alt+F11")
-    window.hotkey_edits[HotkeyAction.PAUSE].setKeySequence("Alt+Shift+F12")
+    window.hotkey_edits[HotkeyAction.SCREENSHOT].set_binding("Ctrl+Alt+F11")
+    window.hotkey_edits[HotkeyAction.PAUSE].set_binding("Alt+Shift+F12")
 
     assert window.save()
 

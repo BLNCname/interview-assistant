@@ -189,6 +189,7 @@ begin
   Installed := 0;
   SetArrayLength(PayloadCacheHits, GetArrayLength(Artifacts));
   for I := 0 to GetArrayLength(Artifacts) - 1 do begin
+    if (Artifacts[I].Kind = 'file') and not WizardIsTaskSelected('preloadstt') then Continue;
     PayloadCacheHits[I] := PayloadFileMatches(ArtifactCachePath(I), Artifacts[I].SHA256, Artifacts[I].Size);
     if not PayloadCacheHits[I] then begin
       Missing := Missing + Artifacts[I].Size;
@@ -199,7 +200,8 @@ begin
       Staging := Staging + Artifacts[I].ExpandedSize;
   end;
   for I := 0 to GetArrayLength(PayloadFiles) - 1 do
-    Installed := Installed + PayloadFiles[I].Size;
+    if (Artifacts[PayloadFiles[I].ArtifactIndex].Kind = 'wheel') or WizardIsTaskSelected('preloadstt') then
+      Installed := Installed + PayloadFiles[I].Size;
   Locations[0] := PayloadCacheRoot;
   Locations[1] := ExpandConstant('{tmp}');
   Locations[2] := ExpandConstant('{app}');
@@ -309,6 +311,7 @@ begin
   PayloadValidationPage.Show;
   try
     for I := 0 to GetArrayLength(PayloadFiles) - 1 do begin
+      if (Artifacts[PayloadFiles[I].ArtifactIndex].Kind = 'file') and not WizardIsTaskSelected('preloadstt') then Continue;
       PayloadValidationPage.SetText('Verifying prepared application files', PayloadFiles[I].RelativePath);
       PayloadValidationPage.SetProgress(I, GetArrayLength(PayloadFiles));
       if not PayloadFileMatches(GetPreparedFile(IntToStr(I)), PayloadFiles[I].SHA256, PayloadFiles[I].Size) then
@@ -344,7 +347,8 @@ begin
       RaiseException('Cannot create the installer download cache: ' + PayloadCacheRoot);
     CheckPayloadDiskSpace;
     for I := 0 to GetArrayLength(Artifacts) - 1 do
-      CachePayloadArtifact(I);
+      if (Artifacts[I].Kind = 'wheel') or WizardIsTaskSelected('preloadstt') then
+        CachePayloadArtifact(I);
     ExtractPayloadWheels;
     VerifyPreparedPayload;
     Log('All online payload files are prepared and verified; installation may begin.');
@@ -358,6 +362,6 @@ function UpdateReadyMemo(Space, NewLine, MemoUserInfoInfo, MemoDirInfoInfo, Memo
   MemoComponentsInfo, MemoGroupInfo, MemoTasksInfo: String): String;
 begin
   Result := MemoDirInfoInfo + NewLine + MemoGroupInfo + NewLine + MemoTasksInfo + NewLine + NewLine +
-    'Setup downloads and verifies the required dependencies and STT model before installation.' + NewLine +
+    'Setup verifies dependencies and any selected speech model before installation.' + NewLine +
     'Completed downloads are retained for retries and future installations in:' + NewLine + PayloadCacheRoot;
 end;

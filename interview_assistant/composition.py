@@ -202,6 +202,7 @@ class ProductionComponents:
             SettingsChoice(
                 device.id,
                 f"{device.name}{' (loopback)' if device.is_loopback else ''}",
+                is_loopback=device.is_loopback,
             )
             for device in devices
         )
@@ -329,6 +330,7 @@ def build_production_components(
         else WhisperEngine(
             config.audio.stt_model, device=config.audio.device,
             compute_type=config.audio.compute_type, language=config.audio.language,
+            allow_download=False, gpu_index=config.audio.gpu_index,
         )
     )
     stt = StreamingSTTWorker(

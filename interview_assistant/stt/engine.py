@@ -75,6 +75,8 @@ class WhisperEngine:
         compute_type: str = "float16",
         language: str = "auto",
         model_factory: _ModelFactory | None = None,
+        allow_download: bool = True,
+        gpu_index: int = 0,
     ) -> None:
         if language not in {"auto", "ru", "en"}:
             raise ValueError("language must be auto, ru, or en")
@@ -82,7 +84,9 @@ class WhisperEngine:
         self.device = device
         self.compute_type = compute_type
         self.language = language
-        self._model_factory = model_factory or _create_whisper_model
+        self._model_factory = model_factory
+        self._allow_download = allow_download
+        self._gpu_index = gpu_index
         self._model: _WhisperModel | None = None
         self._model_lock = Lock()
 
@@ -128,16 +132,31 @@ class WhisperEngine:
             return model
         with self._model_lock:
             if self._model is None:
-                resolved_model = resolve_stt_model(self.model_name)
+                factory = self._model_factory or _create_whisper_model
+                if self._model_factory is None:
+                    from .download import prepare_model
+
+                    resolved_model, encoder = prepare_model(
+                        self.model_name, self.device, download=self._allow_download,
+                    )
+                    if encoder is not None:
+                        from .gpu_encoder import GPUWhisperModel
+
+                        self._model = GPUWhisperModel(
+                            resolved_model, encoder, self.device, self.compute_type, self._gpu_index
+                        )
+                        return self._model
+                else:
+                    resolved_model = resolve_stt_model(self.model_name)
                 if resolved_model != self.model_name:
-                    self._model = self._model_factory(
+                    self._model = factory(
                         resolved_model,
                         device=self.device,
                         compute_type=self.compute_type,
                         local_files_only=True,
                     )
                 else:
-                    self._model = self._model_factory(
+                    self._model = factory(
                         resolved_model,
                         device=self.device,
                         compute_type=self.compute_type,

@@ -16,20 +16,37 @@ from interview_assistant.utils.hotkeys import (
 )
 
 
+STTDevice = Literal["cuda", "cpu", "openvino", "directml"]
+AudioPreference = Literal["system_device_id", "microphone_device_id", "language", "stt_model",
+                          "device", "compute_type", "gpu_index"]
+
+
 class AudioConfig(BaseModel):
     system_device_id: str | None = None
     microphone_device_id: str | None = None
     sample_rate: int = 16_000
     language: Literal["auto", "ru", "en"] = "auto"
     stt_model: str = "large-v3-turbo"
-    device: Literal["cuda", "cpu"] = "cuda"
+    device: STTDevice = "cuda"
+    gpu_index: int = Field(default=0, ge=0)
+    saved_preferences: list[AudioPreference] = Field(default_factory=list)
     compute_type: Literal["float16", "int8_float16", "int8", "float32"] = "float16"
 
     @model_validator(mode="after")
     def compatible_compute_type(self) -> "AudioConfig":
+        if self.system_device_id is not None and self.system_device_id == self.microphone_device_id:
+            raise ValueError("System audio and microphone must use different devices")
         if self.device == "cpu" and self.compute_type in {"float16", "int8_float16"}:
             raise ValueError("CPU STT requires int8 or float32 compute_type")
+        if self.device in {"openvino", "directml"} and self.compute_type not in {"int8", "float32"}:
+            raise ValueError("The GPU encoder requires int8 or float32 CPU decoding")
         return self
+
+
+def _repair_legacy_audio(data: object) -> None:
+    if isinstance(data, dict) and isinstance(audio := data.get("audio"), dict):
+        if audio.get("system_device_id") is not None and audio.get("system_device_id") == audio.get("microphone_device_id"):
+            audio["microphone_device_id"] = None
 
 
 class OpenRouterConfig(BaseModel):
@@ -162,6 +179,7 @@ class AppConfig(BaseModel):
     @classmethod
     def load(cls, path: Path, *, env_path: Path | None = None) -> "AppConfig":
         raw = (yaml.safe_load(path.read_text(encoding="utf-8")) or {}) if path.exists() else {}
+        _repair_legacy_audio(raw)
         # Validate YAML before applying environment values: never mask an invalid file.
         config = cls.model_validate(raw)
         selected_env = env_path or resolve_environment_path(path)
@@ -171,10 +189,13 @@ class AppConfig(BaseModel):
             if name not in values:
                 continue
             section, field = location
+            if section == "audio" and field in config.audio.saved_preferences and name not in os.environ:
+                continue
             if section is None:
                 data[field] = values[name]
             else:
                 data[section][field] = values[name]
+        _repair_legacy_audio(data)
         result = cls.model_validate(data)
         if result.mcp.config_path:
             mcp_path = Path(result.mcp.config_path).expanduser()

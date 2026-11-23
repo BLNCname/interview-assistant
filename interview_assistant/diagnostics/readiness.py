@@ -153,6 +153,7 @@ class ReadinessRunner:
     async def _run_check(self, check: ReadinessCheck) -> CheckResult:
         # Keep network dependencies out of the cheap offline --self-test path.
         from interview_assistant.providers.openrouter import OpenRouterError
+        from interview_assistant.stt.download import ModelUnavailable
 
         started = self._clock()
         timed_out = False
@@ -173,6 +174,8 @@ class ReadinessRunner:
                 error.error.code or "",
                 "OpenRouter request failed. Check the provider settings and run checks again.",
             ))
+        except ModelUnavailable as error:
+            outcome = ProbeOutcome("failed", str(error))
         except Exception as error:
             # Probe exception text may contain a token, URL, device name, or transcript.
             outcome = ProbeOutcome("failed", f"{type(error).__name__}: readiness probe failed")

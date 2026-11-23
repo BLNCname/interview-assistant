@@ -476,6 +476,8 @@ def write_outputs(payload: dict[str, Any], output: Path) -> None:
             source = f"{{code:GetPreparedFile|{external_index}}}"
             flags = "external ignoreversion"
             extra = f"; ExternalSize: {entry['size']}"
+            if payload["artifacts"][indexes[entry["artifact"]]]["kind"] == "file":
+                extra += "; Tasks: preloadstt"
             values = {
                 "RelativePath": relative,
                 "MemberPath": (entry["member"] or "").replace("/", "\\"),

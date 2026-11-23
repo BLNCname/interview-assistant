@@ -2,10 +2,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from collections.abc import Callable, Mapping
+from threading import Thread
 from typing import Literal, Protocol, cast
 
 from PyQt6.QtCore import QByteArray, QSettings, Qt, pyqtSignal
-from PyQt6.QtGui import QColor, QCloseEvent, QKeySequence, QShowEvent
+from PyQt6.QtGui import QColor, QCloseEvent, QShowEvent, QStandardItemModel
 from PyQt6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -15,7 +16,6 @@ from PyQt6.QtWidgets import (
     QGroupBox,
     QHBoxLayout,
     QHeaderView,
-    QKeySequenceEdit,
     QLabel,
     QLineEdit,
     QListWidget,
@@ -35,7 +35,10 @@ from interview_assistant.config import (
     HotkeysConfig,
     OverlayConfig,
     SearchConfig,
+    STTDevice,
 )
+from interview_assistant.stt.download import GPU_ENCODERS, MODEL_LABELS, ModelUnavailable, prepare_model
+from interview_assistant.ui.hotkey_recorder import HotkeyButton
 from interview_assistant.diagnostics.readiness import ReadinessReport
 from interview_assistant.ui.theme import apply_native_dark_title_bar, status_color
 from interview_assistant.utils.hotkeys import (
@@ -118,6 +121,7 @@ class SecretStoreProtocol(Protocol):
 class SettingsChoice:
     key: str
     label: str
+    is_loopback: bool | None = None
 
     def __post_init__(self) -> None:
         if not self.key.strip() or not self.label.strip():
@@ -193,9 +197,13 @@ class SettingsBinding:
         provider: Literal["lmstudio", "openrouter"] | None = None,
         model_selections: Mapping[str, tuple[str, str]] | None = None,
         mcp_backend: Literal["native", "lmstudio", "off"] | None = None,
-        stt_device: Literal["cuda", "cpu"] | None = None,
+        stt_device: STTDevice | None = None,
+        stt_model: str | None = None,
+        gpu_index: int | None = None,
         stt_compute_type: Literal["float16", "int8_float16", "int8", "float32"] | None = None,
     ) -> bool:
+        if system_device_id is not None and system_device_id == microphone_device_id:
+            raise ValueError("System audio and microphone must use different devices")
         active_provider = provider or self.config.provider
         audio = AudioConfig.model_validate(
             {
@@ -204,9 +212,15 @@ class SettingsBinding:
                 "microphone_device_id": microphone_device_id,
                 "language": language,
                 "device": stt_device or self.config.audio.device,
+                "stt_model": stt_model or self.config.audio.stt_model,
+                "gpu_index": self.config.audio.gpu_index if gpu_index is None else gpu_index,
                 "compute_type": stt_compute_type or self.config.audio.compute_type,
             }
         )
+        for field in ("system_device_id", "microphone_device_id", "language", "stt_model",
+                      "device", "compute_type", "gpu_index"):
+            if getattr(audio, field) != getattr(self.config.audio, field) and field not in audio.saved_preferences:
+                audio.saved_preferences.append(field)
         search = SearchConfig.model_validate(
             {**self.config.search.model_dump(), "mode": search_mode}
         )
@@ -307,6 +321,8 @@ class SettingsBinding:
 
 
 class SettingsWindow(QMainWindow):
+    download_progress = pyqtSignal(int)
+    download_finished = pyqtSignal(str)
     start_requested = pyqtSignal()
     settings_saved = pyqtSignal()
     readiness_requested = pyqtSignal()
@@ -574,24 +590,35 @@ class SettingsWindow(QMainWindow):
         audio.setObjectName("settingsCard")
         form = QFormLayout(audio)
 
-        self.system_device_combo = self._choice_combo(
-            audio_devices,
-            current=self._binding.config.audio.system_device_id,
-            empty_label="Not selected",
-            empty_data=None,
-        )
-        self.microphone_device_combo = self._choice_combo(
-            audio_devices,
-            current=self._binding.config.audio.microphone_device_id,
-            empty_label="Not selected",
-            empty_data=None,
-        )
+        self.system_device_combo = QComboBox(audio)
+        self.microphone_device_combo = QComboBox(audio)
+        self._populate_audio_choices(audio_devices, self._binding.config.audio.system_device_id,
+                                     self._binding.config.audio.microphone_device_id)
         form.addRow("System audio", self.system_device_combo)
         form.addRow("Microphone", self.microphone_device_combo)
         self.stt_device_combo = QComboBox(audio)
         self.stt_device_combo.addItem("NVIDIA GPU (CUDA)", "cuda")
+        self.stt_device_combo.addItem("Intel GPU (OpenVINO)", "openvino")
+        self.stt_device_combo.addItem("AMD / DirectX 12 GPU (DirectML)", "directml")
         self.stt_device_combo.addItem("CPU", "cpu")
         self._select_data(self.stt_device_combo, self._binding.config.audio.device)
+        self.stt_model_combo = QComboBox(audio)
+        for name, label in MODEL_LABELS.items():
+            self.stt_model_combo.addItem(label, name)
+        model = self._binding.config.audio.stt_model
+        if model not in MODEL_LABELS:
+            self.stt_model_combo.addItem(model, model)
+        self._select_data(self.stt_model_combo, model)
+        self.gpu_index_spin = QSpinBox(audio)
+        self.gpu_index_spin.setRange(0, 255)
+        self.gpu_index_spin.setValue(self._binding.config.audio.gpu_index)
+        self.gpu_index_spin.setToolTip("GPU index for OpenVINO or DirectML. The first adapter is 0.")
+        self.download_button = QPushButton("Download model", audio)
+        self.download_status = QLabel(audio)
+        self.download_status.setWordWrap(True)
+        self.download_button.clicked.connect(self._download_model)
+        self.download_progress.connect(lambda n: self.download_status.setText(f"Preparing model… {n}%"))
+        self.download_finished.connect(self._download_done)
         self.stt_compute_combo = QComboBox(audio)
         for label, key in (
             ("Float16", "float16"),
@@ -602,8 +629,11 @@ class SettingsWindow(QMainWindow):
             self.stt_compute_combo.addItem(label, key)
         self._select_data(self.stt_compute_combo, self._binding.config.audio.compute_type)
         self._stt_device_changed(0)
+        form.addRow("Speech recognition model", self.stt_model_combo)
         form.addRow("Speech recognition device", self.stt_device_combo)
+        form.addRow("GPU index", self.gpu_index_spin)
         form.addRow("Speech recognition precision", self.stt_compute_combo)
+        form.addRow(self.download_button, self.download_status)
         layout.addWidget(audio)
         layout.addStretch(1)
         return page
@@ -687,7 +717,7 @@ class SettingsWindow(QMainWindow):
         hotkeys.setObjectName("settingsCard")
         layout = QGridLayout(hotkeys)
         layout.setColumnStretch(1, 1)
-        self.hotkey_edits: dict[HotkeyAction, QKeySequenceEdit] = {}
+        self.hotkey_edits: dict[HotkeyAction, HotkeyButton] = {}
         self.hotkey_labels: dict[HotkeyAction, QLabel] = {}
         self.hotkey_help: dict[HotkeyAction, QLabel] = {}
         bindings = self._binding.config.hotkeys.as_bindings()
@@ -697,14 +727,7 @@ class SettingsWindow(QMainWindow):
             label.setWordWrap(True)
             help_label = QLabel(help_text, hotkeys)
             help_label.setWordWrap(True)
-            editor = QKeySequenceEdit(hotkeys)
-            editor.setMaximumSequenceLength(1)
-            editor.setKeySequence(
-                QKeySequence(
-                    bindings[action],
-                    QKeySequence.SequenceFormat.PortableText,
-                )
-            )
+            editor = HotkeyButton(label_text, bindings[action], hotkeys)
             self.hotkey_labels[action] = label
             self.hotkey_help[action] = help_label
             self.hotkey_edits[action] = editor
@@ -719,19 +742,14 @@ class SettingsWindow(QMainWindow):
 
     def restore_default_hotkeys(self) -> None:
         for action, editor in self.hotkey_edits.items():
-            editor.setKeySequence(
-                QKeySequence(
-                    DEFAULT_HOTKEY_BINDINGS[action],
-                    QKeySequence.SequenceFormat.PortableText,
-                )
-            )
+            editor.set_binding(DEFAULT_HOTKEY_BINDINGS[action])
 
     def _hotkey_bindings(self) -> dict[HotkeyAction | str, str]:
         portable_bindings: dict[HotkeyAction | str, str] = {}
         for action, editor in self.hotkey_edits.items():
             try:
                 portable_bindings[action] = HotkeyChord.parse(
-                    editor.keySequence().toString(QKeySequence.SequenceFormat.PortableText)
+                    editor.binding
                 ).to_portable_text()
             except ValueError as error:
                 raise ValueError(f"{HOTKEY_COPY[action][0]}: {error}") from error
@@ -848,9 +866,14 @@ class SettingsWindow(QMainWindow):
 
     def _stt_device_changed(self, _index: int) -> None:
         selected = self.stt_compute_combo.currentData()
-        cpu = self.stt_device_combo.currentData() == "cpu"
+        device = self.stt_device_combo.currentData()
+        hybrid = device in GPU_ENCODERS
+        self.gpu_index_spin.setEnabled(hybrid)
         choices = [("Int8", "int8"), ("Float32", "float32")]
-        if not cpu:
+        if hybrid:
+            choices = [("FP16 GPU encoder / Int8 CPU decoder", "int8"),
+                       ("FP16 GPU encoder / Float32 CPU decoder", "float32")]
+        if device == "cuda":
             choices = [
                 ("Float16", "float16"),
                 ("Int8 + Float16 (less GPU memory)", "int8_float16"),
@@ -864,24 +887,81 @@ class SettingsWindow(QMainWindow):
         finally:
             self.stt_compute_combo.blockSignals(previous)
 
+    def _download_model(self) -> None:
+        model, device = self.stt_model_combo.currentData(), self.stt_device_combo.currentData()
+        if model not in MODEL_LABELS:
+            self.download_status.setText("This custom model uses its configured path or repository.")
+            return
+        for widget in (self.download_button, self.stt_model_combo, self.stt_device_combo):
+            widget.setEnabled(False)
+        self.download_status.setText("Checking model files…")
+
+        def run() -> None:
+            last_percent = -1
+
+            def progress(done: int, total: int) -> None:
+                nonlocal last_percent
+                percent = done * 100 // total
+                if percent != last_percent:
+                    self.download_progress.emit(percent)
+                    last_percent = percent
+
+            try:
+                prepare_model(model, device, download=True, progress=progress)
+            except ModelUnavailable as error:
+                message = str(error)
+            except OSError:
+                message = "Could not write model files. Check free disk space and retry."
+            except Exception:
+                message = "Could not prepare the model. Check the connection and retry."
+            else:
+                message = "Model verified. Run checks to use it."
+            self.download_finished.emit(message)
+
+        Thread(target=run, name="stt-model-download", daemon=True).start()
+
+    def _download_done(self, message: str) -> None:
+        self.download_status.setText(message)
+        for widget in (self.download_button, self.stt_model_combo, self.stt_device_combo):
+            widget.setEnabled(True)
+
     def set_audio_choices(self, devices: tuple[SettingsChoice, ...]) -> None:
-        system_key = cast(str | None, self.system_device_combo.currentData())
-        microphone_key = cast(str | None, self.microphone_device_combo.currentData())
+        self._populate_audio_choices(devices, self.system_device_combo.currentData(),
+                                     self.microphone_device_combo.currentData())
+        self._invalidate_readiness()
+
+    def _populate_audio_choices(self, devices: tuple[SettingsChoice, ...],
+                                system_key: str | None, microphone_key: str | None) -> None:
+        roles = {d.key: d.is_loopback for d in devices}
+        if system_key is not None and roles.get(system_key) is False:
+            system_key = None
+        if (microphone_key is not None and roles.get(microphone_key) is True) or microphone_key == system_key:
+            microphone_key = None
         self._populate_choice_combo(
             self.system_device_combo,
-            devices,
+            tuple(d for d in devices if d.is_loopback is not False),
             current=system_key,
             empty_label="Not selected",
             empty_data=None,
         )
         self._populate_choice_combo(
             self.microphone_device_combo,
-            devices,
+            tuple(d for d in devices if d.is_loopback is not True),
             current=microphone_key,
             empty_label="Not selected",
             empty_data=None,
         )
-        self._invalidate_readiness()
+        self._exclude_selected_audio()
+
+    def _exclude_selected_audio(self) -> None:
+        for combo, other in ((self.system_device_combo, self.microphone_device_combo),
+                             (self.microphone_device_combo, self.system_device_combo)):
+            model = combo.model()
+            assert isinstance(model, QStandardItemModel)
+            for index in range(1, combo.count()):
+                item = model.item(index)
+                if item is not None:
+                    item.setEnabled(combo.itemData(index) != other.currentData())
 
     @staticmethod
     def _select_data(combo: QComboBox, value: object) -> None:
@@ -900,6 +980,7 @@ class SettingsWindow(QMainWindow):
             self.mcp_backend_combo,
             self.stt_device_combo,
             self.stt_compute_combo,
+            self.stt_model_combo,
         )
         for combo in combos:
             combo.currentIndexChanged.connect(self._invalidate_readiness)
@@ -907,6 +988,11 @@ class SettingsWindow(QMainWindow):
         self.vision_model_combo.currentIndexChanged.connect(self._update_shared_instance_annotation)
         self.provider_combo.currentIndexChanged.connect(self._provider_changed)
         self.stt_device_combo.currentIndexChanged.connect(self._stt_device_changed)
+        for combo in (self.stt_model_combo, self.stt_device_combo):
+            combo.currentIndexChanged.connect(self.download_status.clear)
+        for combo in (self.microphone_device_combo, self.system_device_combo):
+            combo.currentIndexChanged.connect(self._exclude_selected_audio)
+        self.gpu_index_spin.valueChanged.connect(self._invalidate_readiness)
         for combo in (self.text_model_combo, self.vision_model_combo):
             combo.editTextChanged.connect(self._invalidate_readiness)
             combo.editTextChanged.connect(self._update_shared_instance_annotation)
@@ -960,6 +1046,8 @@ class SettingsWindow(QMainWindow):
         self.readiness_table.setRowCount(len(report.checks))
         for row, result in enumerate(report.checks):
             display_name = "Firecrawl MCP" if result.name == "firecrawl_mcp" else result.name
+            if result.name == "cuda_stt":
+                display_name = "Speech recognition"
             if self._selected_provider == "openrouter" and result.name == "lmstudio_auth":
                 display_name = "OpenRouter API key"
             values = (
@@ -1020,6 +1108,10 @@ class SettingsWindow(QMainWindow):
 
     def _save_settings(self, *, request_readiness: bool) -> bool:
         token = self.token_edit.text()
+        if (self.system_device_combo.currentData() is not None
+                and self.system_device_combo.currentData() == self.microphone_device_combo.currentData()):
+            self.show_notification("System audio and microphone must use different devices.")
+            return False
         try:
             hotkeys = self._hotkey_bindings()
         except ValueError as error:
@@ -1044,7 +1136,8 @@ class SettingsWindow(QMainWindow):
                 mcp_backend=cast(
                     Literal["native", "lmstudio", "off"], self.mcp_backend_combo.currentData()
                 ),
-                stt_device=cast(Literal["cuda", "cpu"], self.stt_device_combo.currentData()),
+                stt_device=cast(STTDevice, self.stt_device_combo.currentData()),
+                stt_model=self.stt_model_combo.currentData(), gpu_index=self.gpu_index_spin.value(),
                 stt_compute_type=cast(
                     Literal["float16", "int8_float16", "int8", "float32"],
                     self.stt_compute_combo.currentData(),

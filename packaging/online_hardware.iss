@@ -66,7 +66,7 @@ var
   ExitCode, I: Integer;
   Probe: String;
 begin
-  Result := 'No usable NVIDIA driver was detected. The application can use CPU + Int8 in Settings > Audio.';
+  Result := 'No usable NVIDIA driver was detected. Choose Intel GPU (OpenVINO), AMD GPU (DirectML), or CPU + Int8 in Settings > Audio. Tiny and Base need less memory.';
   try
     ExtractTemporaryFile('installer_gpu_probe.ps1');
     Probe := ExpandConstant('{tmp}\installer_gpu_probe.ps1');

@@ -294,7 +294,7 @@ async def test_hotkey_only_settings_save_updates_current_runtime_without_rebuild
     )
     await controller.initialize()
     report = settings.readiness_report
-    settings.hotkey_edits[HotkeyAction.SCREENSHOT].setKeySequence("Ctrl+Alt+F11")
+    settings.hotkey_edits[HotkeyAction.SCREENSHOT].set_binding("Ctrl+Alt+F11")
 
     assert settings.save()
     await asyncio.sleep(0)

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "interview-assistant"
-version = "0.1.4"
+version = "0.1.5"
 requires-python = ">=3.11,<3.13"
 dependencies = [
   "PyQt6>=6.7,<7",
@@ -19,6 +19,10 @@ dependencies = [
   "numpy>=1.26,<3",
   "PyAudioWPatch>=0.2.12.7,<0.3",
   "faster-whisper>=1.2.1,<2",
+  "huggingface-hub>=1,<2",
+  "filelock>=3.12,<4",
+  "openvino>=2025.3,<2027",
+  "onnxruntime-directml>=1.23,<2; sys_platform == 'win32'",
   "mss>=9,<11",
   "Pillow>=10,<12",
   "ImageHash>=4.3,<5",
@@ -47,6 +51,11 @@ dev = [
 where = ["."]
 include = ["interview_assistant*"]
 exclude = ["src*"]
+
+[tool.uv]
+# The Windows DirectML wheel provides the same onnxruntime module and CPU EP
+# used by faster-whisper's VAD. Installing both wheels overwrites their DLLs.
+override-dependencies = ["onnxruntime; sys_platform != 'win32'"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

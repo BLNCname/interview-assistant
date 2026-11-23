@@ -181,8 +181,10 @@ Compression=none
 ArchiveExtraction=full
 SetupLogging=yes
 {legacy_include}
+[Tasks]
+Name: "preloadstt"; Description: "Preload fixture model"
 [Files]
-Source: "{{code:GetPreparedFile|0}}"; DestDir: "{{app}}"; DestName: "model.bin"; Flags: external ignoreversion; ExternalSize: {len(model)}; Hash: "{_digest(model)}"
+Source: "{{code:GetPreparedFile|0}}"; DestDir: "{{app}}"; DestName: "model.bin"; Tasks: preloadstt; Flags: external ignoreversion; ExternalSize: {len(model)}; Hash: "{_digest(model)}"
 Source: "{{code:GetPreparedFile|1}}"; DestDir: "{{app}}"; DestName: "runtime.dll"; Flags: external ignoreversion; ExternalSize: {len(library)}; Hash: "{_digest(library)}"
 [Code]
 #include "{INCLUDE}"
@@ -240,7 +242,7 @@ def _stop_fixture_download(app_name):
     return any(posted)
 
 
-def _run(fixture, *, cancel_after=None):
+def _run(fixture, *, cancel_after=None, preload=True):
     assert _isolated_desktop(), "Refusing to start a native fixture on the interactive desktop"
     log = fixture["setup"].parent / ("setup-" + uuid.uuid4().hex + ".log")
     temporary = ROOT / ".cache" / "inno-temp" / uuid.uuid4().hex[:8]
@@ -250,6 +252,7 @@ def _run(fixture, *, cancel_after=None):
     process = subprocess.Popen(
         [str(fixture["setup"]), "/SILENT" if cancel_after is not None else "/VERYSILENT",
          "/SUPPRESSMSGBOXES", "/NORESTART", "/SP-",
+         "/TASKS=" + ("preloadstt" if preload else "!preloadstt"),
          "/NOCLOSEAPPLICATIONS", "/NORESTARTAPPLICATIONS", "/LOG=" + str(log)],
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=environment,
     )
@@ -290,6 +293,17 @@ def test_native_online_success_uses_verified_cache_when_offline(tmp_path, compil
         code, log = _run(fixture)
         assert code == 0, log
         assert state["requests"] == []
+
+
+def test_deferred_model_installs_without_contacting_model_host(tmp_path, compiler):
+    with _server() as (url, state):
+        fixture = _fixture(tmp_path, compiler, url)
+        state["responses"]["/wheel"] = (200, fixture["wheel"])
+        code, log = _run(fixture, preload=False)
+        assert code == 0, log
+        assert state["requests"] == ["/wheel"]
+        assert not (fixture["install"] / "model.bin").exists()
+        assert (fixture["install"] / "runtime.dll").read_bytes() == fixture["library"]
 
 
 def test_native_online_corrupt_cache_is_not_installed_or_kept(tmp_path, compiler):

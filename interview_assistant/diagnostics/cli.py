@@ -19,6 +19,8 @@ _REQUIRED_DEPENDENCIES = (
     ("qasync", "qasync"),
     ("faster_whisper", "faster-whisper"),
     ("ctranslate2", "ctranslate2"),
+    ("openvino", "openvino"),
+    ("onnxruntime", "onnxruntime-directml" if os.name == "nt" else "onnxruntime"),
     ("mss", "mss"),
     ("keyring", "keyring"),
     ("pyaudiowpatch", "PyAudioWPatch"),

@@ -5,7 +5,7 @@ import sys
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from enum import StrEnum
-from threading import Condition, Lock, RLock, get_ident
+from threading import Condition, Event, Lock, RLock, current_thread, get_ident
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Literal, Protocol
 
@@ -59,6 +59,8 @@ _MODIFIER_ALIASES = {
 }
 _FUNCTION_KEY = re.compile(r"f(?:[1-9]|1[0-9]|2[0-4])\Z")
 _MODIFIER_ORDER = ("ctrl", "shift", "alt", "win")
+recording_hotkey = Event()
+MOUSE_KEYS = ("mouse_left", "mouse_right", "mouse_middle", "mouse_x1", "mouse_x2")
 _NAMED_FINAL_KEYS = frozenset(
     {
         "backspace",
@@ -97,12 +99,15 @@ def _normalize_modifier(value: str) -> str | None:
 
 def _normalize_final(value: str) -> str:
     normalized = _strip_key_prefix(value)
-    if normalized == "escape":
-        normalized = "esc"
+    normalized = {"escape": "esc", "return": "enter", "del": "delete", "ins": "insert",
+                  "pgup": "page_up", "pgdown": "page_down", "+": "plus"}.get(normalized, normalized)
     if (
-        len(normalized) == 1
+        (len(normalized) == 1 and normalized.isprintable())
         or _FUNCTION_KEY.fullmatch(normalized)
         or normalized in _NAMED_FINAL_KEYS
+        or normalized in MOUSE_KEYS
+        or normalized in {"plus", "caps_lock", "num_lock", "scroll_lock", "print_screen", "menu"}
+        or re.fullmatch(r"vk_[0-9a-f]{2}", normalized)
     ):
         return normalized
     raise ValueError(f"Unsupported final hotkey key: {value}")
@@ -111,37 +116,33 @@ def _normalize_final(value: str) -> str:
 def _event_key_name(key: object) -> str:
     if isinstance(key, str):
         return _strip_key_prefix(key)
+    virtual_key = getattr(key, "vk", None)
     if sys.platform == "win32":
-        virtual_key = getattr(key, "vk", None)
         if isinstance(virtual_key, int) and (
             0x30 <= virtual_key <= 0x39 or 0x41 <= virtual_key <= 0x5A
         ):
             # Windows char depends on Ctrl/Shift and the active layout (Ctrl+S
             # can be '\x13' or 'ы'). VK identity also stays stable on release.
             return chr(virtual_key).casefold()
+        if isinstance(virtual_key, int) and (0x60 <= virtual_key <= 0x6F or 0xBA <= virtual_key <= 0xE2):
+            return f"vk_{virtual_key:02x}"
     character = getattr(key, "char", None)
     if isinstance(character, str) and character:
         return _strip_key_prefix(character)
     name = getattr(key, "name", None)
     if isinstance(name, str) and name:
-        return _strip_key_prefix(name)
+        try:
+            return name if _normalize_modifier(name) else _normalize_final(name)
+        except ValueError:
+            virtual_key = getattr(getattr(key, "value", None), "vk", virtual_key)
+    if isinstance(virtual_key, int) and 0 < virtual_key < 256:
+        return f"vk_{virtual_key:02x}"
     return _strip_key_prefix(str(key))
 
 
 @dataclass(frozen=True, slots=True)
 class HotkeyChord:
-    modifiers: frozenset[str]
-    key: str
-
-    def __post_init__(self) -> None:
-        modifiers = frozenset(self.modifiers)
-        object.__setattr__(self, "modifiers", modifiers)
-        if not modifiers:
-            raise ValueError("Global hotkey chord must include a modifier")
-        if any(modifier not in {"ctrl", "shift", "alt", "win"} for modifier in modifiers):
-            raise ValueError("Hotkey chord contains a non-canonical modifier")
-        if _normalize_final(self.key) != self.key:
-            raise ValueError("Hotkey chord final key must be canonical")
+    keys: frozenset[str]
 
     @classmethod
     def parse(cls, value: str | HotkeyChord) -> HotkeyChord:
@@ -150,26 +151,13 @@ class HotkeyChord:
         raw_tokens = value.split("+")
         if not raw_tokens or any(not token.strip() for token in raw_tokens):
             raise ValueError("Hotkey chord must include a final key")
-        tokens = [token.strip() for token in raw_tokens]
-        modifiers: set[str] = set()
-        final_keys: list[str] = []
-        for token in tokens:
-            modifier = _normalize_modifier(token)
-            if modifier is not None:
-                if modifier in modifiers:
-                    raise ValueError(f"Duplicate hotkey modifier: {modifier}")
-                modifiers.add(modifier)
-            else:
-                final_keys.append(_normalize_final(token))
-        if len(final_keys) != 1:
-            raise ValueError("Hotkey chord must include exactly one final key")
-        if not modifiers:
-            raise ValueError("Global hotkey chord must include a modifier")
-        return cls(frozenset(modifiers), final_keys[0])
+        tokens = [_normalize_modifier(k) or _normalize_final(k) for k in raw_tokens]
+        if len(set(tokens)) != len(tokens):
+            raise ValueError("Duplicate key in hotkey")
+        return cls(frozenset(tokens))
 
     def to_portable_text(self) -> str:
-        ordered = [name for name in _MODIFIER_ORDER if name in self.modifiers]
-        return "+".join((*ordered, self.key))
+        return "+".join([k for k in _MODIFIER_ORDER if k in self.keys] + sorted(self.keys.difference(_MODIFIER_ORDER)))
 
 
 def normalize_bindings(
@@ -207,9 +195,32 @@ def _pynput_listener_factory(
 ) -> Listener:
     # Deliberately lazy: importing this module or constructing HotkeyManager never
     # opens a Windows hook. Production composition opts in by calling start().
-    from pynput import keyboard  # type: ignore[import-untyped]
+    from pynput import keyboard, mouse  # type: ignore[import-untyped]
 
-    return keyboard.Listener(on_press=on_press, on_release=on_release)
+    def click(_x, _y, button, pressed, *_extra):
+        key = "mouse_" + button.name
+        if key in MOUSE_KEYS:
+            (on_press if pressed else on_release)(key)
+
+    class InputListeners:
+        def __init__(self):
+            self.listeners = (keyboard.Listener(on_press=on_press, on_release=on_release),
+                              mouse.Listener(on_click=click))
+
+        def start(self):
+            for listener in self.listeners:
+                listener.start()
+
+        def stop(self):
+            for listener in self.listeners:
+                listener.stop()
+
+        def join(self, timeout=None):
+            for listener in self.listeners:
+                if listener.ident is not None and listener is not current_thread():
+                    listener.join(timeout)
+
+    return InputListeners()
 
 
 _SIGNAL_BY_ACTION = {
@@ -243,8 +254,8 @@ class HotkeyManager:
         self._lifecycle_state: _LifecycleState = "stopped"
         self._stop_teardown_complete = False
         self._bindings: dict[HotkeyAction, HotkeyChord] = {}
-        self._pressed_modifier_keys: dict[str, set[str]] = {}
-        self._latched_final_keys: set[str] = set()
+        self._pressed: dict[str, str] = {}
+        self._pending: HotkeyAction | None = None
         self._listener: Listener | None = None
         self._generation = 0
         self._active_generation: int | None = None
@@ -269,8 +280,8 @@ class HotkeyManager:
 
         with self._lock:
             self._bindings = normalized
-            self._pressed_modifier_keys.clear()
-            self._latched_final_keys.clear()
+            self._pressed.clear()
+            self._pending = None
 
     def start(self) -> None:
         caller = get_ident()
@@ -305,8 +316,8 @@ class HotkeyManager:
                 if self._listener is listener:
                     self._listener = None
                     self._active_generation = None
-                    self._pressed_modifier_keys.clear()
-                    self._latched_final_keys.clear()
+                    self._pressed.clear()
+                    self._pending = None
             self._best_effort_stop_and_join(listener)
             self._wait_for_inflight_emissions()
             self._finish_start_attempt("stopped")
@@ -331,8 +342,8 @@ class HotkeyManager:
                     listener = self._listener
                     self._listener = None
                     self._active_generation = None
-                    self._pressed_modifier_keys.clear()
-                    self._latched_final_keys.clear()
+                    self._pressed.clear()
+                    self._pending = None
                 break
 
         stop_error: BaseException | None = None
@@ -410,77 +421,54 @@ class HotkeyManager:
         self._finalize_stop_if_ready()
 
     def _on_press(self, generation: int, key: object) -> None:
-        name = _event_key_name(key)
-        modifier = _normalize_modifier(name)
-        action: HotkeyAction | None = None
-        emission_thread: int | None = None
-        with self._lock:
-            if generation != self._active_generation:
-                return
-            if modifier is not None:
-                self._pressed_modifier_keys.setdefault(modifier, set()).add(name)
-                return
-            try:
-                final_key = _normalize_final(name)
-            except ValueError:
-                return
-            if final_key in self._latched_final_keys:
-                return
-            if not self._pressed_modifier_keys:
-                return
-            chord = HotkeyChord(frozenset(self._pressed_modifier_keys), final_key)
-            action = next(
-                (
-                    candidate
-                    for candidate, binding in self._bindings.items()
-                    if binding == chord
-                ),
-                None,
-            )
-            if action is None and sys.platform == "win32":
-                # Keep explicitly configured character shortcuts (e.g. ctrl+ы
-                # or ctrl+shift+!) when no binding uses the stable VK name.
-                character = getattr(key, "char", None)
-                if isinstance(character, str) and character:
-                    try:
-                        literal = HotkeyChord(chord.modifiers, _normalize_final(character))
-                    except ValueError:
-                        pass
-                    else:
-                        action = next(
-                            (candidate for candidate, binding in self._bindings.items()
-                             if binding == literal),
-                            None,
-                        )
-            if action is not None:
-                self._latched_final_keys.add(final_key)
-                emission_thread = get_ident()
-                self._inflight_emissions[emission_thread] = (
-                    self._inflight_emissions.get(emission_thread, 0) + 1
-                )
-        if action is not None:
-            assert emission_thread is not None
-            try:
-                signal_name = _SIGNAL_BY_ACTION[action]
-                getattr(self._events, signal_name).emit()
-            finally:
-                self._finish_emission(emission_thread)
+        self._input(generation, key, True)
 
     def _on_release(self, generation: int, key: object) -> None:
+        self._input(generation, key, False)
+
+    def _input(self, generation: int, key: object, pressed: bool) -> None:
         name = _event_key_name(key)
-        modifier = _normalize_modifier(name)
+        try:
+            token = _normalize_modifier(name) or _normalize_final(name)
+        except ValueError:
+            return
         with self._lock:
             if generation != self._active_generation:
                 return
-            if modifier is not None:
-                physical_keys = self._pressed_modifier_keys.get(modifier)
-                if physical_keys is not None:
-                    physical_keys.discard(name)
-                    if not physical_keys:
-                        self._pressed_modifier_keys.pop(modifier, None)
+            if recording_hotkey.is_set():
+                self._pressed.clear()
+                self._pending = None
                 return
-            try:
-                final_key = _normalize_final(name)
-            except ValueError:
+            if pressed:
+                if name in self._pressed:
+                    return
+                self._pressed[name] = token
+                keys = frozenset(self._pressed.values())
+                action = self._match(keys)
+                if action is None:
+                    literal = getattr(key, "char", None)
+                    if isinstance(literal, str) and literal.isprintable():
+                        keys = keys.difference({token}).union({literal.casefold()})
+                        action = self._match(keys)
+                self._pending = None
+                # A shorter binding only wins once the user releases a key.
+                if action and (keys.issubset(_MODIFIER_ORDER) or any(
+                    keys < chord.keys for chord in self._bindings.values()
+                )):
+                    self._pending = action
+                    return
+            else:
+                if self._pressed.pop(name, None) is None or token in self._pressed.values():
+                    return
+                action, self._pending = self._pending, None
+            if action is None:
                 return
-            self._latched_final_keys.discard(final_key)
+            thread_id = get_ident()
+            self._inflight_emissions[thread_id] = self._inflight_emissions.get(thread_id, 0) + 1
+        try:
+            getattr(self._events, _SIGNAL_BY_ACTION[action]).emit()
+        finally:
+            self._finish_emission(thread_id)
+
+    def _match(self, keys: frozenset[str]) -> HotkeyAction | None:
+        return next((action for action, chord in self._bindings.items() if chord.keys == keys), None)
