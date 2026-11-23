@@ -188,6 +188,7 @@ def validate_distribution(
     inventory_path: Path,
     *,
     installed: bool = False,
+    without_model: bool = False,
 ) -> None:
     dist = dist.absolute()
     _check_node(dist, directory=True)
@@ -205,7 +206,12 @@ def validate_distribution(
     _check_node(internal, directory=True)
 
     model_dir = internal.joinpath(*bundle.parts)
-    _check_node(model_dir, directory=True)
+    if without_model:
+        if not installed:
+            raise DistValidationError
+        expected_model = {}
+    else:
+        _check_node(model_dir, directory=True)
     actual_model: dict[str, Path] = {}
     actual_inventory: dict[str, Path] = {}
     actual_directories: set[str] = set()
@@ -280,6 +286,8 @@ def main() -> int:
     parser.add_argument("--manifest", type=Path, required=True)
     parser.add_argument("--inventory", type=Path, required=True)
     parser.add_argument("--installed", action="store_true")
+    parser.add_argument("--without-model", action="store_true",
+                        help="Validate a core-only install against its selected-file inventory")
     arguments = parser.parse_args()
     try:
         validate_distribution(
@@ -287,6 +295,7 @@ def main() -> int:
             arguments.manifest,
             arguments.inventory,
             installed=arguments.installed,
+            without_model=arguments.without_model,
         )
     except DistValidationError:
         print("distribution failed release validation", file=sys.stderr)

@@ -7,6 +7,7 @@ type
   TPayloadArtifact = record
     Id, Kind, Url, SHA256, DisplayName, CacheName: String;
     Size, ExpandedSize: Int64;
+    Cuda: Boolean;
   end;
   TPayloadFile = record
     RelativePath, MemberPath, SHA256: String;
@@ -176,6 +177,16 @@ begin
   end;
 end;
 
+function ArtifactSelected(const Index: Integer): Boolean;
+begin
+  if Artifacts[Index].Kind = 'file' then
+    Result := WizardIsTaskSelected('preloadstt')
+  else if Artifacts[Index].Cuda then
+    Result := WizardIsTaskSelected('cuda')
+  else
+    Result := True;
+end;
+
 procedure CheckPayloadDiskSpace;
 var
   I, J: Integer;
@@ -189,7 +200,7 @@ begin
   Installed := 0;
   SetArrayLength(PayloadCacheHits, GetArrayLength(Artifacts));
   for I := 0 to GetArrayLength(Artifacts) - 1 do begin
-    if (Artifacts[I].Kind = 'file') and not WizardIsTaskSelected('preloadstt') then Continue;
+    if not ArtifactSelected(I) then Continue;
     PayloadCacheHits[I] := PayloadFileMatches(ArtifactCachePath(I), Artifacts[I].SHA256, Artifacts[I].Size);
     if not PayloadCacheHits[I] then begin
       Missing := Missing + Artifacts[I].Size;
@@ -200,7 +211,7 @@ begin
       Staging := Staging + Artifacts[I].ExpandedSize;
   end;
   for I := 0 to GetArrayLength(PayloadFiles) - 1 do
-    if (Artifacts[PayloadFiles[I].ArtifactIndex].Kind = 'wheel') or WizardIsTaskSelected('preloadstt') then
+    if ArtifactSelected(PayloadFiles[I].ArtifactIndex) then
       Installed := Installed + PayloadFiles[I].Size;
   Locations[0] := PayloadCacheRoot;
   Locations[1] := ExpandConstant('{tmp}');
@@ -289,7 +300,7 @@ var
   I: Integer;
 begin
   for I := 0 to GetArrayLength(Artifacts) - 1 do
-    if Artifacts[I].Kind = 'wheel' then begin
+    if (Artifacts[I].Kind = 'wheel') and ArtifactSelected(I) then begin
       PayloadExtractionPage.Clear;
       if not PayloadFileMatches(ArtifactCachePath(I), Artifacts[I].SHA256, Artifacts[I].Size) then
         RaiseException('Cached archive changed before extraction: ' + Artifacts[I].DisplayName);
@@ -311,7 +322,7 @@ begin
   PayloadValidationPage.Show;
   try
     for I := 0 to GetArrayLength(PayloadFiles) - 1 do begin
-      if (Artifacts[PayloadFiles[I].ArtifactIndex].Kind = 'file') and not WizardIsTaskSelected('preloadstt') then Continue;
+      if not ArtifactSelected(PayloadFiles[I].ArtifactIndex) then Continue;
       PayloadValidationPage.SetText('Verifying prepared application files', PayloadFiles[I].RelativePath);
       PayloadValidationPage.SetProgress(I, GetArrayLength(PayloadFiles));
       if not PayloadFileMatches(GetPreparedFile(IntToStr(I)), PayloadFiles[I].SHA256, PayloadFiles[I].Size) then
@@ -347,7 +358,7 @@ begin
       RaiseException('Cannot create the installer download cache: ' + PayloadCacheRoot);
     CheckPayloadDiskSpace;
     for I := 0 to GetArrayLength(Artifacts) - 1 do
-      if (Artifacts[I].Kind = 'wheel') or WizardIsTaskSelected('preloadstt') then
+      if ArtifactSelected(I) then
         CachePayloadArtifact(I);
     ExtractPayloadWheels;
     VerifyPreparedPayload;

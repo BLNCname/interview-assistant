@@ -315,6 +315,7 @@ def build_production_components(
         configured_audio = AudioWorker(
             system_id,
             microphone_id,
+            notify=application.events.notification.emit,
         )
         audio: AudioWorker | _UnconfiguredAudioWorker = configured_audio
         system_queue = configured_audio.system_queue
@@ -338,6 +339,9 @@ def build_production_components(
         microphone_queue,
         engine=engine,
         on_hypothesis=ingress.publish,
+        on_decode_error=lambda: application.events.notification.emit(
+            "Speech recognition failed. Open Audio, select another device or a smaller model, and run checks."
+        ),
     )
     capture = CaptureWorker(
         validator=FrameValidator(
@@ -508,6 +512,7 @@ class ApplicationController(QObject):
                 self._readiness_task = None
 
     async def rerun_readiness(self) -> None:
+        settings_revision = self.settings.settings_revision
         if self._closing:
             return
         async with self._lifecycle_lock:
@@ -579,10 +584,14 @@ class ApplicationController(QObject):
                 return
 
             audio_choices, model_choices = choices
+            form_changed = self.settings.settings_revision != settings_revision
             if isinstance(audio_choices, tuple):
                 self.settings.set_audio_choices(audio_choices)
             if isinstance(model_choices, tuple):
                 self.settings.set_model_choices(model_choices)
+            if form_changed:
+                self.settings.clear_readiness("Settings changed during checks. Run checks again.")
+                return
             self.application.set_readiness_report(report)
             self.settings.set_readiness_report(report)
             self.settings.show()
@@ -872,6 +881,12 @@ def create_production_controller(
     try:
         config = AppConfig.load(path, env_path=env_path)
         if not path.exists():
+            if (getattr(sys, "frozen", False)
+                    and not {"STT_DEVICE", "STT_COMPUTE_TYPE"}.intersection(environment_values(env_path))):
+                from interview_assistant.windows_cuda import bundled_cuda_available
+
+                if not bundled_cuda_available():
+                    config.audio.device, config.audio.compute_type = "cpu", "int8"
             startup_message = "Configuration file is missing; choose settings and Save."
     except Exception:
         config = AppConfig()

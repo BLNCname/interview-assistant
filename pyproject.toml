@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "interview-assistant"
-version = "0.1.5"
+version = "0.1.6"
 requires-python = ">=3.11,<3.13"
 dependencies = [
   "PyQt6>=6.7,<7",
@@ -17,7 +17,7 @@ dependencies = [
   "python-dotenv>=1,<2",
   "mcp>=1.26,<2",
   "numpy>=1.26,<3",
-  "PyAudioWPatch>=0.2.12.7,<0.3",
+  "SoundCard>=0.4.6,<0.5",
   "faster-whisper>=1.2.1,<2",
   "huggingface-hub>=1,<2",
   "filelock>=3.12,<4",

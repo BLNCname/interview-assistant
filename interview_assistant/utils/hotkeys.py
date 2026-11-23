@@ -442,7 +442,10 @@ class HotkeyManager:
             if pressed:
                 if name in self._pressed:
                     return
+                already_held = token in self._pressed.values()
                 self._pressed[name] = token
+                if already_held:
+                    return
                 keys = frozenset(self._pressed.values())
                 action = self._match(keys)
                 if action is None:

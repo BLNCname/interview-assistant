@@ -18,6 +18,7 @@ from typing import Any
 from urllib.parse import urlsplit
 
 import httpx
+from interview_assistant.lmstudio.client import is_loopback_host
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 from mcp.client.streamable_http import streamable_http_client
@@ -267,6 +268,8 @@ class NativeMCPClient:
             url = urlsplit(config["url"])
             if url.scheme not in ("https", "http") or not url.hostname:
                 raise NativeMCPError("MCP url requires an HTTP or HTTPS endpoint")
+            if url.scheme == "http" and not is_loopback_host(url.hostname):
+                raise NativeMCPError("Remote MCP endpoints require HTTPS")
             if url.username or url.password or url.query or url.fragment:
                 raise NativeMCPError("Put MCP credentials in headers, not endpoint URLs")
             _string_mapping(config.get("headers", {}), "headers")

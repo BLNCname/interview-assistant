@@ -240,6 +240,7 @@ def _wheel_candidates(
                         "sha256": _sha(wheel["hash"][7:]),
                         "size": _size(wheel["size"]),
                         "display_name": filename,
+                        "cuda": name in {"nvidia-cuda-runtime-cu12", "nvidia-cublas-cu12", "nvidia-cudnn-cu12"},
                     }
                 )
         if len(wheels) != 1:
@@ -450,6 +451,8 @@ def write_outputs(payload: dict[str, Any], output: Path) -> None:
     indexes = {}
     for index, artifact in enumerate(payload["artifacts"]):
         indexes[artifact["id"]] = index
+        if artifact.get("cuda"):
+            data_lines.append(f"  Artifacts[{index}].Cuda := True;")
         for key, field in (
             ("id", "Id"),
             ("kind", "Kind"),
@@ -476,8 +479,11 @@ def write_outputs(payload: dict[str, Any], output: Path) -> None:
             source = f"{{code:GetPreparedFile|{external_index}}}"
             flags = "external ignoreversion"
             extra = f"; ExternalSize: {entry['size']}"
-            if payload["artifacts"][indexes[entry["artifact"]]]["kind"] == "file":
+            artifact = payload["artifacts"][indexes[entry["artifact"]]]
+            if artifact["kind"] == "file":
                 extra += "; Tasks: preloadstt"
+            elif artifact.get("cuda"):
+                extra += "; Tasks: cuda"
             values = {
                 "RelativePath": relative,
                 "MemberPath": (entry["member"] or "").replace("/", "\\"),

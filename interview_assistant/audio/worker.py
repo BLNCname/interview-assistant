@@ -1,20 +1,21 @@
 from collections.abc import Callable, Iterable
 from queue import Empty, Full, Queue
-from threading import Lock
+from threading import Event, Lock, Thread
 from time import monotonic
 from typing import Protocol
 
 import numpy as np
-import pyaudiowpatch as pyaudio  # type: ignore[import-untyped]
 from numpy.typing import NDArray
 
+from .devices import wasapi_endpoints
 from .models import AudioFrame, AudioSource
 
 _TARGET_SAMPLE_RATE = 16_000
-_DEFAULT_QUEUE_CAPACITY = 32
+_DEFAULT_QUEUE_CAPACITY = 256
 _DEFAULT_FRAMES_PER_BUFFER = 1_024
 
-_AudioCallback = Callable[[bytes, int, int], None]
+_AudioData = bytes | NDArray[np.float32]
+_AudioCallback = Callable[[_AudioData, int, int], None]
 
 
 class _InputStream(Protocol):
@@ -37,49 +38,72 @@ class _AudioBackend(Protocol):
     def close(self) -> None: ...
 
 
-class _PyAudioBackend:
-    def __init__(self) -> None:
-        self._pa = pyaudio.PyAudio()
+class _WasapiStream:
+    def __init__(self, device_id: str, blocksize: int, callback: _AudioCallback,
+                 notify: Callable[[str], None] | None) -> None:
+        self.device_id = device_id
+        self.blocksize = blocksize
+        self.callback = callback
+        self.notify = notify
+        self._stop = Event()
+        self._ready = Event()
+        self._thread: Thread | None = None
+        self._error: Exception | None = None
 
-    def open_input_stream(
-        self,
-        *,
-        device_id: str,
-        frames_per_buffer: int,
-        callback: _AudioCallback,
-    ) -> _InputStream:
-        device_index = int(device_id)
-        info = self._pa.get_device_info_by_index(device_index)
-        channels = int(info.get("maxInputChannels", 0))
-        sample_rate = int(round(float(info.get("defaultSampleRate", 0))))
-        if channels <= 0:
-            raise ValueError(f"audio device {device_id!r} has no input channels")
-        if sample_rate <= 0:
-            raise ValueError(f"audio device {device_id!r} has an invalid sample rate")
+    def _capture(self) -> None:
+        try:
+            with wasapi_endpoints() as endpoints:
+                device = next((item for item in endpoints if item.id == self.device_id), None)
+                if device is None:
+                    raise ValueError("Selected audio endpoint disappeared. Select it again in Audio.")
+                rate = 48000
+                with device.recorder(samplerate=rate, blocksize=self.blocksize) as recorder:
+                    self._ready.set()
+                    while not self._stop.is_set():
+                        data = recorder.record(numframes=self.blocksize)
+                        self.callback(data, rate, data.shape[1])
+        except Exception as error:
+            self._error = error
+            if self._ready.is_set() and not self._stop.is_set() and self.notify:
+                self.notify("Audio capture stopped. Check the device, then run checks again.")
+        finally:
+            self._ready.set()
 
-        def on_audio(
-            in_data: bytes,
-            frame_count: int,
-            time_info: dict[str, float],
-            status_flags: int,
-        ) -> tuple[None, int]:
-            del frame_count, time_info, status_flags
-            callback(in_data, sample_rate, channels)
-            return None, pyaudio.paContinue
+    def start_stream(self) -> None:
+        if self._thread is not None and self._thread.is_alive():
+            raise RuntimeError("Audio capture thread is already running")
+        self._error = None
+        self._stop.clear()
+        self._ready.clear()
+        self._thread = Thread(target=self._capture, name="wasapi-capture", daemon=True)
+        self._thread.start()
+        if not self._ready.wait(5):
+            self._stop.set()
+            raise TimeoutError("Audio endpoint did not start in time")
+        if self._error is not None:
+            raise self._error
 
-        return self._pa.open(
-            format=pyaudio.paInt16,
-            channels=channels,
-            rate=sample_rate,
-            input=True,
-            input_device_index=device_index,
-            frames_per_buffer=frames_per_buffer,
-            stream_callback=on_audio,
-            start=False,
-        )
+    def stop_stream(self) -> None:
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(5)
+            if self._thread.is_alive():
+                raise RuntimeError("Audio capture thread did not stop")
 
     def close(self) -> None:
-        self._pa.terminate()
+        self.stop_stream()
+
+
+class _WasapiBackend:
+    def __init__(self, notify: Callable[[str], None] | None) -> None:
+        self.notify = notify
+
+    def open_input_stream(self, *, device_id: str, frames_per_buffer: int,
+                          callback: _AudioCallback) -> _InputStream:
+        return _WasapiStream(device_id, frames_per_buffer, callback, self.notify)
+
+    def close(self) -> None:
+        pass
 
 
 class AudioWorker:
@@ -89,6 +113,7 @@ class AudioWorker:
         microphone_device_id: str,
         *,
         backend_factory: Callable[[], _AudioBackend] | None = None,
+        notify: Callable[[str], None] | None = None,
         queue_capacity: int = _DEFAULT_QUEUE_CAPACITY,
         frames_per_buffer: int = _DEFAULT_FRAMES_PER_BUFFER,
         clock: Callable[[], float] = monotonic,
@@ -104,7 +129,10 @@ class AudioWorker:
             AudioSource.SYSTEM: system_device_id,
             AudioSource.MICROPHONE: microphone_device_id,
         }
-        self._backend_factory = backend_factory or _PyAudioBackend
+        self._backend_factory = backend_factory or (lambda: _WasapiBackend(notify))
+        self._notify = notify
+        self.dropped_frames = dict.fromkeys(AudioSource, 0)
+        self._last_overflow_notice = float("-inf")
         self._frames_per_buffer = frames_per_buffer
         self._clock = clock
         self._queues = {
@@ -200,12 +228,13 @@ class AudioWorker:
             self._close_resources(streams, backend)
 
     def _callback_for(self, source: AudioSource) -> _AudioCallback:
-        def callback(data: bytes, sample_rate: int, channels: int) -> None:
+        def callback(data: _AudioData, sample_rate: int, channels: int) -> None:
             with self._lock:
                 if not self._started or self._paused or self._stopped:
                     return
             samples = self._converters[source].convert(data, sample_rate, channels)
             frame = AudioFrame(source, self._clock(), samples)
+            notice = ""
             with self._lock:
                 if not self._started or self._paused or self._stopped:
                     return
@@ -219,7 +248,14 @@ class AudioWorker:
                         pass
                     else:
                         queue.task_done()
+                        self.dropped_frames[source] += 1
+                        if frame.timestamp - self._last_overflow_notice >= 10:
+                            self._last_overflow_notice = frame.timestamp
+                            notice = (f"Recognition fell behind. Dropped audio blocks: "
+                                      f"{sum(self.dropped_frames.values())}. Choose a smaller STT model.")
                     queue.put_nowait(frame)
+            if notice and self._notify:
+                self._notify(notice)
 
         return callback
 
@@ -258,7 +294,7 @@ class _StreamingAudioConverter:
 
     def convert(
         self,
-        data: bytes,
+        data: _AudioData,
         sample_rate: int,
         channels: int,
     ) -> NDArray[np.float32]:
@@ -306,7 +342,9 @@ class _StreamingAudioConverter:
         return output
 
 
-def _decode_and_downmix(data: bytes, channels: int) -> NDArray[np.float32]:
+def _decode_and_downmix(data: _AudioData, channels: int) -> NDArray[np.float32]:
+    if isinstance(data, np.ndarray):
+        return data.reshape(-1, channels).mean(axis=1, dtype=np.float32)
     complete_data = data[: len(data) - (len(data) % np.dtype("<i2").itemsize)]
     samples = np.frombuffer(complete_data, dtype="<i2").astype(np.float32)
     samples /= 32_768.0

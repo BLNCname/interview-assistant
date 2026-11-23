@@ -143,6 +143,7 @@ class StreamingSTTWorker:
         *,
         engine: TranscriptionEngine | None = None,
         on_hypothesis: _HypothesisCallback | None = None,
+        on_decode_error: Callable[[], None] | None = None,
         hypothesis_queue: Queue[TranscriptHypothesis] | None = None,
         queue_capacity: int = _DEFAULT_INPUT_CAPACITY,
         hypothesis_capacity: int = _DEFAULT_HYPOTHESIS_CAPACITY,
@@ -203,6 +204,9 @@ class StreamingSTTWorker:
         }
         self._engine = engine if engine is not None else WhisperEngine()
         self._on_hypothesis = on_hypothesis
+        self._on_decode_error = on_decode_error
+        self._decode_error_reported = False
+        self._last_decode_seconds = 0.0
         self._hypothesis_queue = output
         self._partial_interval_seconds = partial_interval_seconds
         self._partial_window_samples = round(
@@ -405,9 +409,23 @@ class StreamingSTTWorker:
                 state.voiced_seconds - state.last_partial_seconds
                 >= self._partial_interval_seconds
             )
+            if (partial_due and self._last_decode_seconds >= self._partial_interval_seconds / 2
+                    and any(queue.qsize() > 4 for queue in self._queues.values())):
+                # Drain live capture first, while still rolling long utterances before pruning.
+                partial_due = state.samples_through_last_voice - state.last_partial_end_sample >= (
+                    self._partial_window_samples - self._partial_overlap_samples
+                )
             try:
                 if partial_due:
-                    self._decode_partial(frame.source, state)
+                    started = monotonic()
+                    try:
+                        self._decode_partial(frame.source, state)
+                    except Exception as error:
+                        self._record_decode_error(error)
+                    else:
+                        self._decode_error_reported = False
+                    finally:
+                        self._last_decode_seconds = monotonic() - started
             finally:
                 if partial_due:
                     state.last_partial_seconds = state.voiced_seconds
@@ -560,7 +578,9 @@ class StreamingSTTWorker:
         try:
             self._decode_final(source, state)
         except Exception as error:
-            self._record_error(error)
+            self._record_decode_error(error)
+        else:
+            self._decode_error_reported = False
         finally:
             state.reset_utterance()
 
@@ -607,6 +627,12 @@ class StreamingSTTWorker:
     def _record_error(self, error: Exception) -> None:
         with self._error_lock:
             self._last_error = error
+
+    def _record_decode_error(self, error: Exception) -> None:
+        self._record_error(error)
+        if not self._decode_error_reported and self._on_decode_error is not None:
+            self._decode_error_reported = True
+            self._on_decode_error()
 
     def _discard_pending_frames(self) -> None:
         for queue in self._queues.values():

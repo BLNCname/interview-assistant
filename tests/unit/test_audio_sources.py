@@ -17,52 +17,21 @@ def test_audio_frames_keep_source_identity() -> None:
     assert not np.array_equal(system.samples, mic.samples)
 
 
-class FakeDeviceEnumerator:
-    def __init__(self, devices: list[dict[str, object]]) -> None:
-        self._devices = devices
-
-    def __enter__(self) -> "FakeDeviceEnumerator":
-        return self
-
-    def __exit__(self, *args: object) -> None:
-        return None
-
-    def get_device_info_generator(self):
-        yield from self._devices
-
-
-def test_device_discovery_returns_only_input_capable_devices() -> None:
+def test_wasapi_endpoint_identity_survives_reordering(monkeypatch) -> None:
+    from contextlib import nullcontext
+    from types import SimpleNamespace
+    from interview_assistant.audio import devices
     from interview_assistant.audio.devices import AudioDevice, AudioDeviceService
 
-    enumerator = FakeDeviceEnumerator(
-        [
-            {
-                "index": 3,
-                "name": "Speakers (loopback)",
-                "isLoopbackDevice": True,
-                "maxInputChannels": 2,
-            },
-            {
-                "index": 4,
-                "name": "Microphone",
-                "isLoopbackDevice": False,
-                "maxInputChannels": 1,
-            },
-            {
-                "index": 5,
-                "name": "Output only",
-                "isLoopbackDevice": False,
-                "maxInputChannels": 0,
-            },
-        ]
-    )
-
-    devices = AudioDeviceService(pa_factory=lambda: enumerator).list_devices()
-
-    assert devices == [
-        AudioDevice("3", "Speakers (loopback)", True, 2),
-        AudioDevice("4", "Microphone", False, 1),
-    ]
+    endpoints = [SimpleNamespace(id=key, name="USB headset", isloopback=loop, channels=channels)
+                 for key, loop, channels in (("render-id", True, 2), ("mic-id", False, 1),
+                                              ("unusable", False, 0))]
+    monkeypatch.setattr(devices, "wasapi_endpoints", lambda: nullcontext(endpoints))
+    service = AudioDeviceService()
+    assert service.list_devices() == [AudioDevice("render-id", "USB headset", True, 2),
+                                      AudioDevice("mic-id", "USB headset", False, 1)]
+    endpoints.reverse()
+    assert service.list_devices()[0].id == "mic-id"
 
 
 class FakeInputStream:
@@ -530,3 +499,32 @@ def test_concurrent_stop_waits_for_start_then_closes_all_resources() -> None:
     assert start_errors == []
     assert all(stream.close_count == 1 for stream in backend.streams.values())
     assert backend.close_count == 1
+
+
+def test_removed_endpoint_does_not_open_replacement_with_the_same_name(monkeypatch):
+    from contextlib import nullcontext
+    from types import SimpleNamespace
+    from interview_assistant.audio import worker as audio
+    new = SimpleNamespace(id="different-id", name="USB headset")
+    monkeypatch.setattr(audio, "wasapi_endpoints", lambda: nullcontext([new]))
+    stream = audio._WasapiStream("original-id", 1024, lambda *_: None, None)
+    with pytest.raises(ValueError, match="disappeared"):
+        stream.start_stream()
+    stream.close()
+
+
+def test_capture_buffers_one_second_and_reports_actual_losses():
+    from interview_assistant.audio.worker import AudioWorker
+    notices = []
+    backend = FakeAudioBackend()
+    worker = AudioWorker("sys", "mic", backend_factory=lambda: backend, notify=notices.append)
+    worker.start()
+    block = np.ones(1024, dtype=np.int16)
+    for _ in range(47):
+        backend.streams["sys"].emit(block, sample_rate=48000, channels=1)
+    assert worker.system_queue.qsize() == 47 and not notices
+    for _ in range(worker.system_queue.maxsize):
+        backend.streams["sys"].emit(block, sample_rate=48000, channels=1)
+    assert worker.dropped_frames[AudioSource.SYSTEM] == 47
+    assert len(notices) == 1 and "smaller" in notices[0]
+    worker.stop()

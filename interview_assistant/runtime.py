@@ -433,13 +433,12 @@ class ApplicationRuntime(QObject):
         question: DetectedQuestion,
     ) -> None:
         if previous is not None:
-            try:
-                await previous
-            except asyncio.CancelledError:
-                pass
-            except Exception:
-                pass
+            await asyncio.gather(previous, return_exceptions=True)
+            if asyncio.current_task() is not self._question_task:
+                return
             await self.services.coordinator.cancel_active()
+        if self._closing or asyncio.current_task() is not self._question_task:
+            return
         await self._answer(question)
 
     def _question_task_done(self, task: asyncio.Task[None]) -> None:
@@ -456,12 +455,17 @@ class ApplicationRuntime(QObject):
             if self.application.states.state is not ApplicationState.OFFLINE:
                 self._set_state(ApplicationState.LISTENING)
 
+    def _require_current_question(self) -> None:
+        task = asyncio.current_task()
+        if self._closing or task is None or task is not self._question_task or task.cancelling():
+            raise asyncio.CancelledError
+
     async def handle_hypothesis(self, hypothesis: TranscriptHypothesis) -> None:
         if self._closing or not self._started:
             return
         question = self._record_hypothesis(hypothesis)
         if question is not None:
-            await self._answer(question)
+            await self._queue_question(question)
 
     def _record_hypothesis(
         self,
@@ -492,6 +496,7 @@ class ApplicationRuntime(QObject):
         if image_path is None and self.config.vision_model:
             capture = await self.services.capture.capture_for_event(question.kind)
             image_path = self._usable_image(capture)
+        self._require_current_question()
         if image_path is not None and not self.config.vision_model:
             image_path = None
             self.application.events.notification.emit(
@@ -562,6 +567,7 @@ class ApplicationRuntime(QObject):
         else:
             self.application.ribbon.set_sources(())
 
+        self._require_current_question()
         context = ContextBuilder(
             self.services.transcript_store,
             latest_question=question,
@@ -582,11 +588,13 @@ class ApplicationRuntime(QObject):
             context,
             image_path,
         )
+        self._require_current_question()
         if manual_image_path is not None and image_path is not None:
             self.application.events.notification.emit("Screenshot added to the request.")
         self._set_state(ApplicationState.GENERATING)
         request_id = self.services.coordinator.submit(payload)
         outcome = await self.services.coordinator.wait(request_id)
+        self._require_current_question()
         if outcome.status == "completed":
             self._previous_answer = outcome.text[:6000]
         if outcome.status == "failed" and outcome.error_type == "model_not_found":
@@ -605,6 +613,7 @@ class ApplicationRuntime(QObject):
         instance: ModelInstance,
         request: RecoveryRequest[_PreparedRequest],
     ) -> None:
+        self._require_current_question()
         prepared = request.payload
         self._instances[instance.key] = instance
         if prepared.stage == "retrieval":
@@ -633,8 +642,10 @@ class ApplicationRuntime(QObject):
             context,
             prepared.image_path,
         )
+        self._require_current_question()
         request_id = self.services.coordinator.submit(payload)
         outcome = await self.services.coordinator.wait(request_id)
+        self._require_current_question()
         if outcome.status != "completed":
             raise RuntimeError("Recovered LM Studio request did not complete")
         self._previous_answer = outcome.text[:6000]
@@ -726,9 +737,7 @@ class ApplicationRuntime(QObject):
     def _on_answer_clear_requested(self) -> None:
         if self._closing:
             return
-        self.application.ribbon.clear_answer()
-        self.services.transcript_store.clear()
-        self._previous_answer = None
+        self.clear_history()
 
     @pyqtSlot()
     def _on_force_request(self) -> None:
@@ -819,8 +828,20 @@ class ApplicationRuntime(QObject):
         )
 
     def clear_history(self) -> None:
+        if self._question_task is not None:
+            self._question_task.cancel()
+        self.services.coordinator.interrupt_active()
+        self._manual_capture_generation += 1
+        self._manual_image_path = None
+        self._recovered_search_results.clear()
         self._previous_answer = None
         self.services.transcript_store.clear()
+        self.services.question_detector.clear_recent()
+        self.application.ribbon.clear_answer()
+        self.application.ribbon.set_question("Waiting for a question…")
+        self.application.ribbon.set_sources(())
+        if self._started:
+            self._set_state(ApplicationState.LISTENING)
 
     async def shutdown(self, *, close_application: bool = True) -> None:
         task = self._shutdown_task

@@ -23,7 +23,7 @@ _REQUIRED_DEPENDENCIES = (
     ("onnxruntime", "onnxruntime-directml" if os.name == "nt" else "onnxruntime"),
     ("mss", "mss"),
     ("keyring", "keyring"),
-    ("pyaudiowpatch", "PyAudioWPatch"),
+    ("soundcard", "SoundCard"),
 )
 
 

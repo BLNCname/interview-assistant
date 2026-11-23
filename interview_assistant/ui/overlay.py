@@ -307,6 +307,11 @@ class LiquidRibbon(QMainWindow):
         self._capture_exclusion_unavailable = False
         self._state_text = "Starting"
         self._active_request_id: int | None = None
+        self._last_request_id = -1
+        self._render_timer = QTimer(self)
+        self._render_timer.setSingleShot(True)
+        self._render_timer.setInterval(75)
+        self._render_timer.timeout.connect(self._render_answer)
         self._expanded_height = min(180, self._config.max_height)
         self._minimum_expanded_height = min(120, self._config.max_height)
         self.is_collapsed = False
@@ -341,6 +346,7 @@ class LiquidRibbon(QMainWindow):
         # All event connections are established before callers can show the window.
         events.state_changed.connect(self.show_state)
         events.answer_reset.connect(self._reset_answer)
+        events.answer_finished.connect(self._finish_answer)
         events.answer_delta.connect(self.append_delta)
         events.notification.connect(self.show_notification)
         self._affinity_events_enabled = True
@@ -797,13 +803,17 @@ class LiquidRibbon(QMainWindow):
         self._adjust_height()
 
     def clear_answer(self) -> None:
+        self._render_timer.stop()
+        self._active_request_id = None
         self.answer_text = ""
         self.answer_browser.clear()
         self._adjust_height(shrink=True)
 
     def _reset_answer(self, request_id: int) -> None:
-        if self._active_request_id is not None and request_id < self._active_request_id:
+        if request_id <= self._last_request_id:
             return
+        self._last_request_id = request_id
+        self._render_timer.stop()
         self._active_request_id = request_id
         self.answer_text = ""
         self.answer_browser.clear()
@@ -812,7 +822,19 @@ class LiquidRibbon(QMainWindow):
     def append_delta(self, request_id: int, delta: str) -> None:
         if request_id != self._active_request_id:
             return
+        first = not self.answer_text
         self.answer_text += delta
+        if first:
+            self._render_answer()
+        elif not self._render_timer.isActive():
+            self._render_timer.start()
+
+    def _finish_answer(self, request_id: int) -> None:
+        if request_id == self._active_request_id and self._render_timer.isActive():
+            self._render_timer.stop()
+            self._render_answer()
+
+    def _render_answer(self) -> None:
         scroll_state = capture_scroll_state(self.answer_browser)
         render_safe_markdown(
             self.answer_browser,

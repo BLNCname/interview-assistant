@@ -1189,3 +1189,35 @@ def test_worker_shutdown_is_idempotent_without_loading_model() -> None:
     worker.stop()
 
     assert not worker.is_running
+
+
+def test_slow_decoder_defers_interim_work_but_drains_to_a_final():
+    engine = RecordingEngine()
+    worker = StreamingSTTWorker(engine=engine)
+    worker._last_decode_seconds = 0.8
+    for i in range(20):
+        worker.submit(_frame(AudioSource.SYSTEM, i * 0.1, 0.2, 0.1))
+    # A slow decoder with a live backlog skips the first normally due partial.
+    for _ in range(6):
+        frame = worker.system_queue.get_nowait()
+        worker._process_frame(frame)
+        worker.system_queue.task_done()
+    assert not engine.calls
+    worker.submit(_frame(AudioSource.SYSTEM, 2.0, 0, 0.7))
+    worker.start()
+    try:
+        _wait_for(lambda: any(call[1] == 3 for call in engine.calls))
+    finally:
+        assert worker.stop()
+
+
+def test_decode_failure_notifies_without_flooding_or_disclosing_exception():
+    notices = []
+    class Unavailable:
+        def transcribe(self, *args, **kwargs):
+            raise RuntimeError("private diagnostic detail")
+    worker = StreamingSTTWorker(engine=Unavailable(), on_decode_error=lambda: notices.append("failed"))
+    for i in range(3):
+        worker._process_frame(_frame(AudioSource.SYSTEM, i * 0.6, 0.2, 0.6))
+    worker._process_frame(_frame(AudioSource.SYSTEM, 1.8, 0, 0.7))
+    assert notices == ["failed"] and isinstance(worker.last_error, RuntimeError)

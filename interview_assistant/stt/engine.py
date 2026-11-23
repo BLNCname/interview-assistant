@@ -148,7 +148,7 @@ class WhisperEngine:
                         return self._model
                 else:
                     resolved_model = resolve_stt_model(self.model_name)
-                if resolved_model != self.model_name:
+                if resolved_model != self.model_name or not self._allow_download:
                     self._model = factory(
                         resolved_model,
                         device=self.device,

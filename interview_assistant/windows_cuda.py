@@ -48,6 +48,11 @@ def _default_directories() -> tuple[Path, ...]:
     return tuple(path.resolve() for path in candidates if path.is_dir())
 
 
+def bundled_cuda_available() -> bool:
+    directories = _default_directories()
+    return all(any((folder / dll).is_file() for folder in directories) for dll in REQUIRED_CUDA_DLLS)
+
+
 def configure_cuda_runtime(
     search_directories: Iterable[Path] | None = None,
     *,

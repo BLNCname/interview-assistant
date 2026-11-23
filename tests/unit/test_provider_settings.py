@@ -11,6 +11,10 @@ class Secrets:
         self.lm = []
         self.router = []
 
+    def get_stored_token(self, provider):
+        saved = self.lm if provider == "lm" else self.router
+        return saved[-1] if saved else None
+
     def has_lm_token(self):
         return bool(self.lm)
 

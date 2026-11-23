@@ -168,6 +168,18 @@ def prepare_model(model: str, device: str, *, download: bool,
     if model not in MODEL_LABELS:
         if device in GPU_ENCODERS:
             raise ModelUnavailable("Select a listed Whisper model for GPU encoding.")
+        if not Path(location).is_dir():
+            from faster_whisper.utils import download_model  # type: ignore[import-untyped]
+
+            try:
+                location = download_model(model, local_files_only=not download)
+            except (OSError, ValueError, httpx.HTTPError) as error:
+                raise ModelUnavailable(
+                    "Custom model unavailable. Check its path or ID and select Download model in Audio."
+                ) from error
+        # Without a tokenizer faster-whisper fetches one separately, even in cache-only mode.
+        if not all((Path(location) / f).is_file() for f in ("config.json", "model.bin", "tokenizer.json")):
+            raise ModelUnavailable("Custom model is incomplete. Select a CTranslate2 model with config.json, model.bin and tokenizer.json.")
         return location, None
     weights = snapshot(model, "model")
     encoder = snapshot(model, "encoder") if device in GPU_ENCODERS else None

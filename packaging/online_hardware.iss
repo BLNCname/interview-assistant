@@ -108,6 +108,6 @@ begin
   HardwareText.ScrollBars := ssVertical;
   HardwareText.WordWrap := True;
   HardwareText.Text := Advice + #13#10#13#10 +
-    'STT uses faster-whisper / CTranslate2, not PyTorch. Setup downloads the same tested runtime for RTX 3060 Ti and RTX 5070 Ti; no local compilation is required.' + #13#10#13#10 +
+    'For NVIDIA, select Install NVIDIA CUDA acceleration on the tasks page. Intel, AMD and CPU modes use the core installation.' + #13#10#13#10 +
     'Set the recommended mode in Settings > Audio after installation. Existing settings are preserved. Actual speed and available VRAM depend on other applications.';
 end;

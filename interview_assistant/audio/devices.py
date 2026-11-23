@@ -1,22 +1,28 @@
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
-from types import TracebackType
-from typing import Any, Protocol, Self
-
-import pyaudiowpatch as pyaudio  # type: ignore[import-untyped]
+from typing import Any
 
 
-class _DeviceEnumerator(Protocol):
-    def __enter__(self) -> Self: ...
+@contextmanager
+def wasapi_endpoints() -> Iterator[list[Any]]:
+    """Keep Core Audio discovery and recorder COM objects on their owner thread."""
+    import pythoncom  # type: ignore[import-untyped]
 
-    def __exit__(
-        self,
-        exc_type: type[BaseException] | None,
-        exc_value: BaseException | None,
-        traceback: TracebackType | None,
-    ) -> object: ...
+    initialized = False
+    try:
+        try:
+            pythoncom.CoInitializeEx(pythoncom.COINIT_APARTMENTTHREADED)
+            initialized = True
+        except pythoncom.com_error as error:
+            if error.hresult != -2147417850:  # RPC_E_CHANGED_MODE: already initialized.
+                raise
+        import soundcard  # type: ignore[import-untyped]
 
-    def get_device_info_generator(self) -> Iterator[Mapping[str, Any]]: ...
+        yield soundcard.all_microphones(include_loopback=True)
+    finally:
+        if initialized:
+            pythoncom.CoUninitialize()
 
 
 @dataclass(frozen=True)
@@ -28,18 +34,9 @@ class AudioDevice:
 
 
 class AudioDeviceService:
-    def __init__(self, pa_factory: Callable[[], _DeviceEnumerator] | None = None) -> None:
-        self._pa_factory = pa_factory or pyaudio.PyAudio
-
     def list_devices(self) -> list[AudioDevice]:
-        with self._pa_factory() as pa:
+        with wasapi_endpoints() as endpoints:
             return [
-                AudioDevice(
-                    id=str(info["index"]),
-                    name=str(info["name"]),
-                    is_loopback=bool(info.get("isLoopbackDevice", False)),
-                    max_input_channels=int(info["maxInputChannels"]),
-                )
-                for info in pa.get_device_info_generator()
-                if int(info.get("maxInputChannels", 0)) > 0
+                AudioDevice(item.id, item.name, item.isloopback, item.channels)
+                for item in endpoints if item.channels > 0
             ]

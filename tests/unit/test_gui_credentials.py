@@ -56,6 +56,27 @@ def select_editor(window, method, provider):
     return getattr(window, f"{method}_token_edit"), getattr(window, f"{method}_remove_token_checkbox")
 
 
+def test_yaml_failure_restores_deleted_and_replaced_keys_without_copying_environment(
+    qtbot, tmp_path, credential_backend, monkeypatch,
+):
+    store = SecretStore()
+    store.set_lm_token("old-local")
+    store.set_firecrawl_token("old-search")
+    monkeypatch.setenv("CONTEXT7_API_KEY", "environment-only")
+    window, config, _ = make_window(qtbot, tmp_path, store)
+    original = config.model_dump()
+    window.remove_token_checkbox.setChecked(True)
+    window.firecrawl_token_edit.setText("new-search")
+    window.context7_token_edit.setText("new-docs")
+    def fail(_):
+        raise OSError("simulated disk error")
+    window._binding._persist = fail
+    assert not window.save() and config.model_dump() == original
+    assert store.get_stored_token("lm") == "old-local"
+    assert store.get_stored_token("firecrawl") == "old-search"
+    assert store.get_stored_token("context7") is None
+
+
 @pytest.mark.parametrize("method,env_name,stored_name,provider", CREDENTIALS)
 def test_stored_gui_key_wins_and_delete_restores_environment_fallback(
     tmp_path, monkeypatch, credential_backend, method, env_name, stored_name, provider,

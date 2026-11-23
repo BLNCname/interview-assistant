@@ -22,6 +22,9 @@ class RecordingSignal:
 
 class RecordingEvents:
     def __init__(self) -> None:
+        from itertools import count
+        self.next_request_id = count(1).__next__
+        self.answer_finished = RecordingSignal()
         self.answer_reset = RecordingSignal()
         self.answer_delta = RecordingSignal()
         self.notification = RecordingSignal()

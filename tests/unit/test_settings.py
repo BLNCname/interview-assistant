@@ -24,6 +24,9 @@ class FakeSecretStore:
         self.has_token = has_token
         self.saved: list[str] = []
 
+    def get_stored_token(self, provider):
+        return self.saved[-1] if self.saved and provider == "lm" else None
+
     def has_lm_token(self) -> bool:
         return self.has_token
 

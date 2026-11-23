@@ -622,3 +622,20 @@ async def test_invalid_configuration_fails_before_io(tmp_path: Path, server: dic
     with pytest.raises(NativeMCPError) as caught:
         await client.retrieve(search_request())
     assert "secret" not in str(caught.value)
+
+
+@pytest.mark.parametrize("url,allowed", [
+    ("https://catalog.example/mcp", True), ("http://catalog.example/mcp", False),
+    ("http://localhost:1000/mcp", True), ("http://127.0.0.1/mcp", True), ("http://[::1]/mcp", True),
+])
+def test_custom_mcp_transport_requires_tls_outside_loopback(tmp_path, url, allowed):
+    import json
+    from interview_assistant.retrieval.mcp_client import NativeMCPClient, NativeMCPError
+    path = tmp_path / "mcp.json"
+    path.write_text(json.dumps({"mcpServers": {"context7": {"url": url}}}), encoding="utf-8")
+    client = NativeMCPClient(path)
+    if allowed:
+        assert client._server_configuration("mcp/context7")["url"] == url
+    else:
+        with pytest.raises(NativeMCPError, match="HTTPS"):
+            client._server_configuration("mcp/context7")

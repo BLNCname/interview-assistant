@@ -217,6 +217,10 @@ class QuestionDetector:
         self._recent: deque[_RecentQuestion] = deque()
         self._lock = Lock()
 
+    def clear_recent(self) -> None:
+        with self._lock:
+            self._recent.clear()
+
     def detect(
         self,
         source: AudioSource,

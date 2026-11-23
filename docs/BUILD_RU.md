@@ -4,7 +4,7 @@
 
 ## Окружение
 
-Установите Git, Python 3.11/3.12 x64 и [uv](https://docs.astral.sh/uv/getting-started/installation/). Для сетевого установщика используется [Inno Setup 6.7.2](https://jrsoftware.org/isinfo.php). Для полной сборки с моделью резервируйте не менее 20 ГБ диска; дополнительные сборки и кеши требуют дополнительного места. Репозиторий приватный: Git должен быть авторизован для доступа к нему.
+Установите Git, Python 3.11/3.12 x64 и [uv](https://docs.astral.sh/uv/getting-started/installation/). Для сетевого установщика используется [Inno Setup 6.7.2](https://jrsoftware.org/isinfo.php). Для полной сборки с моделью резервируйте не менее 20 ГБ диска; дополнительные сборки и кеши требуют дополнительного места. Исходники доступны в публичном репозитории.
 
 ```powershell
 git clone https://github.com/BLNCname/interview-assistant.git
@@ -37,7 +37,7 @@ STT_DEVICE=cuda
 STT_COMPUTE_TYPE=int8_float16
 ```
 
-Для имени `large-v3-turbo` приложение сначала ищет и проверяет локальный `models/stt/large-v3-turbo`. Если локальной модели нет, библиотека может скачать её через Hugging Face. Явный альтернативный путь лучше задавать абсолютным; относительный зависит от рабочей папки. Готовая установка использует локальный каталог, который подготовил и проверил Setup.
+Для имени `large-v3-turbo` приложение сначала ищет и проверяет локальный `models/stt/large-v3-turbo`. Если локальной модели нет, выберите модель в Settings → Audio и нажмите Download model. Проверка готовности использует локальные файлы. Явный альтернативный путь лучше задавать абсолютным; относительный зависит от рабочей папки. Готовая установка использует локальный каталог, который подготовил и проверил Setup.
 
 ## Запуск и тесты
 
@@ -81,13 +81,19 @@ STT_COMPUTE_TYPE=int8_float16
   -DistPath dist/InterviewAssistant `
   -InventoryPath build/release-inventory.json `
   -CollectTocPath build/pyinstaller/interview_assistant/COLLECT-00.toc `
-  -OutputPath dist/online-installer-0.1.4 `
-  -Version 0.1.4
+  -OutputPath dist/online-installer-0.1.6 `
+  -Version 0.1.6
 ```
 
 `build_online_installer.ps1` проверяет исходный portable по описи и STT manifest, сопоставляет его файлы с закреплёнными wheel-архивами из `uv.lock`, получает и проверяет архивы, затем компилирует **один `Setup.exe`**. Код приложения и базовый Python включаются в него; публичные зависимости и модель загружаются во время установки. Не создавайте опись лишь ради обхода несовпадения неизвестных файлов.
 
-Кеш издателя по умолчанию — `build/online-installer-cache`; другой каталог задаётся через `-CachePath`. Это отдельный кеш от пользовательского `%LOCALAPPDATA%\InterviewAssistant\InstallerCache`. В каталоге результата также остаются manifest, журналы и `SHA256SUMS.txt` для проверки издателем. В Assets релиза публикуется только `Setup.exe`, а его SHA-256 переносится в описание релиза.
+Кеш издателя по умолчанию — `build/online-installer-cache`; другой каталог задаётся через `-CachePath`. Это отдельный кеш от пользовательского `%LOCALAPPDATA%\InterviewAssistant\InstallerCache`. В каталоге результата также остаются manifest, журналы и `SHA256SUMS.txt` для проверки издателем. Для переносной поставки запустите из корня репозитория:
+
+```powershell
+.\.venv\Scripts\python.exe scripts/build_portable_archives.py --dist dist/InterviewAssistant --payload dist/online-installer-0.1.6/payload/online_payload.json --output dist/release-assets --version 0.1.6
+```
+
+Первый ZIP содержит приложение и модель, второй — CUDA. Публикуются оба ZIP, Setup.exe и SHA256SUMS.txt. При распаковке обоих архивов получается исходная полная папка PyInstaller.
 
 Устройство загрузок, ограничения кеша и публичные источники описаны в [ONLINE_INSTALLER_RU.md](ONLINE_INSTALLER_RU.md). Старый `build_installer.ps1` сохранён для прежнего офлайн-формата и не является основным способом подготовки релиза 0.1.4.
 

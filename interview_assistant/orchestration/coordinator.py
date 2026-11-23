@@ -32,7 +32,6 @@ class RequestCoordinator:
     def __init__(self, events: EventBus, client: StreamClient) -> None:
         self._events = events
         self._client = client
-        self._next_request_id = 0
         self._active_id: int | None = None
         self._active_task: asyncio.Task[RequestOutcome] | None = None
         self._completions: OrderedDict[
@@ -54,8 +53,7 @@ class RequestCoordinator:
         publish_output: bool = True,
     ) -> int:
         self._trim_completions()
-        self._next_request_id += 1
-        request_id = self._next_request_id
+        request_id = self._events.next_request_id()
         self._active_id = request_id
         if self._active_task is not None:
             self._active_task.cancel()
@@ -69,6 +67,8 @@ class RequestCoordinator:
         self._active_task = task
 
         def finish_request(finished: asyncio.Task[RequestOutcome]) -> None:
+            if publish_output and self._active_id == request_id:
+                self._events.answer_finished.emit(request_id)
             self._task_done(request_id, completion, finished)
 
         task.add_done_callback(finish_request)
@@ -145,17 +145,21 @@ class RequestCoordinator:
             self._completions.pop(request_id, None)
         return outcome
 
-    async def cancel_active(self) -> None:
+    def interrupt_active(self) -> asyncio.Task[RequestOutcome] | None:
         task = self._active_task
         self._active_id = None
+        if task is not None:
+            task.cancel()
+        return task
+
+    async def cancel_active(self) -> None:
+        task = self.interrupt_active()
         if task is None:
             return
-
-        task.cancel()
         try:
-            await task
-        except asyncio.CancelledError:
-            pass
+            await asyncio.gather(task, return_exceptions=True)
+            if not task.cancelled():
+                task.result()
         finally:
             if self._active_task is task:
                 self._active_task = None

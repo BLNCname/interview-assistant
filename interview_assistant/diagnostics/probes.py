@@ -229,6 +229,8 @@ class ProductionReadinessProbes:
         selected = self.config.audio.system_device_id
         if not selected:
             return ProbeOutcome("failed", "No system-audio device is selected")
+        if selected.isdecimal():
+            return ProbeOutcome("failed", "Select the system-audio endpoint again in Audio to save its Windows ID.")
         device = next((item for item in await self._devices() if item.id == selected), None)
         if device is None or not device.is_loopback:
             return ProbeOutcome("failed", "Selected system-audio loopback is unavailable")
@@ -238,6 +240,8 @@ class ProductionReadinessProbes:
         selected = self.config.audio.microphone_device_id
         if not selected:
             return ProbeOutcome("failed", "No microphone is selected")
+        if selected.isdecimal():
+            return ProbeOutcome("failed", "Select the microphone again in Audio to save its Windows ID.")
         if selected == self.config.audio.system_device_id:
             return ProbeOutcome("failed", "Microphone and system audio must be distinct")
         device = next((item for item in await self._devices() if item.id == selected), None)

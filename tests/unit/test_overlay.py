@@ -78,6 +78,7 @@ def test_markdown_split_across_deltas_renders_without_delimiters(qtbot) -> None:
     bus.answer_reset.emit(7)
     bus.answer_delta.emit(7, "## **Структура")
     bus.answer_delta.emit(7, " проблемы**\n\n- Первый пункт\n- Второй пункт")
+    bus.answer_finished.emit(7)
 
     assert ribbon.answer_text.startswith("## **Структура")
     assert "**" not in ribbon.answer_browser.toPlainText()
@@ -249,6 +250,7 @@ def test_stream_rerender_preserves_manual_scroll_position(qtbot) -> None:
     before = bar.value() / bar.maximum()
 
     ribbon.append_delta(1, "tail")
+    qtbot.waitUntil(lambda: ribbon.answer_browser.toPlainText().endswith("tail"))
 
     after = bar.value() / bar.maximum()
     assert after == pytest.approx(before, abs=0.08)
@@ -276,6 +278,7 @@ def test_stream_scroll_restore_uses_final_range_after_ribbon_growth(qtbot) -> No
     before = bar.value() / bar.maximum()
 
     ribbon.append_delta(2, "tail")
+    bus.answer_finished.emit(2)
     QApplication.processEvents()
 
     assert ribbon.height() > initial_height
@@ -711,6 +714,7 @@ def test_delta_rerenders_accumulated_answer(qtbot) -> None:
 
     bus.answer_delta.emit(3, "one")
     bus.answer_delta.emit(3, " two")
+    bus.answer_finished.emit(3)
 
     assert ribbon.answer_browser.toPlainText() == "one two"
     assert ribbon.answer_browser.verticalScrollBar().value() == (
@@ -1711,3 +1715,27 @@ def test_application_shutdown_closes_ribbon_idempotently(qtbot) -> None:
     assert app.is_shutdown
     assert not app.ribbon.isVisible()
     assert app.states.state is ApplicationState.STOPPED
+
+
+def test_render_burst_coalesces_and_finishes_without_stale_content(qtbot, monkeypatch):
+    import interview_assistant.ui.overlay as overlay
+    bus = EventBus()
+    ribbon = LiquidRibbon(bus)
+    qtbot.addWidget(ribbon)
+    calls = []
+    original = overlay.render_safe_markdown
+    def render(browser, markdown, **kwargs):
+        calls.append(len(markdown))
+        return original(browser, markdown, **kwargs)
+    monkeypatch.setattr(overlay, "render_safe_markdown", render)
+    bus.answer_reset.emit(1)
+    for _ in range(500):
+        bus.answer_delta.emit(1, "word ")
+    assert len(calls) == 1
+    bus.answer_finished.emit(1)
+    assert len(calls) == 2 and ribbon.answer_browser.toPlainText().strip() == ribbon.answer_text.strip()
+    bus.answer_delta.emit(1, "old")
+    ribbon.clear_answer()
+    bus.answer_finished.emit(1)
+    bus.answer_delta.emit(1, "late")
+    assert not ribbon.answer_text and not ribbon.answer_browser.toPlainText()

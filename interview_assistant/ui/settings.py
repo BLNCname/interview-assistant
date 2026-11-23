@@ -92,6 +92,8 @@ HOTKEY_COPY = {
 
 
 class SecretStoreProtocol(Protocol):
+    def get_stored_token(self, provider: str) -> str | None: ...
+
     def has_lm_token(self) -> bool: ...
 
     def set_lm_token(self, value: str) -> None: ...
@@ -266,7 +268,21 @@ class SettingsBinding:
             token.strip(), firecrawl_token.strip(), context7_token.strip(),
             remove_token, remove_firecrawl_token, remove_context7_token,
         ))
-        hotkey_only = hotkeys_changed and not non_hotkey_changed and not secret_changed
+        if not (hotkeys_changed or non_hotkey_changed or secret_changed):
+            if self._persist is not None:
+                self._persist(candidate)
+            return False
+        changes = {
+            name: (None if remove else value.strip())
+            for name, value, remove in (
+                ("openrouter" if active_provider == "openrouter" else "lm", token, remove_token),
+                ("firecrawl", firecrawl_token, remove_firecrawl_token),
+                ("context7", context7_token, remove_context7_token),
+            )
+            if remove or value.strip()
+        }
+        originals = {name: self._secret_store.get_stored_token(name) for name in changes}
+        attempted: list[str] = []
         previous_bindings = self.config.hotkeys.as_bindings()
         live_updated = False
         if hotkeys_changed and self._apply_hotkeys is not None:
@@ -277,29 +293,24 @@ class SettingsBinding:
                 raise
             live_updated = True
         try:
-            if remove_token:
-                if active_provider == "openrouter":
-                    self._secret_store.delete_openrouter_token()
-                else:
-                    self._secret_store.delete_lm_token()
-            elif token.strip():
-                if active_provider == "openrouter":
-                    self._secret_store.set_openrouter_token(token)
-                else:
-                    self._secret_store.set_lm_token(token)
-            if remove_firecrawl_token:
-                self._secret_store.delete_firecrawl_token()
-            elif firecrawl_token.strip():
-                self._secret_store.set_firecrawl_token(firecrawl_token)
-            if remove_context7_token:
-                self._secret_store.delete_context7_token()
-            elif context7_token.strip():
-                self._secret_store.set_context7_token(context7_token)
+            for name, value in changes.items():
+                if value != originals[name]:
+                    attempted.append(name)
+                    self._write_credential(name, value)
             if self._persist is not None:
                 self._persist(candidate)
         except Exception:
             if live_updated:
                 self._restore_live_hotkeys(previous_bindings)
+            rollback_failed = False
+            for name in reversed(attempted):
+                try:
+                    if self._secret_store.get_stored_token(name) != originals[name]:
+                        self._write_credential(name, originals[name])
+                except Exception:
+                    rollback_failed = True
+            if rollback_failed:
+                raise CredentialRollbackError from None
             raise
         self.config.audio = candidate.audio
         self.config.provider = candidate.provider
@@ -309,7 +320,13 @@ class SettingsBinding:
         self.config.search = candidate.search
         self.config.overlay = candidate.overlay
         self.config.hotkeys = candidate.hotkeys
-        return not hotkey_only
+        return non_hotkey_changed or secret_changed
+
+    def _write_credential(self, name: str, value: str | None) -> None:
+        if value is None:
+            getattr(self._secret_store, f"delete_{name}_token")()
+        else:
+            getattr(self._secret_store, f"set_{name}_token")(value)
 
     def _restore_live_hotkeys(self, bindings: Mapping[HotkeyAction, str]) -> None:
         if self._apply_hotkeys is None:
@@ -318,6 +335,10 @@ class SettingsBinding:
             self._apply_hotkeys(bindings)
         except Exception:
             pass
+
+
+class CredentialRollbackError(RuntimeError):
+    pass
 
 
 class SettingsWindow(QMainWindow):
@@ -356,6 +377,7 @@ class SettingsWindow(QMainWindow):
         }
         self._provider_model_choices = {binding.config.provider: models}
         self._controller_close = False
+        self.settings_revision = 0
         self.setWindowTitle("Interview Assistant Settings")
         self.resize(820, 620)
         self._build_ui(audio_devices, models)
@@ -889,9 +911,6 @@ class SettingsWindow(QMainWindow):
 
     def _download_model(self) -> None:
         model, device = self.stt_model_combo.currentData(), self.stt_device_combo.currentData()
-        if model not in MODEL_LABELS:
-            self.download_status.setText("This custom model uses its configured path or repository.")
-            return
         for widget in (self.download_button, self.stt_model_combo, self.stt_device_combo):
             widget.setEnabled(False)
         self.download_status.setText("Checking model files…")
@@ -1017,6 +1036,7 @@ class SettingsWindow(QMainWindow):
             self.shared_instance_label.setText(f"Unique model instances: {count}")
 
     def _invalidate_readiness(self, _value: object = None) -> None:
+        self.settings_revision += 1
         if self._readiness_report is None:
             return
         self.clear_readiness("Run readiness checks again after settings changes")
@@ -1156,6 +1176,9 @@ class SettingsWindow(QMainWindow):
                 context7_token=self.context7_token_edit.text(),
                 remove_context7_token=self.context7_remove_token_checkbox.isChecked(),
             )
+        except CredentialRollbackError:
+            self.show_notification("Saving failed and Windows could not restore every credential. Check the affected keys.")
+            return False
         except Exception:
             self.readiness_status_label.setText(
                 "Settings could not be saved securely. Check Windows Credential Manager "
@@ -1175,6 +1198,7 @@ class SettingsWindow(QMainWindow):
         ):
             removal.setChecked(False)
         if self._configuration_issue_notification:
+            requires_readiness = requires_readiness or self._readiness_report is None
             self.notification_label.clear()
             self.notification_label.hide()
             self._configuration_issue_notification = False

@@ -239,6 +239,14 @@ class SecretStore:
     """User-saved credentials take precedence; dotenv/process values are fallback."""
 
     SERVICE = "InterviewAssistant"
+    _STORED_NAMES = {
+        "lm": "lmstudio_api_token", "openrouter": "openrouter_api_key",
+        "firecrawl": "firecrawl_api_key", "context7": "context7_api_key",
+    }
+
+    def get_stored_token(self, provider: str) -> str | None:
+        """Snapshot only the OS credential. Environment values must never be copied back."""
+        return keyring.get_password(self.SERVICE, self._STORED_NAMES[provider])
 
     def __init__(self, *, env_path: Path | None = None) -> None:
         self._env_path = env_path

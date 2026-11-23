@@ -338,6 +338,23 @@ def test_mouse_and_keyboard_chords_share_one_runtime_state():
     assert calls == ["mixed", "single"]
 
 
+def test_second_physical_control_does_not_toggle_pause_twice():
+    bus, factory = EventBus(), ListenerFactory()
+    calls = []
+    bus.pause_toggled.connect(lambda: calls.append("pause"))
+    manager = HotkeyManager(bus, {"pause": "ctrl+p"}, listener_factory=factory)
+    manager.start()
+    keys = factory.listeners[0]
+    for key in ("Key.ctrl_l", "p", "Key.ctrl_r"):
+        keys.on_press(key)
+    keys.on_release("Key.ctrl_l")
+    keys.on_release("p")
+    assert calls == ["pause"]
+    keys.on_press("p")
+    assert calls == ["pause", "pause"]
+    manager.stop()
+
+
 def test_listener_lifecycle_is_idempotent_and_can_restart() -> None:
     factory = ListenerFactory()
     manager = HotkeyManager(

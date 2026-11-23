@@ -10,7 +10,8 @@ param(
 
     [string]$InventoryPath = "",
 
-    [switch]$RepeatInstall
+    [switch]$RepeatInstall,
+    [ValidateSet("offline", "core", "full")][string]$Profile = "offline"
 )
 
 $ErrorActionPreference = "Stop"
@@ -104,6 +105,9 @@ foreach ($registryRoot in @(
 }
 New-Item -ItemType Directory -Force -Path $runRoot | Out-Null
 New-Item -ItemType Directory -Force -Path (Split-Path -Parent $ReportPath) | Out-Null
+$taskSelection = if ($Profile -eq "full") { '/TASKS="preloadstt,cuda"' } else { '/TASKS=""' }
+$modelArguments = @()
+if ($Profile -eq "core") { $modelArguments = @("--without-model") }
 
 $install = Start-Process `
     -FilePath $installer `
@@ -114,7 +118,7 @@ $install = Start-Process `
         "/NORESTARTAPPLICATIONS",
         "/NOCLOSEAPPLICATIONS",
         "/NOICONS",
-        '/TASKS=""',
+        $taskSelection,
         "/SP-",
         ('/DIR="' + $smoke + '"'),
         ('/LOG="' + $installLog + '"')
@@ -139,7 +143,7 @@ $validationOutput = @(& $python $validator `
     "--dist" $smoke `
     "--manifest" $manifest `
     "--inventory" $inventory `
-    "--installed" 2>&1)
+    "--installed" @modelArguments 2>&1)
 if ($LASTEXITCODE -ne 0) {
     throw "Installed distribution failed inventory and model hash validation."
 }
@@ -170,12 +174,12 @@ if ($RepeatInstall) {
     $repeat = Start-Process -FilePath $installer -ArgumentList @(
         "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART",
         "/NORESTARTAPPLICATIONS", "/NOCLOSEAPPLICATIONS", "/NOICONS",
-        '/TASKS=""', "/SP-", ('/DIR="' + $smoke + '"'),
+        $taskSelection, "/SP-", ('/DIR="' + $smoke + '"'),
         ('/LOG="' + (Join-Path $runRoot 'installer-smoke-repeat.log') + '"')
     ) -WindowStyle Hidden -Wait -PassThru
     $repeatExitCode = $repeat.ExitCode
     if ($repeatExitCode -ne 0) { throw 'Repeat installation failed.' }
-    & $python $validator --dist $smoke --manifest $manifest --inventory $inventory --installed
+    & $python $validator --dist $smoke --manifest $manifest --inventory $inventory --installed @modelArguments
     if ($LASTEXITCODE -ne 0) { throw 'Repeat installation changed the expected inventory.' }
 }
 
@@ -207,7 +211,9 @@ $result = [PSCustomObject]@{
     DiagnosticsExitCode = $diagnostics.ExitCode
     UninstallExitCode = $uninstall.ExitCode
     Frozen = $diagnosticsReport.frozen
-    ModelInventoryAndHashesValidated = $true
+    ModelInventoryAndHashesValidated = ($Profile -ne "core")
+    SelectedInventoryAndHashesValidated = $true
+    Profile = $Profile
     InstallTreeRemoved = $true
     RepeatInstallExitCode = $repeatExitCode
     InventoryPath = $inventory

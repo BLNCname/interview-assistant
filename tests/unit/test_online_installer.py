@@ -108,7 +108,7 @@ def _digest(data):
 
 def _fixture(
     tmp_path, compiler, url, *, member="vendor/runtime.dll", member_hash=None,
-    wheel_first=False, expanded_size=None, legacy=False,
+    wheel_first=False, expanded_size=None, legacy=False, cuda_wheel=False,
 ):
     model = b"fixture model, not actual STT weights"
     library = b"fixture native dependency, never executed"
@@ -127,6 +127,8 @@ def _fixture(
     ]
     if expanded_size is not None:
         artifacts[1]["ExpandedSize"] = expanded_size
+    if cuda_wheel:
+        artifacts[1]["Cuda"] = True
     files = [
         dict(RelativePath="model.bin", MemberPath="", SHA256=_digest(model),
              ArtifactIndex=0, Size=len(model)),
@@ -183,9 +185,10 @@ SetupLogging=yes
 {legacy_include}
 [Tasks]
 Name: "preloadstt"; Description: "Preload fixture model"
+Name: "cuda"; Description: "Fixture CUDA acceleration"; Flags: unchecked
 [Files]
 Source: "{{code:GetPreparedFile|0}}"; DestDir: "{{app}}"; DestName: "model.bin"; Tasks: preloadstt; Flags: external ignoreversion; ExternalSize: {len(model)}; Hash: "{_digest(model)}"
-Source: "{{code:GetPreparedFile|1}}"; DestDir: "{{app}}"; DestName: "runtime.dll"; Flags: external ignoreversion; ExternalSize: {len(library)}; Hash: "{_digest(library)}"
+Source: "{{code:GetPreparedFile|1}}"; DestDir: "{{app}}"; DestName: "runtime.dll"; Flags: external ignoreversion; ExternalSize: {len(library)}; Hash: "{_digest(library)}"{'; Tasks: cuda' if cuda_wheel else ''}
 [Code]
 #include "{INCLUDE}"
 ''', encoding="utf-8",
@@ -242,7 +245,7 @@ def _stop_fixture_download(app_name):
     return any(posted)
 
 
-def _run(fixture, *, cancel_after=None, preload=True):
+def _run(fixture, *, cancel_after=None, preload=True, cuda=False):
     assert _isolated_desktop(), "Refusing to start a native fixture on the interactive desktop"
     log = fixture["setup"].parent / ("setup-" + uuid.uuid4().hex + ".log")
     temporary = ROOT / ".cache" / "inno-temp" / uuid.uuid4().hex[:8]
@@ -252,7 +255,7 @@ def _run(fixture, *, cancel_after=None, preload=True):
     process = subprocess.Popen(
         [str(fixture["setup"]), "/SILENT" if cancel_after is not None else "/VERYSILENT",
          "/SUPPRESSMSGBOXES", "/NORESTART", "/SP-",
-         "/TASKS=" + ("preloadstt" if preload else "!preloadstt"),
+         "/TASKS=" + ("preloadstt" if preload else "!preloadstt") + (",cuda" if cuda else ",!cuda"),
          "/NOCLOSEAPPLICATIONS", "/NORESTARTAPPLICATIONS", "/LOG=" + str(log)],
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=environment,
     )
@@ -293,6 +296,17 @@ def test_native_online_success_uses_verified_cache_when_offline(tmp_path, compil
         code, log = _run(fixture)
         assert code == 0, log
         assert state["requests"] == []
+
+
+@pytest.mark.parametrize("cuda", [False, True])
+def test_cuda_download_extract_and_install_follow_component_choice(tmp_path, compiler, cuda):
+    with _server() as (url, state):
+        fixture = _fixture(tmp_path, compiler, url, cuda_wheel=True)
+        state["responses"]["/wheel"] = (200, fixture["wheel"])
+        code, log = _run(fixture, preload=False, cuda=cuda)
+        assert code == 0, log
+        assert state["requests"] == (["/wheel"] if cuda else [])
+        assert (fixture["install"] / "runtime.dll").exists() == cuda
 
 
 def test_deferred_model_installs_without_contacting_model_host(tmp_path, compiler):

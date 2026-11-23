@@ -6,6 +6,26 @@ import pytest
 from interview_assistant.stt import download
 
 
+def test_legacy_model_is_cache_only_until_user_requests_download(monkeypatch, tmp_path):
+    calls = []
+    def lookup(name, *, local_files_only):
+        calls.append((name, local_files_only))
+        if local_files_only:
+            raise FileNotFoundError
+        for f in ("config.json", "model.bin", "tokenizer.json"):
+            (tmp_path / f).touch()
+        return str(tmp_path)
+    monkeypatch.setattr("faster_whisper.utils.download_model", lookup)
+    with pytest.raises(download.ModelUnavailable):
+        download.prepare_model("medium", "cpu", download=False)
+    assert download.prepare_model("medium", "cpu", download=True) == (str(tmp_path), None)
+    assert calls == [("medium", True), ("medium", False)]
+    (tmp_path / "tokenizer.json").unlink()
+    with pytest.raises(download.ModelUnavailable, match="tokenizer"):
+        download.prepare_model(str(tmp_path), "cpu", download=False)
+    assert len(calls) == 2
+
+
 @pytest.mark.parametrize("supports_ranges", [True, False])
 def test_interrupted_model_download_resumes_or_restarts(tmp_path, monkeypatch, supports_ranges):
     content = b"valid speech model"
