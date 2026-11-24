@@ -7,7 +7,8 @@ import ctranslate2  # type: ignore[import-untyped]
 import numpy as np
 from faster_whisper import WhisperModel  # type: ignore[import-untyped]
 
-from .download import ModelUnavailable
+from .adapters import intel_devices
+from .download import ModelUnavailable, cache_root
 
 
 class GPUWhisperModel(WhisperModel):
@@ -17,11 +18,13 @@ class GPUWhisperModel(WhisperModel):
             import openvino as ov  # type: ignore[import-untyped]
 
             core = ov.Core()
-            devices = [d for d in core.available_devices if d.split(".")[0] == "GPU"
-                       and "intel" in core.get_property(d, "FULL_DEVICE_NAME").lower()]
+            devices = intel_devices(core)
             if adapter >= len(devices):
                 raise ModelUnavailable("OpenVINO GPU is unavailable. Check the graphics driver and GPU index in Audio.")
             try:
+                cache = cache_root() / "compiled" / "openvino"
+                cache.mkdir(parents=True, exist_ok=True)
+                core.set_property({"CACHE_DIR": str(cache)})
                 model = core.read_model(str(encoder))
                 # The stream sends one 30-second mel window per encoder invocation.
                 model.reshape([1, self.feature_extractor.mel_filters.shape[0], self.feature_extractor.nb_max_frames])

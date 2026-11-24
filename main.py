@@ -102,6 +102,9 @@ def main(
     config_path: Path | None = None,
 ) -> int:
     runtime_argv = list(sys.argv if argv is None else argv)
+    if any(flag in runtime_argv[1:] for flag in ("--prepare-stt", "--defer-stt", "--stt-worker")):
+        from interview_assistant.stt.automatic import cli
+        return cli(runtime_argv[1:], default_config_path)
     diagnostic_exit_code = _headless_diagnostic_exit_code(
         runtime_argv,
         config_path=config_path,
@@ -137,6 +140,16 @@ def main(
         raise RuntimeError("Application branding icon could not be loaded")
     qt_app.setWindowIcon(icon)
     qt_app.setStyleSheet(graphite_stylesheet())
+    if getattr(sys, "frozen", False):
+        from interview_assistant.stt.automatic import needs_first_run
+        if needs_first_run(selected_config):
+            from interview_assistant.ui.hardware_setup import prepare_dialog
+            previous_quit = qt_app.quitOnLastWindowClosed()
+            qt_app.setQuitOnLastWindowClosed(False)
+            try:
+                prepare_dialog(selected_config)
+            finally:
+                qt_app.setQuitOnLastWindowClosed(previous_quit)
     loop = QEventLoop(qt_app)
     asyncio.set_event_loop(loop)
     controller = create_production_controller(

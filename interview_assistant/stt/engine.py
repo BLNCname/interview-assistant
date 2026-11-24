@@ -148,7 +148,12 @@ class WhisperEngine:
                         return self._model
                 else:
                     resolved_model = resolve_stt_model(self.model_name)
-                if resolved_model != self.model_name or not self._allow_download:
+                if self._model_factory is None and self.device == "cuda" and self._gpu_index:
+                    self._model = _create_whisper_model(
+                        resolved_model, device=self.device, compute_type=self.compute_type,
+                        device_index=self._gpu_index, local_files_only=True,
+                    )
+                elif resolved_model != self.model_name or not self._allow_download:
                     self._model = factory(
                         resolved_model,
                         device=self.device,
@@ -170,6 +175,7 @@ def _create_whisper_model(
     device: str,
     compute_type: str,
     local_files_only: bool = False,
+    device_index: int = 0,
 ) -> _WhisperModel:
     if device == "cuda":
         configure_cuda_runtime()
@@ -179,6 +185,8 @@ def _create_whisper_model(
         "device": device,
         "compute_type": compute_type,
     }
+    if device_index:
+        model_options["device_index"] = device_index
     if local_files_only:
         model_options["local_files_only"] = True
     return cast(

@@ -5,7 +5,7 @@ param(
     [Parameter(Mandatory = $true)][string]$InventoryPath,
     [Parameter(Mandatory = $true)][string]$CollectTocPath,
     [Parameter(Mandatory = $true)][string]$OutputPath,
-    [ValidatePattern('^\d+\.\d+\.\d+$')][string]$Version = '0.1.6',
+    [ValidatePattern('^\d+\.\d+\.\d+$')][string]$Version = '0.1.7',
     [string]$CachePath = ''
 )
 
@@ -33,12 +33,12 @@ $manifest = Join-Path $root 'packaging\stt_model_manifest.json'
 $prepare = Join-Path $root 'scripts\prepare_online_payload.py'
 $validator = Join-Path $root 'scripts\validate_release_dist.py'
 
-& $python $validator --dist $dist --manifest $manifest --inventory $inventory
+& $python $validator --dist $dist --manifest $manifest --inventory $inventory --without-model
 if ($LASTEXITCODE -ne 0) { throw 'Portable inventory validation failed.' }
 $preparationArgs = @(
     $prepare, '--dist', $dist, '--inventory', $inventory, '--collect', $collect,
     '--lock', (Join-Path $root 'uv.lock'), '--site-packages', (Join-Path $root '.venv\Lib\site-packages'),
-    '--model-manifest', $manifest, '--output', $generated
+    '--model-manifest', $manifest, '--output', $generated, '--without-model'
 )
 & $python @preparationArgs
 if ($LASTEXITCODE -ne 0) { throw 'Online payload mapping failed.' }
@@ -52,7 +52,7 @@ if (-not $payload.wheel_archives_verified) { throw 'Wheel archives were not veri
 
 $compilerInputs = @(
     'packaging\interview_assistant_online.iss', 'packaging\online_downloads.iss',
-    'packaging\online_hardware.iss', 'packaging\installer_gpu_probe.ps1',
+    'packaging\online_hardware.iss', 'packaging\cuda_runtime_manifest.json',
     'packaging\online_legacy_cleanup.iss',
     'scripts\prepare_online_payload.py', 'scripts\fetch_online_payload.py',
     'scripts\build_online_installer.ps1', 'uv.lock', 'packaging\stt_model_manifest.json'

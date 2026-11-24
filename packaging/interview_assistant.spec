@@ -13,7 +13,7 @@ ROOT = Path(SPECPATH).resolve().parent
 MANIFEST_PATH = ROOT / "packaging" / "stt_model_manifest.json"
 STT_MODEL_ENVIRONMENT = "INTERVIEW_ASSISTANT_STT_MODEL_PATH"
 MODEL_WEIGHT_SUFFIXES = frozenset(
-    {".bin", ".ckpt", ".gguf", ".pt", ".pth", ".safetensors"}
+    {".bin", ".ckpt", ".gguf", ".onnx", ".pt", ".pth", ".safetensors"}
 )
 # Dependency analysis must use runtimes belonging to this environment/Windows.
 # Other desktop apps and development tools can put incompatible DLLs on PATH;
@@ -43,9 +43,6 @@ PACKAGES = (
     "soundcard",
     "pynput",
     "mcp.client",
-    "nvidia.cuda_runtime",
-    "nvidia.cublas",
-    "nvidia.cudnn",
 )
 DISTRIBUTIONS = (
     "PyQt6",
@@ -60,9 +57,6 @@ DISTRIBUTIONS = (
     "onnxruntime-directml",
     "mcp",
     "python-dotenv",
-    "nvidia-cuda-runtime-cu12",
-    "nvidia-cublas-cu12",
-    "nvidia-cudnn-cu12",
 )
 
 
@@ -95,6 +89,7 @@ datas = [
     (str(ROOT / "assets" / "diagnostics" / "stt-ru.wav"), "assets/diagnostics"),
     (str(ROOT / "assets" / "branding" / "interview-assistant.ico"), "assets/branding"),
     (str(MANIFEST_PATH), "packaging"),
+    (str(ROOT / "packaging" / "cuda_runtime_manifest.json"), "packaging"),
     (str(ROOT / "packaging" / "stt_catalog.json"), "packaging"),
     (str(ROOT / "prompts" / "interview_system.md"), "prompts"),
 ]
@@ -140,6 +135,8 @@ analysis = Analysis(
     noarchive=False,
     optimize=0,
 )
+if not os.environ.get(STT_MODEL_ENVIRONMENT, "").strip():
+    analysis.datas = _without_model_weights(analysis.datas)
 pyz = PYZ(analysis.pure)
 
 exe = EXE(

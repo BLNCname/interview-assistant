@@ -168,6 +168,8 @@ def _windows_composition_enabled() -> bool:
 
 
 def _cuda_device_count() -> int:
+    from interview_assistant.windows_cuda import use_driver_cache
+    use_driver_cache()
     module = cast(_CTranslate2Module, import_module("ctranslate2"))
     return int(module.get_cuda_device_count())
 
@@ -881,7 +883,7 @@ def create_production_controller(
     try:
         config = AppConfig.load(path, env_path=env_path)
         if not path.exists():
-            if (getattr(sys, "frozen", False)
+            if (config.audio.device == "cuda" and getattr(sys, "frozen", False)
                     and not {"STT_DEVICE", "STT_COMPUTE_TYPE"}.intersection(environment_values(env_path))):
                 from interview_assistant.windows_cuda import bundled_cuda_available
 
@@ -918,6 +920,7 @@ def create_production_controller(
         audio_devices=(),
         models=(),
         settings=active_settings,
+        config_path=path,
     )
 
     def factory(candidate: AppConfig, token: str | None) -> ControllerComponents:

@@ -7,7 +7,7 @@ param(
     [string]$OutputPath = "",
 
     [ValidatePattern("^[0-9A-Za-z][0-9A-Za-z._+-]*$")]
-    [string]$Version = "0.1.6",
+    [string]$Version = "0.1.7",
 
     [string]$RepositoryPath = (Join-Path $PSScriptRoot ".."),
 

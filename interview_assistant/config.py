@@ -26,11 +26,19 @@ class AudioConfig(BaseModel):
     microphone_device_id: str | None = None
     sample_rate: int = 16_000
     language: Literal["auto", "ru", "en"] = "auto"
-    stt_model: str = "large-v3-turbo"
+    stt_model: str = "base"
     device: STTDevice = "cuda"
     gpu_index: int = Field(default=0, ge=0)
     saved_preferences: list[AudioPreference] = Field(default_factory=list)
     compute_type: Literal["float16", "int8_float16", "int8", "float32"] = "float16"
+
+    @model_validator(mode="before")
+    @classmethod
+    def default_precision(cls, value: object) -> object:
+        if (isinstance(value, dict) and "compute_type" not in value
+                and value.get("device") in {"cpu", "openvino", "directml"}):
+            return {**value, "compute_type": "int8"}
+        return value
 
     @model_validator(mode="after")
     def compatible_compute_type(self) -> "AudioConfig":
@@ -185,6 +193,17 @@ class AppConfig(BaseModel):
         selected_env = env_path or resolve_environment_path(path)
         values = environment_values(selected_env)
         data = config.model_dump()
+        from interview_assistant.stt.profile import explicit_fields, load_profile
+
+        hardware = load_profile(path)
+        if hardware:
+            explicit = explicit_fields(raw)
+            if "device" not in explicit or config.audio.device == hardware["device"]:
+                for key in ("device", "compute_type", "gpu_index"):
+                    if key not in explicit:
+                        data["audio"][key] = hardware[key]
+            if "stt_model" not in explicit:
+                data["audio"]["stt_model"] = hardware["stt_model"]
         for name, location in _ENV_CONFIG_FIELDS.items():
             if name not in values:
                 continue
@@ -195,6 +214,11 @@ class AppConfig(BaseModel):
                 data[field] = values[name]
             else:
                 data[section][field] = values[name]
+        if ("STT_DEVICE" in values and "STT_COMPUTE_TYPE" not in values
+                and data["audio"]["device"] in {"cpu", "openvino", "directml"}
+                and data["audio"]["compute_type"] in {"float16", "int8_float16"}
+                and "compute_type" not in explicit_fields(raw)):
+            data["audio"]["compute_type"] = "int8"
         _repair_legacy_audio(data)
         result = cls.model_validate(data)
         if result.mcp.config_path:

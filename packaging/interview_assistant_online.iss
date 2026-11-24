@@ -1,5 +1,5 @@
 #ifndef AppVersion
-  #define AppVersion "0.1.6"
+  #define AppVersion "0.1.7"
 #endif
 #ifndef DistPath
   #define DistPath "..\dist\InterviewAssistant"
@@ -37,14 +37,12 @@ RestartApplications=no
 UninstallDisplayIcon={app}\InterviewAssistant.exe
 
 [Tasks]
-Name: "cuda"; Description: "Install NVIDIA CUDA acceleration (1.28 GB). Select for NVIDIA GPUs."; Flags: unchecked
-Name: "preloadstt"; Description: "Download Whisper Large v3 Turbo now (1.62 GB). You can choose a smaller model in Settings > Audio."; Flags: unchecked
+Name: "preparestt"; Description: "Detect the GPU, download Whisper Base and prepare local speech recognition (recommended)"
 Name: "desktopicon"; Description: "Create a desktop shortcut"; GroupDescription: "Additional shortcuts:"; Flags: unchecked
 
 #include "online_legacy_cleanup.iss"
 
 [Files]
-Source: "{#SourcePath}\installer_gpu_probe.ps1"; Flags: dontcopy
 #include PayloadFilesPath
 
 [Icons]

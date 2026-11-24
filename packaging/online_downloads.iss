@@ -373,6 +373,6 @@ function UpdateReadyMemo(Space, NewLine, MemoUserInfoInfo, MemoDirInfoInfo, Memo
   MemoComponentsInfo, MemoGroupInfo, MemoTasksInfo: String): String;
 begin
   Result := MemoDirInfoInfo + NewLine + MemoGroupInfo + NewLine + MemoTasksInfo + NewLine + NewLine +
-    'Setup verifies dependencies and any selected speech model before installation.' + NewLine +
+    'Setup verifies core dependencies. Speech preparation runs on this computer after the application files are installed.' + NewLine +
     'Completed downloads are retained for retries and future installations in:' + NewLine + PayloadCacheRoot;
 end;

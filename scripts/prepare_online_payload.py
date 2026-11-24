@@ -252,7 +252,7 @@ def _wheel_candidates(
     return matches
 
 
-def _models(manifest: Path, inventory: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+def _models(manifest: Path, inventory: list[dict[str, Any]], *, without_model: bool = False) -> dict[str, dict[str, Any]]:
     document = _json(manifest)
     repository = document.get("repository", "")
     revision = document.get("revision", "")
@@ -280,6 +280,10 @@ def _models(manifest: Path, inventory: list[dict[str, Any]]) -> dict[str, dict[s
         for entry in inventory
         if entry["path"].casefold().startswith(bundle.casefold() + "/")
     }
+    if without_model:
+        if found:
+            raise PayloadError("Online release must not include STT model files")
+        return {}
     if not entries or set(found) != set(entries):
         raise PayloadError("Model inventory does not match pinned manifest")
     for name, artifact in entries.items():
@@ -345,11 +349,12 @@ def prepare_payload(
     site_packages: Path,
     model_manifest: Path,
     verify_cache: Path | None = None,
+    without_model: bool = False,
 ) -> dict[str, Any]:
     files = _inventory(dist, inventory)
     origins = _origins(collect)
     candidates = _wheel_candidates(site_packages.resolve(), lock, origins)
-    models = _models(model_manifest, files)
+    models = _models(model_manifest, files, without_model=without_model)
     selected: dict[str, dict[str, Any]] = {}
     source_digests: dict[Path, str] = {}
     for entry in files:
@@ -525,6 +530,7 @@ def main(argv: list[str] | None = None) -> int:
     ):
         parser.add_argument("--" + name, type=Path, required=True)
     parser.add_argument("--verify-cache", type=Path)
+    parser.add_argument("--without-model", action="store_true")
     args = vars(parser.parse_args(argv))
     output = args.pop("output")
     try:

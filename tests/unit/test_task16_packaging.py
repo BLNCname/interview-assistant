@@ -166,7 +166,8 @@ def test_pyinstaller_spec_declares_reproducible_onedir_windowed_bundle() -> None
     for package in ("PyQt6", "faster_whisper", "ctranslate2", "mss", "keyring"):
         assert package in source
     for package in ("nvidia.cuda_runtime", "nvidia.cublas", "nvidia.cudnn"):
-        assert package in source
+        assert f'"{package}"' not in source
+    assert "cuda_runtime_manifest.json" in source
     assert "stt-smoke.wav" in source
     assert "MODEL_WEIGHT_SUFFIXES" in source
     assert "copy_metadata" in source

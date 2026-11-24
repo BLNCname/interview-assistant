@@ -1,57 +1,52 @@
-"""Execute the installer's GPU profile rules using the real Pascal compiler."""
-
+"""Exercise the real Inno post-install entry point on an isolated desktop."""
+import os
 from pathlib import Path
 import subprocess
+from uuid import uuid4
+
+import pytest
 
 from tests.unit.test_online_installer import ROOT, compiler  # noqa: F401
 
 
-def test_native_gpu_profiles(tmp_path: Path, compiler) -> None:  # noqa: F811
-    output = tmp_path / "profiles.txt"
-    script = tmp_path / "hardware.iss"
-    def quote(value):
-        return str(value).replace("'", "''")
-    script.write_text(fr"""
-[Setup]
-AppName=Interview Assistant hardware fixture
+@pytest.mark.parametrize("mode,flag,expected", [("default", "--prepare-stt", 0),
+                                                ("skip", "--defer-stt", 0),
+                                                ("fail", "--prepare-stt", 10)])
+def test_installer_runs_preparation_automatically(tmp_path: Path, compiler, mode, flag, expected):  # noqa: F811
+    csc = Path(os.environ["SystemRoot"]) / "Microsoft.NET/Framework64/v4.0.30319/csc.exe"
+    if not csc.is_file():
+        pytest.skip("Windows .NET Framework compiler is unavailable for the native fixture")
+    source = tmp_path / "Fixture.cs"
+    source.write_text('using System.IO; class Fixture {static int Main(string[] a) {'
+                      'File.WriteAllLines(a[2]+".called", a); return File.Exists(a[2]+".fail") ? 19 : 0;}}')
+    probe = tmp_path / "probe.exe"
+    subprocess.run([str(csc), "/nologo", "/out:" + str(probe), str(source)], check=True)
+    iss = tmp_path / "fixture.iss"
+    iss.write_text(f'''[Setup]
+AppId=HardwareFixture-{uuid4().hex}
+AppName=Hardware fixture
 AppVersion=1
-DefaultDirName={{tmp}}\HardwareFixture
+DefaultDirName={tmp_path / "installed"}
 PrivilegesRequired=lowest
 Uninstallable=no
-CreateAppDir=no
+CreateUninstallRegKey=no
 OutputDir={tmp_path}
-OutputBaseFilename=HardwareFixture
+OutputBaseFilename=setup
 Compression=none
+[Tasks]
+Name: "preparestt"; Description: "Auto"
 [Files]
-Source: "{ROOT / 'packaging/installer_gpu_probe.ps1'}"; Flags: dontcopy
-#include "{ROOT / 'packaging/online_hardware.iss'}"
-[Code]
-function InitializeSetup: Boolean;
-var Results: String;
-begin
-  Results := DescribeGPU('0, NVIDIA GeForce RTX 3060 Ti, 8192, 5000, 8.6, 576.57') + #13#10'---'#13#10;
-  Results := Results + DescribeGPU('0, NVIDIA GeForce RTX 5070 Ti, 16303, 14000, 12.0, 610.74') + #13#10'---'#13#10;
-  Results := Results + DescribeGPU('0, NVIDIA GeForce RTX 3060 Ti, 8192, 5000, 8.6, 560.94') + #13#10'---'#13#10;
-  Results := Results + DescribeGPU('0, NVIDIA GeForce RTX 4050 Laptop GPU, 6144, 2000, 8.9, 610.74') + #13#10'---'#13#10;
-  Results := Results + DescribeGPU('0, NVIDIA GeForce GTX 1650, 4096, 3000, 7.5, 610.74') + #13#10'---'#13#10;
-  Results := Results + DescribeGPU('unknown') + #13#10'---'#13#10;
-  Results := Results + DescribeGPU('1, NVIDIA GeForce RTX 5070 Ti, 16303, 14000, 12.0, 610.74');
-  if not SaveStringToFile('{quote(output)}', Results, False) then RaiseException('Cannot save fixture');
-  Result := False;
-end;
-""", encoding="utf-8")
-    compiled = subprocess.run([str(compiler), "/Q", str(script)], capture_output=True,
-                              text=True, timeout=60)
-    assert compiled.returncode == 0, compiled.stdout + compiled.stderr
-    result = subprocess.run([str(tmp_path / "HardwareFixture.exe"), "/VERYSILENT",
-                             "/SUPPRESSMSGBOXES", "/SP-"], capture_output=True, timeout=30)
-    assert result.returncode != 0  # Fixture stops before installation by design.
-    profiles = output.read_text(encoding="utf-8").split("---")
-    assert len(profiles) == 7
-    assert "mode: CUDA + Int8 / Float16" in profiles[0]
-    assert "mode: CUDA + Int8 / Float16" in profiles[1]
-    assert "mode: CPU + Int8" in profiles[2] and "576.57 or later" in profiles[2]
-    assert "6 GB is a trial profile" in profiles[3] and "Less than 3 GiB" in profiles[3]
-    assert "mode: CPU + Int8" in profiles[4]
-    assert "could not be interpreted" in profiles[5]
-    assert "Additional GPU" in profiles[6]
+Source: "{probe}"; DestDir: "{{app}}"; DestName: "InterviewAssistant.exe"
+#include "{ROOT / "packaging/online_hardware.iss"}"
+''', encoding="utf-8-sig")
+    subprocess.run([str(compiler), "/Q", str(iss)], capture_output=True, check=True, timeout=90)
+    config = tmp_path / "isolated.yaml"
+    if mode == "fail":
+        Path(str(config) + ".fail").touch()
+    args = [str(tmp_path / "setup.exe"), "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/SP-",
+            "/STTCONFIG=" + str(config)]
+    if mode == "skip":
+        args.append("/TASKS=!preparestt")
+    proc = subprocess.run(args, timeout=45)
+    assert proc.returncode == expected
+    assert Path(str(config) + ".called").read_text(encoding="utf-8-sig").splitlines() == [flag, "--config", str(config)]

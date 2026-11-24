@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "interview-assistant"
-version = "0.1.6"
+version = "0.1.7"
 requires-python = ">=3.11,<3.13"
 dependencies = [
   "PyQt6>=6.7,<7",
@@ -19,6 +19,7 @@ dependencies = [
   "numpy>=1.26,<3",
   "SoundCard>=0.4.6,<0.5",
   "faster-whisper>=1.2.1,<2",
+  "ctranslate2==4.8.1",
   "huggingface-hub>=1,<2",
   "filelock>=3.12,<4",
   "openvino>=2025.3,<2027",
@@ -34,7 +35,6 @@ dependencies = [
 cuda = [
   "nvidia-cuda-runtime-cu12==12.9.79",
   "nvidia-cublas-cu12==12.9.2.10",
-  "nvidia-cudnn-cu12==8.9.7.29",
 ]
 dev = [
   "pytest>=8,<9",

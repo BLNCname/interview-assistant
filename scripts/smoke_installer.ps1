@@ -105,9 +105,9 @@ foreach ($registryRoot in @(
 }
 New-Item -ItemType Directory -Force -Path $runRoot | Out-Null
 New-Item -ItemType Directory -Force -Path (Split-Path -Parent $ReportPath) | Out-Null
-$taskSelection = if ($Profile -eq "full") { '/TASKS="preloadstt,cuda"' } else { '/TASKS=""' }
+$taskSelection = if ($Profile -eq "full") { '/TASKS="preparestt"' } else { '/TASKS=""' }
 $modelArguments = @()
-if ($Profile -eq "core") { $modelArguments = @("--without-model") }
+if ($Profile -ne "offline") { $modelArguments = @("--without-model") }
 
 $install = Start-Process `
     -FilePath $installer `
@@ -119,6 +119,7 @@ $install = Start-Process `
         "/NOCLOSEAPPLICATIONS",
         "/NOICONS",
         $taskSelection,
+        ('/STTCONFIG="' + $missingConfig + '"'),
         "/SP-",
         ('/DIR="' + $smoke + '"'),
         ('/LOG="' + $installLog + '"')
@@ -128,6 +129,14 @@ $install = Start-Process `
     -PassThru
 if ($install.ExitCode -ne 0) {
     throw "Installer smoke installation failed."
+}
+$preparedSpeech = $null
+if ($Profile -eq "full") {
+    $speechReceipt = [IO.Path]::ChangeExtension($missingConfig, "stt-hardware.json")
+    $preparedSpeech = Get-Content -LiteralPath $speechReceipt -Raw | ConvertFrom-Json
+    if ($preparedSpeech.status -ne "ready" -or -not $preparedSpeech.speech_verified) {
+        throw "Setup did not verify a usable speech backend."
+    }
 }
 
 $installedExe = Join-Path $smoke "InterviewAssistant.exe"
@@ -174,7 +183,7 @@ if ($RepeatInstall) {
     $repeat = Start-Process -FilePath $installer -ArgumentList @(
         "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART",
         "/NORESTARTAPPLICATIONS", "/NOCLOSEAPPLICATIONS", "/NOICONS",
-        $taskSelection, "/SP-", ('/DIR="' + $smoke + '"'),
+        $taskSelection, ('/STTCONFIG="' + $missingConfig + '"'), "/SP-", ('/DIR="' + $smoke + '"'),
         ('/LOG="' + (Join-Path $runRoot 'installer-smoke-repeat.log') + '"')
     ) -WindowStyle Hidden -Wait -PassThru
     $repeatExitCode = $repeat.ExitCode
@@ -211,9 +220,10 @@ $result = [PSCustomObject]@{
     DiagnosticsExitCode = $diagnostics.ExitCode
     UninstallExitCode = $uninstall.ExitCode
     Frozen = $diagnosticsReport.frozen
-    ModelInventoryAndHashesValidated = ($Profile -ne "core")
+    ModelInventoryAndHashesValidated = ($Profile -eq "offline")
     SelectedInventoryAndHashesValidated = $true
     Profile = $Profile
+    PreparedSpeech = $preparedSpeech
     InstallTreeRemoved = $true
     RepeatInstallExitCode = $repeatExitCode
     InventoryPath = $inventory

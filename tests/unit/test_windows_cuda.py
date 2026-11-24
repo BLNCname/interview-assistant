@@ -42,7 +42,6 @@ def test_cuda_runtime_registers_complete_directories(tmp_path: Path) -> None:
         "cudart64_12.dll",
         "cublasLt64_12.dll",
         "cublas64_12.dll",
-        "cudnn64_8.dll",
     ]
 
 
@@ -58,7 +57,6 @@ def test_cuda_runtime_reports_each_missing_dll(tmp_path: Path) -> None:
         "cudart64_12.dll",
         "cublas64_12.dll",
         "cublasLt64_12.dll",
-        "cudnn64_8.dll",
     )
 
 
@@ -87,4 +85,4 @@ def test_cuda_runtime_discovers_frozen_nvidia_layout(
     )
 
     assert status.ready
-    assert status.directories == tuple(path.resolve() for path in directories)
+    assert status.directories == tuple(path.resolve() for path in directories[:2])

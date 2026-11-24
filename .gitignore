@@ -25,3 +25,15 @@ interview_assistant.log
 
 # Instructor delivery installer: visible in the folder, intentionally untracked.
 /InterviewAssistant-Setup-*-win64.exe
+
+# Speech weights and machine-specific runtime caches are downloaded on the client.
+*.safetensors
+*.gguf
+*.onnx
+*.ckpt
+*.pt
+*.pth
+**/model.bin
+*.whl
+*.cubin
+/InterviewAssistant-*-win64-*.zip

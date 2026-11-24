@@ -12,13 +12,11 @@ REQUIRED_CUDA_DLLS = (
     "cudart64_12.dll",
     "cublas64_12.dll",
     "cublasLt64_12.dll",
-    "cudnn64_8.dll",
 )
 CUDA_DLL_LOAD_ORDER = (
     "cudart64_12.dll",
     "cublasLt64_12.dll",
     "cublas64_12.dll",
-    "cudnn64_8.dll",
 )
 _DLL_DIRECTORY_HANDLES: list[object] = []
 _DLL_LIBRARY_HANDLES: list[object] = []
@@ -34,7 +32,7 @@ class CudaRuntimeStatus:
         return not self.missing_dlls
 
 
-def _default_directories() -> tuple[Path, ...]:
+def packaged_directories() -> tuple[Path, ...]:
     if bool(getattr(sys, "frozen", False)):
         package_root = Path(getattr(sys, "_MEIPASS"))
     else:
@@ -43,9 +41,31 @@ def _default_directories() -> tuple[Path, ...]:
     candidates = (
         nvidia_root / "cuda_runtime" / "bin",
         nvidia_root / "cublas" / "bin",
-        nvidia_root / "cudnn" / "bin",
     )
     return tuple(path.resolve() for path in candidates if path.is_dir())
+
+
+CUDA_RUNTIME_ID = "cuda12-ct2-4.8.1"
+
+
+def local_runtime() -> Path:
+    from .stt.download import cache_root
+    return cache_root() / "accelerators" / CUDA_RUNTIME_ID
+
+
+def use_driver_cache() -> Path:
+    from .stt.download import cache_root
+    directory = cache_root() / "compiled" / "cuda"
+    directory.mkdir(parents=True, exist_ok=True)
+    os.environ["CUDA_CACHE_PATH"] = str(directory)
+    os.environ.setdefault("CUDA_CACHE_MAXSIZE", "536870912")
+    return directory
+
+
+def _default_directories() -> tuple[Path, ...]:
+    cache = local_runtime()
+    ready = (cache / "verified").is_file()
+    return ((cache,) if ready else ()) + packaged_directories()
 
 
 def bundled_cuda_available() -> bool:
@@ -59,6 +79,8 @@ def configure_cuda_runtime(
     add_directory: Callable[[str], object] | None = None,
     load_library: Callable[[str], object] | None = None,
 ) -> CudaRuntimeStatus:
+    if search_directories is None:
+        use_driver_cache()
     directories = tuple(
         dict.fromkeys(
             Path(path).resolve()

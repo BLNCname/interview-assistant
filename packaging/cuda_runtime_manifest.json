@@ -1,0 +1,36 @@
+{
+  "runtime": "cuda12-ct2-4.8.1",
+  "wheels": [
+    {
+      "display_name": "nvidia_cublas_cu12-12.9.2.10-py3-none-win_amd64.whl",
+      "url": "https://files.pythonhosted.org/packages/20/e2/fc9a0e985249d873150276d5afb02e39a66817fedbf1a385724393e505ed/nvidia_cublas_cu12-12.9.2.10-py3-none-win_amd64.whl",
+      "size": 553162896,
+      "sha256": "623f43027d40d44ceadf0043f002bd25cf353e8f13ce90b9a87057019f560661",
+      "files": [
+        {
+          "path": "nvidia/cublas/bin/cublas64_12.dll",
+          "size": 102518272,
+          "sha256": "52ce5ba0ec5327d39be6021f0f9362d2ed4d64d7206f9b5afc06398d827b8e82"
+        },
+        {
+          "path": "nvidia/cublas/bin/cublasLt64_12.dll",
+          "size": 668673536,
+          "sha256": "71705a7cf0923f4ab034d0d2620bbfc989ff669ac3d79f868b7a7c597ca559c5"
+        }
+      ]
+    },
+    {
+      "display_name": "nvidia_cuda_runtime_cu12-12.9.79-py3-none-win_amd64.whl",
+      "url": "https://files.pythonhosted.org/packages/59/df/e7c3a360be4f7b93cee39271b792669baeb3846c58a4df6dfcf187a7ffab/nvidia_cuda_runtime_cu12-12.9.79-py3-none-win_amd64.whl",
+      "size": 3591604,
+      "sha256": "8e018af8fa02363876860388bd10ccb89eb9ab8fb0aa749aaf58430a9f7c4891",
+      "files": [
+        {
+          "path": "nvidia/cuda_runtime/bin/cudart64_12.dll",
+          "size": 583680,
+          "sha256": "760c38928bbe5759f7b31ed6692599eb7ec83cedd5702e84c2b72028a89837e1"
+        }
+      ]
+    }
+  ]
+}

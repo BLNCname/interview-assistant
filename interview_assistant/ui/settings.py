@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 from collections.abc import Callable, Mapping
 from threading import Thread
 from typing import Literal, Protocol, cast
@@ -37,7 +38,7 @@ from interview_assistant.config import (
     SearchConfig,
     STTDevice,
 )
-from interview_assistant.stt.download import GPU_ENCODERS, MODEL_LABELS, ModelUnavailable, prepare_model
+from interview_assistant.stt.download import GPU_ENCODERS, MODEL_LABELS, ModelUnavailable
 from interview_assistant.ui.hotkey_recorder import HotkeyButton
 from interview_assistant.diagnostics.readiness import ReadinessReport
 from interview_assistant.ui.theme import apply_native_dark_title_bar, status_color
@@ -342,7 +343,7 @@ class CredentialRollbackError(RuntimeError):
 
 
 class SettingsWindow(QMainWindow):
-    download_progress = pyqtSignal(int)
+    download_progress = pyqtSignal(str)
     download_finished = pyqtSignal(str)
     start_requested = pyqtSignal()
     settings_saved = pyqtSignal()
@@ -357,8 +358,10 @@ class SettingsWindow(QMainWindow):
         audio_devices: tuple[SettingsChoice, ...],
         models: tuple[SettingsChoice, ...],
         settings: QSettings | None = None,
+        config_path: Path | None = None,
     ) -> None:
         super().__init__()
+        self._config_path = config_path
         self._binding = binding
         self._settings = (
             settings
@@ -634,12 +637,15 @@ class SettingsWindow(QMainWindow):
         self.gpu_index_spin = QSpinBox(audio)
         self.gpu_index_spin.setRange(0, 255)
         self.gpu_index_spin.setValue(self._binding.config.audio.gpu_index)
-        self.gpu_index_spin.setToolTip("GPU index for OpenVINO or DirectML. The first adapter is 0.")
-        self.download_button = QPushButton("Download model", audio)
+        self.gpu_index_spin.setToolTip("GPU index for CUDA, OpenVINO or DirectML. The first adapter is 0.")
+        self.download_button = QPushButton("Prepare selected model", audio)
+        self.auto_gpu_button = QPushButton("Detect GPU and prepare", audio)
+        self.auto_gpu_button.clicked.connect(self._auto_gpu)
+        self.auto_gpu_button.setEnabled(self._config_path is not None)
         self.download_status = QLabel(audio)
         self.download_status.setWordWrap(True)
         self.download_button.clicked.connect(self._download_model)
-        self.download_progress.connect(lambda n: self.download_status.setText(f"Preparing model… {n}%"))
+        self.download_progress.connect(self.download_status.setText)
         self.download_finished.connect(self._download_done)
         self.stt_compute_combo = QComboBox(audio)
         for label, key in (
@@ -655,6 +661,7 @@ class SettingsWindow(QMainWindow):
         form.addRow("Speech recognition device", self.stt_device_combo)
         form.addRow("GPU index", self.gpu_index_spin)
         form.addRow("Speech recognition precision", self.stt_compute_combo)
+        form.addRow(self.auto_gpu_button)
         form.addRow(self.download_button, self.download_status)
         layout.addWidget(audio)
         layout.addStretch(1)
@@ -890,7 +897,7 @@ class SettingsWindow(QMainWindow):
         selected = self.stt_compute_combo.currentData()
         device = self.stt_device_combo.currentData()
         hybrid = device in GPU_ENCODERS
-        self.gpu_index_spin.setEnabled(hybrid)
+        self.gpu_index_spin.setEnabled(device != "cpu")
         choices = [("Int8", "int8"), ("Float32", "float32")]
         if hybrid:
             choices = [("FP16 GPU encoder / Int8 CPU decoder", "int8"),
@@ -909,40 +916,52 @@ class SettingsWindow(QMainWindow):
         finally:
             self.stt_compute_combo.blockSignals(previous)
 
+    def _auto_gpu(self) -> None:
+        if self._config_path is None:
+            return
+        from .hardware_setup import prepare_dialog
+        result = prepare_dialog(self._config_path, self, model=self.stt_model_combo.currentData())
+        if result:
+            self._select_data(self.stt_device_combo, result["device"])
+            self._select_data(self.stt_compute_combo, result["compute_type"])
+            self.gpu_index_spin.setValue(result["gpu_index"])
+            self.download_status.setText(f"Verified on {result['adapter_name']}. Save to use this profile.")
+
     def _download_model(self) -> None:
         model, device = self.stt_model_combo.currentData(), self.stt_device_combo.currentData()
-        for widget in (self.download_button, self.stt_model_combo, self.stt_device_combo):
+        precision, index = self.stt_compute_combo.currentData(), self.gpu_index_spin.value()
+        for widget in (self.download_button, self.stt_model_combo, self.stt_device_combo,
+                       self.stt_compute_combo, self.gpu_index_spin, self.auto_gpu_button):
             widget.setEnabled(False)
         self.download_status.setText("Checking model files…")
 
         def run() -> None:
-            last_percent = -1
-
-            def progress(done: int, total: int) -> None:
-                nonlocal last_percent
-                percent = done * 100 // total
-                if percent != last_percent:
-                    self.download_progress.emit(percent)
-                    last_percent = percent
-
+            from interview_assistant.stt.adapters import Adapter, detect_adapters
+            from interview_assistant.stt.automatic import prepare_backend
             try:
-                prepare_model(model, device, download=True, progress=progress)
+                target = Adapter("cpu", 0, "CPU") if device == "cpu" else next(
+                    (d for d in detect_adapters() if (d.device, d.index) == (device, index)), None)
+                if target is None:
+                    raise ModelUnavailable("Selected GPU is unavailable. Try automatic detection.")
+                prepare_backend(model, target, precision, self.download_progress.emit)
             except ModelUnavailable as error:
                 message = str(error)
             except OSError:
-                message = "Could not write model files. Check free disk space and retry."
+                message = "Could not prepare local files. Check free space and retry."
             except Exception:
-                message = "Could not prepare the model. Check the connection and retry."
+                message = "Could not prepare the model. Check the graphics driver and network."
             else:
-                message = "Model verified. Run checks to use it."
+                message = "Model and device verified. Run checks to use them."
             self.download_finished.emit(message)
 
-        Thread(target=run, name="stt-model-download", daemon=True).start()
+        Thread(target=run, name="stt-model-preparation", daemon=True).start()
 
     def _download_done(self, message: str) -> None:
         self.download_status.setText(message)
-        for widget in (self.download_button, self.stt_model_combo, self.stt_device_combo):
+        for widget in (self.download_button, self.stt_model_combo, self.stt_device_combo, self.stt_compute_combo):
             widget.setEnabled(True)
+        self.gpu_index_spin.setEnabled(self.stt_device_combo.currentData() != "cpu")
+        self.auto_gpu_button.setEnabled(self._config_path is not None)
 
     def set_audio_choices(self, devices: tuple[SettingsChoice, ...]) -> None:
         self._populate_audio_choices(devices, self.system_device_combo.currentData(),

@@ -1,3 +1,4 @@
+from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
@@ -34,6 +35,9 @@ def test_openvino_compiles_for_intel_adapter_and_encodes_mel_window(monkeypatch,
 
         def get_property(self, device, prop):
             return {"GPU.0": "NVIDIA", "GPU.1": "Intel Arc"}[device]
+
+        def set_property(self, properties):
+            assert Path(properties["CACHE_DIR"]).is_dir()
 
         def read_model(self, _):
             return SimpleNamespace(reshape=lambda shape: shapes.append(shape))

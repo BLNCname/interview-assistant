@@ -207,8 +207,6 @@ def validate_distribution(
 
     model_dir = internal.joinpath(*bundle.parts)
     if without_model:
-        if not installed:
-            raise DistValidationError
         expected_model = {}
     else:
         _check_node(model_dir, directory=True)
@@ -220,6 +218,8 @@ def validate_distribution(
         relative = path.relative_to(dist)
         relative_key = relative.as_posix().casefold()
         folded_parts = tuple(part.casefold() for part in relative.parts)
+        if without_model and not installed and folded_parts[:2] in {("_internal", "models"), ("_internal", "nvidia")}:
+            raise DistValidationError
         name = path.name.casefold()
         if is_directory:
             if name in SUSPICIOUS_DIRECTORY_NAMES:
@@ -243,7 +243,8 @@ def validate_distribution(
             allowlisted = ALLOWLISTED_RUNTIME_MODELS.get(normalized_relative)
             info = _check_node(path, directory=False)
             if (
-                allowlisted is None
+                (without_model and not installed)
+                or allowlisted is None
                 or info.st_size != allowlisted[0]
                 or _digest(path) != allowlisted[1]
             ):

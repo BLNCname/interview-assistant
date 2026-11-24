@@ -27,8 +27,26 @@ GPU_ENCODERS = {"openvino": "OpenVINO", "directml": "DirectML"}
 Progress = Callable[[int, int], None]
 
 
+def progress_messages(label: str, report: Callable[[str], None]) -> Progress:
+    last = -1
+    def update(done: int, total: int) -> None:
+        nonlocal last
+        step = min(20, done * 20 // max(total, 1))
+        if step != last:
+            report(f"{label}: {step * 5}%")
+            last = step
+    return update
+
+
 class ModelUnavailable(RuntimeError):
     """A user-facing STT error with no paths, URLs or credentials."""
+
+
+def cache_root() -> Path:
+    override = os.environ.get("INTERVIEW_ASSISTANT_CACHE_DIR")
+    return Path(override) if override and Path(override).is_absolute() else user_cache_path(
+        "InterviewAssistant", appauthor=False
+    )
 
 
 @dataclass(frozen=True)
@@ -76,9 +94,9 @@ def _endpoints() -> tuple[str, ...]:
 
 
 def _fetch(client: httpx.Client, target: Path, file: ModelFile, resource: str,
-           progress: Callable[[int], None]) -> None:
+           progress: Callable[[int], None], *, urls: tuple[str, ...] = ()) -> None:
     partial = target.with_suffix(target.suffix + ".part")
-    endpoints = _endpoints()
+    sources = urls or tuple(endpoint + resource for endpoint in _endpoints())
     for attempt in range(3):
         offset = partial.stat().st_size if partial.exists() else 0
         if offset >= file.size:
@@ -87,7 +105,7 @@ def _fetch(client: httpx.Client, target: Path, file: ModelFile, resource: str,
                 return
             partial.unlink()
             offset = 0
-        url = endpoints[attempt % len(endpoints)] + resource
+        url = sources[attempt % len(sources)]
         headers = {"Accept-Encoding": "identity"}
         if offset:
             headers["Range"] = f"bytes={offset}-"
@@ -136,7 +154,7 @@ def prepare_snapshot(data: Snapshot, *, download: bool, progress: Callable[[int]
         if all(_valid(root / f.path, f) for f in data.files):
             progress(sum(f.size for f in data.files))
             return root
-    root = (cache or user_cache_path("InterviewAssistant", appauthor=False)) / "stt" / data.revision
+    root = (cache or cache_root()) / "stt" / data.revision
     root.mkdir(parents=True, exist_ok=True)
     done = 0
     lock = FileLock(root / ".download.lock")
